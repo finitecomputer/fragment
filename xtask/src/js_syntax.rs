@@ -88,6 +88,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/frame-standin.test.mjs",
     "cell/shell-tests/history-page.test.mjs",
     "cell/shell-tests/launcher-knowledge.test.mjs",
+    "cell/shell-tests/layout.test.mjs",
     "cell/shell-tests/light-dismiss.test.mjs",
     "cell/shell-tests/limits.test.mjs",
     "cell/shell-tests/making.test.mjs",
@@ -103,6 +104,7 @@ const SHELL_TESTS: &[&str] = &[
     "cell/shell-tests/simplex-settings.test.mjs",
     "cell/shell-tests/skills-page.test.mjs",
     "cell/shell-tests/telegram-settings.test.mjs",
+    "cell/shell-tests/theme.test.mjs",
     "cell/shell-tests/threads.test.mjs",
 ];
 
@@ -327,10 +329,10 @@ mod tests {
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
         // the Worker's restore reads, a SimpleX door's object and its rules, and a computer's intercepts (each beside
         // the module it tests), the shell's tests, and the board's, brain's
-        // and the SimpleX and Telegram connectors' apps' and the slides' build's and
-        // presenter's (beside the templates crate: a file under templates/
-        // would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/door-rules.test.mjs", "cell/door.test.mjs", "cell/intercepts.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/simplex_connector.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        // and the SimpleX and Telegram connectors' apps' and their question's
+        // and SimpleX's setup page's, and the slides' build's and presenter's (beside the
+        // templates crate: a file under templates/ would ship with its template)
+        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/door-rules.test.mjs", "cell/door.test.mjs", "cell/intercepts.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/door_question.test.mjs", "crates/templates/tests/simplex_connector.test.mjs", "crates/templates/tests/simplex_setup_page.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

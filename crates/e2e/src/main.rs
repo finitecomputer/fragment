@@ -106,15 +106,36 @@ pub const STANDARD_LABEL: &str = "Standard";
 
 /// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
 /// (`fragment_core::models::Models::defaults`), each route labelled, so its
-/// Settings offers two routes (Paul, 2026-10-24). Named as configs named
-/// them before routes were a list, and read as a deploy reads one
+/// Settings offers two routes (Paul, 2026-10-24), and its transcriptions on
+/// Workers AI's Whisper (`whisper_slot`), as preview's are. Named as configs
+/// named them before routes were a list, and read as a deploy reads one
 /// (`fragment_core::models::legacy`), so the e2e runs today's configs.
 pub fn plain_models() -> Value {
     listed(json!({
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
-        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
+        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL },
+        "transcription": whisper_slot()
     }))
 }
+
+/// A transcription slot on Workers AI's Whisper large v3 turbo at its 46.63
+/// neurons a minute (its pricing page, read 2026-10-07), as preview's
+/// config names it: the fake answers it as its catalog says.
+pub fn whisper_slot() -> Value {
+    json!({ "provider": "workers_ai", "model": fragment_fakes::workers_ai::TRANSCRIBE_MODEL, "price": { "neurons_a_minute": WHISPER_NEURONS_A_MINUTE } })
+}
+
+/// `whisper_slot`'s price, neurons a minute of audio.
+pub const WHISPER_NEURONS_A_MINUTE: f64 = 46.63;
+
+/// The transcription slot's key on a node shaped as the private tier
+/// (`Shape::PrivateTier`): a test value, which the model fake asks for of
+/// its transcription model alone.
+pub const TRANSCRIPTION_KEY: &str = "tk_transcribe_e2e";
+
+/// The price of the private tier's transcription slot, dollars a minute of
+/// audio: OpenAI's whisper-1 list (2026-11-24), a test value.
+pub const TRANSCRIPTION_AUDIO_MINUTE: f64 = 0.006;
 
 /// A config's `models` of the shape before routes were a list, as the cell
 /// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
@@ -157,7 +178,10 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
 /// (`private_deep`), falling back to Private's Fast; Standard's
 /// OpenRouter's (`standard_deep`, at its own ceiling,
-/// `openrouter_deep_routing`), falling back to Cloudflare.
+/// `openrouter_deep_routing`), falling back to Cloudflare. Its
+/// transcriptions on an OpenAI-compatible API, a self-hosted Whisper
+/// server (the fake's face), on a key of their own (`TRANSCRIPTION_KEY`),
+/// at `TRANSCRIPTION_AUDIO_MINUTE`.
 pub fn private_tier_models(fake: &str) -> Value {
     let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
@@ -168,7 +192,10 @@ pub fn private_tier_models(fake: &str) -> Value {
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep }))
+    // its transcriptions on a self-hosted Whisper server, the fake's
+    // OpenAI-compatible face, at the dollars a minute its slot names
+    let transcription = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": TRANSCRIPTION_AUDIO_MINUTE } });
+    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep, "transcription": transcription }))
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private
@@ -312,7 +339,9 @@ pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
-    let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
+    let named = config["providers"].as_array().context("deploy/e2e.jsonc names its providers")?;
+    // a connection named by its row is that row (devstack::rows), as a deploy reads it
+    let mut rows = devstack::rows::resolved(named, &devstack::repo_root())?;
     for r in &mut rows {
         r.as_object_mut().context("a provider is an object")?.remove("key");
         if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
@@ -421,6 +450,8 @@ pub struct Suite {
     skipped: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
     ran: Vec<String>,
+    /// What the section running said it needs and uses (`section_using`).
+    declared: Vec<Need>,
     /// A lane stopped early: the next section to run gets the node back as
     /// the lanes expect it first.
     recovery_due: bool,
@@ -485,6 +516,10 @@ pub struct Suite {
     pub scratch: PathBuf,
     /// The node's own copy of the cell project (never `cell/`, where `xtask dev` runs).
     project: PathBuf,
+    /// On celld, the run's directory in RAM (devstack::shm), where `project`
+    /// is staged, so where `celld dev` keeps its state, and where OpenBao
+    /// keeps its: removed as the run ends, however it ends.
+    ram: Option<devstack::shm::RunDir>,
     /// The identity door a node shaped `Shape::Door` signs people in
     /// through (`start_through_door`).
     door_url: Option<String>,
@@ -511,6 +546,12 @@ impl Drop for Suite {
         drop(self.node.take());
         if let Err(e) = self.remove_containers() {
             println!("      could not remove this run's containers or images: {e:#}");
+        }
+        // its state in RAM goes with it (the field's drop), OpenBao's logs
+        // kept in the scratch first, once OpenBao is stopped
+        if let Some(ram) = &self.ram {
+            drop(self.openbao.take());
+            keep_openbao_logs(ram.path(), &self.scratch);
         }
     }
 }
@@ -566,6 +607,12 @@ impl Suite {
         self.celld.is_some()
     }
 
+    /// Whether the run names a real SimpleX link (`simplex-link`): its
+    /// doors then reach the internet (`Fleet::door_internet`).
+    fn links_simplex(&self) -> bool {
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == lanes::simplex_setup::LINK))
+    }
+
     /// Whether the stack runs SimpleX doors: a deployment whose config names
     /// them; a local one whose node runs them (`node_doors`: a run of the
     /// door's lane, which runs by name alone).
@@ -575,8 +622,28 @@ impl Suite {
 
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
+    /// The section asking has said it uses them, or its lone run's node
+    /// would have none (`node_classes`).
     pub fn runs_computers(&self) -> bool {
+        self.declares_computers("runs_computers");
+        self.runtime_runs_computers()
+    }
+
+    /// `runs_computers`, for the node's own boot, which is no section's.
+    fn runtime_runs_computers(&self) -> bool {
         self.celld.as_ref().is_none_or(|c| c.engine.computers())
+    }
+
+    /// The section running said it uses computers (in what it needs, or in
+    /// what it uses where the run has them): `asked` is how it asks for
+    /// one now. One that had not is planned as using none, so run alone
+    /// its node has none, while a whole run's node would let it pass.
+    fn declares_computers(&self, asked: &str) {
+        let section = self.ran.last().map(String::as_str).unwrap_or_default();
+        assert!(
+            uses_computers(&self.declared),
+            "{section} asks for a computer ({asked}) and never said it uses one: name Need::Computers in what it needs, or in what it uses (Suite::section_using)"
+        );
     }
 
     /// Whether the node runs its Worker and every object in one isolate
@@ -625,6 +692,14 @@ impl Suite {
         self.preview.is_none()
     }
 
+    /// Whether `--only` names `name`, a part of a section that runs by name
+    /// alone, the section named beside it: counted as asked, so naming it
+    /// is no unknown name.
+    pub fn names(&mut self, name: &str) -> bool {
+        self.asked.push(name.to_string());
+        self.only.as_ref().is_some_and(|only| only.iter().any(|o| o == name))
+    }
+
     /// A heavy section runs only when `--only` names it (the real-Hermes
     /// lane builds a 3.8 GB image); otherwise it is a skip that says how.
     pub fn section_by_name(&mut self, name: &str, needs: &[Need], why: &str) -> bool {
@@ -656,6 +731,10 @@ impl Suite {
     /// Whether the section `name`, needing `needs`, runs in this suite:
     /// selected, on a rung that has what it needs, and not a dry run.
     pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
+        // the section running, asking whether it has a computer to check
+        if self.plan.is_none() && self.ran.last().is_some_and(|running| running == name) && uses_computers(needs) {
+            self.declares_computers("Suite::runs");
+        }
         self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
     }
 
@@ -686,6 +765,8 @@ impl Suite {
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
+        self.declared = needs.iter().chain(uses).copied().collect();
+        self.shared.section_starts(name, uses_computers(&self.declared));
         // a section that stopped early leaves Stripe's events as it held
         // them: each starts with them going out (billing-page's early stop
         // once held trials' webhooks back, failing its checks besides)
@@ -907,6 +988,7 @@ impl Suite {
                         key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         key("private_deep", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("standard_deep", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
+                        key("transcription", "fragment-transcription-key", TRANSCRIPTION_KEY),
                     ],
                     _ => vec![],
                 }
@@ -954,15 +1036,17 @@ impl Suite {
             // on celld, computers only on the krun engine: they need the
             // runtime's egress intercepts and snapshots (docs/self-host.md,
             // seam 2)
-            computer_image: (self.runs_computers() && self.node_computers).then(|| "stub".into()),
+            computer_image: (self.runtime_runs_computers() && self.node_computers).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // each container class, and its images built at every boot, only
             // for a run whose sections use it (`node_classes`)
             computers: self.node_computers,
             doors: self.node_doors,
-            // a run must not depend on public DNS (devstack::Fleet)
+            // a run must not depend on public DNS (devstack::Fleet), but
+            // for a door that links to SimpleX's servers for real
             computer_internet: false,
+            door_internet: self.links_simplex(),
             computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;
@@ -1084,6 +1168,12 @@ impl Suite {
     /// hosted run, which starts no node. Answers how many of each went.
     fn remove_containers(&mut self) -> Result<Option<(u32, u32)>> {
         if self.tools.is_none() || self.containers_removed {
+            return Ok(None);
+        }
+        // a wrangler node that ran no container class left none and built
+        // no image: its run asks Docker nothing, on a machine that may
+        // have none running (`node_classes`)
+        if self.celld.is_none() && !self.node_computers && !self.node_doors {
             return Ok(None);
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
@@ -1342,16 +1432,22 @@ pub fn cli_data(args: &[&str], out: &Output) -> Result<Value> {
 }
 
 /// The lines a node's Workers logged as JSON, read from its log
-/// (`Suite::node_log`), each past the `[<worker>] ` a node of several
-/// Workers (the cell and the admin, in one `wrangler dev`) puts before
-/// every line of theirs; any other line passed over.
+/// (`Suite::node_log`), each past what the node puts before it: the
+/// `[<worker>] ` of a node of several Workers (the cell and the admin, in
+/// one `wrangler dev`), or celld's own log line (`<time>  INFO
+/// cell_console: `, then `ERROR ` or `WARN ` for a `console.error` or a
+/// `console.warn`); any other line passed over.
 pub fn logged_json(log: &str) -> Vec<Value> {
+    fn celld(l: &str) -> Option<&str> {
+        let (head, line) = l.split_once(" cell_console: ")?;
+        head.ends_with(" INFO").then(|| line.strip_prefix("ERROR ").or_else(|| line.strip_prefix("WARN ")).unwrap_or(line))
+    }
     let worker = |name: &str| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
     log.lines()
         .map(str::trim)
         .map(|l| match l.strip_prefix('[').and_then(|r| r.split_once("] ")) {
             Some((name, line)) if worker(name) => line,
-            _ => l,
+            _ => celld(l).unwrap_or(l),
         })
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .collect()
@@ -1466,7 +1562,6 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     let run = run_name();
     let scratch = root.join("target/e2e").join(&run);
     make_scratch(&scratch)?;
-    let project = devstack::stage_project(&scratch.join("cell"))?;
     // the runtime: wrangler dev's workerd, or celld (docs/self-host.md, seam 1)
     let celld = match std::env::var("FRAGMENT_E2E_RUNTIME").as_deref() {
         Err(_) | Ok("wrangler") => None,
@@ -1474,19 +1569,52 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Ok("celld") => Some(devstack::celld::CelldTools::locate()?),
         Ok(other) => bail!("FRAGMENT_E2E_RUNTIME is wrangler or celld, not {other}"),
     };
+    // On celld, the project is staged in RAM, and with it the node's state
+    // (devstack::shm): on the home disk, another job's writes stalled every
+    // SQLite call of the node until it fenced itself (FIN-728). The run's
+    // logs stay in its scratch, on disk.
+    let ram = match &celld {
+        Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES, RAM_RUNS)?),
+        None => None,
+    };
+    if let Some(ram) = &ram {
+        // where this run's scratch is, should a later run sweep this one's
+        // RAM (`keep_gone_runs_logs`)
+        std::fs::write(ram.path().join(SCRATCH_NOTE), scratch.display().to_string()).with_context(|| format!("note the scratch in {}", ram.path().display()))?;
+        // celld bundles the project's bare imports (`@cloudflare/sandbox`)
+        // from the repo's node_modules, which esbuild looks for above the
+        // project: staged outside the repo, the run's directory links it
+        // (a link its removal takes, never what it links to)
+        let modules = root.join("node_modules");
+        std::os::unix::fs::symlink(&modules, ram.path().join("node_modules")).with_context(|| format!("link {} into {}", modules.display(), ram.path().display()))?;
+    }
+    let state = ram.as_ref().map_or(scratch.as_path(), |r| r.path()).to_path_buf();
+    let cell = state.join("cell");
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
     // kills it and all else it started (the Chromes: `on_termination`),
     // then removes the containers it left (on celld's krun engine, its VMs)
-    let leftovers = project.clone();
+    // and its state in RAM, keeping OpenBao's logs in its scratch. Installed
+    // before the project is staged, which can wait on a build.
+    let leftovers = cell.clone();
     let engine = celld.as_ref().map(|c| c.engine.clone());
+    let in_ram = ram.as_ref().map(devstack::shm::RunDir::remover);
+    let (logs_from, logs_to) = (state.clone(), scratch.clone());
     devstack::signals::on_termination(move |signal| {
         println!("\nsignal {signal}: the run stopped its node and browsers, and removes its containers and images");
         match remove_leftovers(&leftovers, engine.as_ref()) {
             Ok((containers, images)) => println!("      (removed {containers} containers and {images} images of this run)"),
             Err(e) => println!("      could not remove this run's containers or images: {e:#}"),
         }
+        if let Some(in_ram) = &in_ram {
+            keep_openbao_logs(&logs_from, &logs_to);
+            match in_ram.remove() {
+                Ok(()) => println!("      (removed the run's state from RAM)"),
+                Err(e) => println!("      could not remove the run's state from RAM (the next run removes it): {e:#}"),
+            }
+        }
     })?;
+    let project = devstack::stage_project(&cell)?;
     if only.as_ref().is_some_and(|o| o.iter().any(|n| n == lanes::hermes::SECTION)) {
         lanes::hermes::stage_images(&project)?;
     }
@@ -1497,7 +1625,12 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     // the cell's secrets: wrangler's store, or celld's node's backend, a
     // file of their values or OpenBao (celld's default)
     let (secrets, with_openbao) = secrets_of(celld.is_some(), std::env::var("FRAGMENT_E2E_SECRETS").ok().as_deref())?;
-    let openbao = with_openbao.then(|| openbao(&scratch)).transpose()?;
+    // in the run's RAM on celld, beside the node's state: on disk, another
+    // job's writes held a secret's read past its deadline
+    let openbao = with_openbao.then(|| openbao(&state, &scratch)).transpose()?;
+    // until the suite holds OpenBao (its drop keeps them), its logs are
+    // kept should what starts next fail
+    let logs = KeepOpenBaoLogs { state: state.clone(), scratch: scratch.clone(), armed: openbao.is_some() };
     // a local run's people sign in through the WorkOS fake, and pay the fake
     // model; a rehearsal's, through the levers, lent paid calls as on a preview
     let rung = local_rung(celld.as_ref(), rehearse);
@@ -1529,6 +1662,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         failed: vec![],
         skipped: vec![],
         ran: vec![],
+        declared: vec![],
         recovery_due: false,
         lost: None,
         cron: None,
@@ -1558,6 +1692,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         cli,
         scratch,
         project,
+        ram,
         shape: Shape::Plain,
         door_url: None,
         secrets,
@@ -1565,6 +1700,9 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         node_computers,
         node_doors,
     };
+    // the suite holds OpenBao now, and keeps its logs as it ends
+    let mut logs = logs;
+    logs.armed = false;
     if let Some(k) = s.shard {
         println!("shard {k}/{}: {}", lanes::SHARDS.len(), lanes::SHARDS[k as usize - 1].join(", "));
     }
@@ -1585,23 +1723,21 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
     finish(&mut s)
 }
 
-/// Removes what a run's nodes left on `project`: their containers and
-/// sidecars (on celld's krun `engine`, its VMs too), then the images they
-/// built (none on celld's engine that runs no computer), labeled for it (devstack::containers `remove_images`), so a
-/// run's images go with it: each run is a project of its own, whose
-/// images no later run uses. Answers how many containers and images.
+/// Removes what a run's nodes left on `project`. A wrangler node's: their
+/// containers and sidecars, then the images they built, labeled for it
+/// (devstack::containers `remove_images`), so a run's images go with it:
+/// each run is a project of its own, whose images no later run uses. A
+/// celld node's: the VMs it left on its krun `engine` (a node's own stop
+/// reaps them; one killed outright did not), and no image: it built them
+/// in that engine (docs/self-host.md, seam 2), under names by their
+/// content that the next run builds again, so Docker is never asked.
+/// Answers how many containers and images.
 fn remove_leftovers(project: &Path, engine: Option<&devstack::celld::Engine>) -> Result<(u32, u32)> {
-    // on celld's krun engine, the VMs a node killed outright left (a
-    // node's own stop reaps them)
-    let krun = engine.map_or(Ok(0), |e| e.remove(project))?;
-    let containers = devstack::containers::remove(project)?.containers + krun;
-    // a celld node whose engine runs no computer built no image, on a
-    // machine that may have no Docker (docs/self-host.md, seam 2)
-    let images = match engine {
-        Some(e) if !e.computers() => 0,
-        _ => devstack::containers::remove_images(project)?,
-    };
-    Ok((containers, images))
+    if let Some(engine) = engine {
+        return Ok((engine.remove(project)?, 0));
+    }
+    let containers = devstack::containers::remove(project)?.containers;
+    Ok((containers, devstack::containers::remove_images(project)?))
 }
 
 /// Where a local run runs (its node's, as `local` starts it, celld's
@@ -1618,25 +1754,92 @@ fn local_rung(celld: Option<&devstack::celld::CelldTools>, rehearse: Option<u64>
     }
 }
 
+/// Whether what a section names gives a local node its computers' class:
+/// computers, or this machine's Docker.
+fn uses_computers(needs: &[Need]) -> bool {
+    needs.iter().any(|n| matches!(n, Need::Computers | Need::LocalDocker))
+}
+
 /// The container classes a local node runs, by its run's plan: computers
 /// (`devstack::COMPUTER_CLASS`) when a section it runs needs or uses
 /// computers or this machine's Docker, and SimpleX doors (`DOOR_CLASS`)
 /// when one needs doors. With none, the node's config names no container,
 /// so its boot builds no image.
 fn node_classes(planned: &[Planned]) -> (bool, bool) {
-    let computers = Need::Computers.used_by(planned) || Need::LocalDocker.used_by(planned);
+    let computers = planned.iter().any(|p| p.skip.is_none() && (uses_computers(&p.needs) || uses_computers(&p.uses)));
     (computers, Need::Doors.used_by(planned))
 }
 
 /// The run's OpenBao (docs/self-host.md, seam 12): the pinned binary, its
 /// state in the run's scratch, on a free loopback port, every request in
 /// its audit log (read at the run's end: `openbao_reads`).
-fn openbao(scratch: &Path) -> Result<devstack::openbao::OpenBao> {
+fn openbao(state: &Path, scratch: &Path) -> Result<devstack::openbao::OpenBao> {
     let bin = devstack::openbao::locate(&devstack::repo_root().join(devstack::TOOLS_DIR))?;
-    let opts = devstack::openbao::Options { dir: scratch.join("openbao"), port: devstack::free_port()?, audit: true };
-    let (bao, took) = devstack::openbao::OpenBao::start(&bin, opts)?;
+    let opts = devstack::openbao::Options { dir: state.join("openbao"), port: devstack::free_port()?, audit: true };
+    let (bao, took) = match devstack::openbao::OpenBao::start(&bin, opts) {
+        Ok(started) => started,
+        Err(e) => {
+            // its log goes with the run's RAM: kept in the scratch first
+            keep_openbao_logs(state, scratch);
+            return Err(anyhow!(e).context(format!("OpenBao did not start (its logs, kept: {})", scratch.join("openbao").display())));
+        }
+    };
     println!("secrets: OpenBao {} at {} (ready in {took:.1?}; every secret read by the celld node)", devstack::openbao::OPENBAO_VERSION, bao.target().addr);
     Ok(bao)
+}
+
+/// A celld run's RAM directories (devstack::shm): named by run ids, and a
+/// gone run's OpenBao logs kept before its directory goes.
+const RAM_RUNS: devstack::shm::Runs = devstack::shm::Runs { is_run: hosted::sweep::is_run, before_removing: keep_gone_runs_logs };
+
+/// In a run's RAM directory: the path of its scratch, on disk.
+const SCRATCH_NOTE: &str = "scratch";
+
+/// A run killed outright kept nothing of its RAM: before a later run's
+/// sweep removes it, its OpenBao logs go to its scratch (`SCRATCH_NOTE`),
+/// as its own end would have put them.
+fn keep_gone_runs_logs(dir: &Path) {
+    let Ok(scratch) = std::fs::read_to_string(dir.join(SCRATCH_NOTE)) else { return };
+    let scratch = PathBuf::from(scratch);
+    if scratch.is_dir() {
+        keep_openbao_logs(dir, &scratch);
+    }
+}
+
+/// OpenBao's own log and its audit log, copied from `state` (the run's RAM)
+/// into `scratch` (`openbao/`), kept for a look after its RAM is removed.
+/// Copied, not written there: OpenBao answers a request only once its audit
+/// log has it, and a log on the busy disk would hold every secret's read.
+/// Nothing to copy when `state` is the scratch (a wrangler run's).
+fn keep_openbao_logs(state: &Path, scratch: &Path) {
+    if state == scratch {
+        return;
+    }
+    let (from, to) = (state.join("openbao"), scratch.join("openbao"));
+    for name in ["openbao.log", "audit.log"] {
+        if !from.join(name).is_file() {
+            continue;
+        }
+        if let Err(e) = std::fs::create_dir_all(&to).and_then(|()| std::fs::copy(from.join(name), to.join(name))) {
+            println!("      could not keep OpenBao's {name} in {}: {e}", to.display());
+        }
+    }
+}
+
+/// OpenBao's logs kept (`keep_openbao_logs`) when this drops armed: a
+/// run's setup failing between OpenBao's start and the suite that holds it.
+struct KeepOpenBaoLogs {
+    state: PathBuf,
+    scratch: PathBuf,
+    armed: bool,
+}
+
+impl Drop for KeepOpenBaoLogs {
+    fn drop(&mut self) {
+        if self.armed {
+            keep_openbao_logs(&self.state, &self.scratch);
+        }
+    }
 }
 
 /// What the run asked of OpenBao, from its audit log: the cell's reads of
@@ -1686,6 +1889,17 @@ fn finish(s: &mut Suite) -> Result<()> {
             s.fail("OpenBao stops at the end of the run", format!("{e:#}"));
         }
     }
+    // on celld, the node's state and OpenBao's, in RAM: gone with the run,
+    // once both are stopped, and before an exit that runs no drop (OpenBao's
+    // logs kept in the scratch, with the run's own)
+    if let Some(ram) = s.ram.take() {
+        keep_openbao_logs(ram.path(), &s.scratch);
+        let t0 = Instant::now();
+        match ram.remove() {
+            Ok(()) => println!("      (the run's state removed from RAM in {:.1?})", t0.elapsed()),
+            Err(e) => s.fail("the run removes its state from RAM", format!("{e:#}")),
+        }
+    }
     let skipped = match s.hosted() || s.on_celld() {
         true => "skipped (each says why)",
         false => "skipped (the hosted lane's)",
@@ -1731,10 +1945,12 @@ mod tests {
         assert_eq!(classes(Some(&["simplex-door"]), &[], None), (false, true));
         assert_eq!(classes(Some(&["computers", "simplex-door"]), &[], None), (true, true));
         assert_eq!(classes(Some(&["admin"]), &[], None), (true, false), "admin uses computers where the run makes them");
-        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer"), ("billing", "its wipes"), ("move", "its wipes"), ("governance", "its wipes")] {
+        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer")] {
             assert_eq!(classes(Some(&[section]), &[], None), (true, false), "{section} uses computers: {uses}");
         }
         assert_eq!(classes(Some(&["auth", "create", "keys"]), &[], None), (false, false));
+        // a wipe finishes on a node with no computers' class (FIN-661)
+        assert_eq!(classes(Some(&["billing", "governance", "move"]), &[], None), (false, false), "their wipes need no computer");
         assert_eq!(classes(Some(&["chat"]), &[], None), (true, false), "this machine's Docker");
     }
 
@@ -1747,5 +1963,17 @@ mod tests {
         let log = "[fragment] {\"egress\":\"swap\",\"status\":200}\n{\"egress\":\"api\"}\n[fragment--admin] {\"n\":1}\n[wrangler:info] Ready on http://127.0.0.1:1\n[1,2] not a line of ours\n[Bad Name] {\"n\":2}\n  [fragment] {\"n\":3}  \n";
         let read = super::logged_json(log);
         assert_eq!(read, [serde_json::json!({ "egress": "swap", "status": 200 }), serde_json::json!({ "egress": "api" }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 3 })]);
+    }
+
+    /// Goal: on celld (`FRAGMENT_E2E_RUNTIME=celld`) a Worker's JSON line
+    /// is read past celld's own log line, whichever console call wrote it,
+    /// and celld's other lines are not read as one.
+    /// Method: lines as `celld dev` wrote them on 2026-11-24 (its
+    /// `console.error` and `console.warn` with their level before the line).
+    #[test]
+    fn a_workers_json_lines_are_read_past_celld_s_log_line() {
+        let log = "2026-11-24T21:41:57.320083Z  INFO cell_console: {\"egress\":\"swap\",\"grantsMs\":1,\"ownMs\":62}\n2026-11-24T21:41:57.4Z  INFO cell_console: ERROR {\"n\":1}\n2026-11-24T21:41:57.5Z  INFO cell_console: WARN {\"n\":2}\n2026-11-24T21:41:57.6Z  INFO celld::container_krun: {\"event\":\"bridge.boot\"} event=\"container_output\"\n2026-11-24T21:41:57.7Z  INFO cell_console: not json\n";
+        let read = super::logged_json(log);
+        assert_eq!(read, [serde_json::json!({ "egress": "swap", "grantsMs": 1, "ownMs": 62 }), serde_json::json!({ "n": 1 }), serde_json::json!({ "n": 2 })]);
     }
 }

@@ -4282,7 +4282,9 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
 }
 
 /// `resp` with `frame-ancestors <platform>` added (an image's own policy
-/// stays: a second one only narrows it). A socket's upgrade shows nothing,
+/// stays: a second one only narrows it), and without the headers that
+/// would widen a service worker's scope here
+/// (`fragment_core::computer::origin`). A socket's upgrade shows nothing,
 /// and keeps the answer it had.
 fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
     assert!(fragment_core::frames::is_origin(platform), "frame-ancestors names the platform's origin alone");
@@ -4290,6 +4292,9 @@ fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
         return Ok(resp);
     }
     let h = resp.headers().clone();
+    for k in fragment_core::computer::origin::DROPPED_ANSWER_HEADERS {
+        h.delete(k)?;
+    }
     h.append("content-security-policy", &format!("frame-ancestors {platform}"))?;
     Ok(resp.with_headers(h))
 }
@@ -4317,6 +4322,15 @@ fn session_of(req: &Request, url: &Url) -> CellResult<Option<String>> {
 }
 
 async fn host_answer(req: Request, env: &Env, url: &Url, id: &str, signer: Option<String>) -> CellResult<Response> {
+    // A computer's origin is its owner's for good, and a service worker
+    // registered there would outlive the computer's restarts, restores and
+    // agents, seeing every later navigation on its scope (`/__ticket`'s
+    // among them). The platform serves none here, so none registers: a
+    // worker's script is asked for with `Service-Worker: script` (no
+    // page's code sets it), as on a fragment's origin (serve.rs).
+    if fragment_core::computer::origin::refused(req.headers().get("service-worker")?.as_deref()) {
+        return Err(CellError::new(ErrorCode::NotFound, "no service worker is served on a computer's origin"));
+    }
     let path = url.path().to_string();
     let secure = url.scheme() == "https";
     if path == "/__ticket" {

@@ -1,0 +1,21 @@
+// The person's GitLab.com account: Pipes' `gitlab` provider, connected
+// through the browser once its OAuth app's secret is in the store (the app
+// Pipes' GitLab integration uses, with the platform's callback beside
+// Pipes', allowed the four scopes below). gitlab.com alone: a self-managed
+// GitLab is each customer's own host. Read only asks for `read_api`, read
+// and write for `api` (all the person may do through the API, their code
+// included), each with `openid email` for the label. Tokens last two hours;
+// a refresh replaces the refresh token too. Its API is /api/v4, but the
+// token goes to any path on gitlab.com, as a bearer token alone: Git over
+// HTTPS, a password, is refused. GitLab's revocation needs the client's
+// secret beside the token, which a disconnect does not send, so the row
+// names none: the person revokes the app in GitLab (Edit profile →
+// Applications). Its client id is the app's application id. Its skill is
+// gitlab-finite.
+{ "name": "gitlab", "kind": "connection", "title": "GitLab",
+  "hosts": ["gitlab.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "connection_oauth": { "authorize": "https://gitlab.com/oauth/authorize", "exchange": "https://gitlab.com/oauth/token",
+    "access": { "read": { "scopes": ["read_api", "openid", "email"] }, "write": { "scopes": ["api", "openid", "email"] } } },
+  "scope_names": { "read_api": "API (read)", "api": "API" },
+  "env": ["GITLAB_OAUTH_ACCESS_TOKEN"] }

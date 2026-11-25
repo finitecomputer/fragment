@@ -347,6 +347,13 @@ pub(crate) fn acting_for(url: &Url) -> CellResult<Option<String>> {
     }
 }
 
+/// Whether a request names whom it acts for, by `for` or by a mandate (its
+/// proof: `fragment_core::mandate`): what a route that takes neither
+/// refuses (400, `FOR_HONORED`), so neither is ever silently dropped.
+pub(crate) fn names_for(req: &Request, url: &Url) -> CellResult<bool> {
+    Ok(acting_for(url)?.is_some() || req.headers().get(fragment_core::mandate::HEADER)?.is_some())
+}
+
 /// Where `for` is honored (`signer_for`: docs/api.md, Principals and
 /// access), as a refusal elsewhere says it.
 pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/api/f/…), a search across fragments (POST /api/search), /api/fragments, the model routes (/api/models/…) and a move's copy (POST /api/migrations/stages/…/copy) only";
@@ -355,7 +362,7 @@ pub(crate) const FOR_HONORED: &str = "`for` is honored on a fragment's routes (/
 /// the router read. It acts as itself: a `for` is refused here
 /// (`FOR_HONORED`), and the routes that honor one call `signer_for`.
 pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
-    let who = signer_of(env, req, url, Payload::Read(body)).await?;
+    let who = signer_of(env, req, url, Payload::Read(body), Mandates::Refused).await?;
     if who.acting_for.is_some() {
         return Err(CellError::invalid(FOR_HONORED));
     }
@@ -365,22 +372,53 @@ pub(crate) async fn signer(env: &Env, req: &Request, url: &Url, body: &[u8]) -> 
 /// `signer`, honoring `for`: an agent's request acts for the identity it
 /// names, capped (the fragment decides: `fragment_core::permit`).
 pub(crate) async fn signer_for(env: &Env, req: &Request, url: &Url, body: &[u8]) -> CellResult<Signed> {
-    signer_of(env, req, url, Payload::Read(body)).await
+    signer_of(env, req, url, Payload::Read(body), Mandates::Honored).await
+}
+
+/// Whether a route takes whom an agent acts for (`for`, or a mandate: its
+/// proof, docs/api.md "Who asked: mandates"): where `for` is honored
+/// (`FOR_HONORED`), and nowhere else, where a mandate is 400 as `for` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mandates {
+    Honored,
+    Refused,
 }
 
 /// The signer for any payload: a body the router read, or one it streams
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it, and only its own owner
-/// (`permit::may_act_for`): a person acts as themselves.
-async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>) -> CellResult<Signed> {
+/// (`permit::may_act_for`): a person acts as themselves. A mandate
+/// (`fragment_core::mandate`) says the same with proof: that its owner's
+/// own words asked it. It is checked here, beside the signature, with no
+/// call but the signer's own lookup, and names only its agent's owner, as
+/// `for` does.
+async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, mandates: Mandates) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
+    let mandate = req.headers().get(fragment_core::mandate::HEADER)?;
+    match (&mandate, mandates, &acting_for) {
+        (None, ..) => {}
+        (Some(_), Mandates::Refused, _) => return Err(CellError::invalid(FOR_HONORED)),
+        (Some(_), Mandates::Honored, Some(_)) => return Err(CellError::invalid("a request names whom it acts for once: by `for`, or by a mandate")),
+        (Some(_), Mandates::Honored, None) => {}
+    }
     let (identity, key) = match caller(env, req, url, payload)? {
         Caller::Key(key) => (ask_registry(env, &calls::Resolve { key: key.clone() }).await?, Some(key)),
         // the shell's: a person, signed in on the platform
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
+    let refused = |why: &str| CellError::new(ErrorCode::Forbidden, why.to_string());
+    let acting_for = match mandate {
+        None => acting_for,
+        Some(text) => {
+            let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
+            if identity.kind != IdentityKind::Agent || m.agent != identity.id {
+                return Err(refused("a mandate is carried only by the agent it names"));
+            }
+            Some(m.asker)
+        }
+    };
     if let Some(named) = &acting_for {
-        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| CellError::new(ErrorCode::Forbidden, r.message()))?;
+        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
     }
     Ok(Signed { identity, key, acting_for })
 }
@@ -429,7 +467,7 @@ fn own_page_socket(req: &Request, cfg: &Config, url: &Url, name: &str) -> CellRe
 ///
 /// - the fragment's own page (`same-origin`): all of them;
 /// - a top-level navigation (GET or HEAD, from anywhere): the origin's own
-///   (`fragment_site`, `fragview`, `fragment_anon`), as Lax means them;
+///   (`fragment_site`, `fragview`, `fragment_anon`, each `__Host-` over https), as Lax means them;
 /// - a frame's navigation (an `iframe`, or an `object` or `embed`, which
 ///   show a page too): the frame cookie (`/auth/frame`'s), and the answer
 ///   shows only in the page that framed it (`bound`);
@@ -839,7 +877,7 @@ async fn ledger_route(mut req: Request, env: &Env, cfg: &Config, url: &Url, rest
 /// asks (`calls::By`): one round trip a call, and a key revoked a moment
 /// before cannot act.
 async fn identities(mut req: Request, env: &Env, ctx: &Context, url: &Url, rest: &[&str]) -> CellResult<Response> {
-    if acting_for(url)?.is_some() {
+    if names_for(&req, url)? {
         return Err(CellError::invalid(FOR_HONORED));
     }
     let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
@@ -1490,7 +1528,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // fragment checks the hash as they arrive. A payload tag may name
         // that hash too (older CLIs sign one), or be absent.
         (Method::Put, ["api", "f", name, "blobs", sha]) => {
-            let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }).await?;
+            let principal = signer_of(env, &req, &url, Payload::Streamed { sha256_hex: sha }, Mandates::Honored).await?;
             blob_length(&req, cfg.uploads_for(principal.identity.kind).upload_max_bytes)?;
             let name = named_fragment(name)?;
             let body = req.inner().body().map(worker::wasm_bindgen::JsValue::from);

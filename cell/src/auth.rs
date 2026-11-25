@@ -170,18 +170,10 @@ pub(crate) fn secure(url: &Url) -> bool {
     url.scheme() == "https"
 }
 
-/// A session cookie's name: `__Host-` first wherever it can be (https,
-/// `Path=/`). Every fragment's page shares its domain (`fragment.boats`)
-/// with the others, and may set a cookie for all of it; a browser takes a
-/// `__Host-` cookie only host-only and Secure, so none such can stand in
-/// for the platform's session or another fragment's. The session is read
-/// under that name only.
+/// A session cookie's name: `__Host-` first wherever it can be
+/// (`site::cookie_name`). The session is read under that name only.
 fn cookie_name(base: &str, secure: bool, path: &str) -> String {
-    if secure && path == "/" {
-        format!("__Host-{base}")
-    } else {
-        base.to_string()
-    }
+    site::cookie_name(base, secure, path)
 }
 
 pub fn set_cookie(base: &str, value: &str, path: &str, max_age_s: i64, secure: bool) -> String {

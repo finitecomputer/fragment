@@ -87,6 +87,11 @@ pub fn check_record(channel: &str, kind: &str, body: &Value, decl: Option<&Chann
     if crate::door::relays(body) && hosted.is_none_or(|h| body["relayed"] != h.relayed()) {
         return Err("a record that relays its agent's owner (`relayed`) is posted through that agent's door: an app publishes one only as the connector its owner bound as that door, `relayed` exactly {via, for, agent}".into());
     }
+    // app code speaks for no one, so it answers no one's question
+    // (`permit::may_answer`): refused here, before any effect is applied
+    if crate::permit::answers(body).is_some() {
+        return Err("app code answers no question: an answer (`answers` naming a record by its seq) is its asked person's own post".into());
+    }
     let size = body.to_string().len();
     if size > limits::RECORD_BODY_MAX_BYTES {
         return Err(format!("a record's body is at most {} bytes", limits::RECORD_BODY_MAX_BYTES));
@@ -242,6 +247,15 @@ mod tests {
         let relayed = json!({ "text": "yes", "relayed": { "via": "simplex", "for": "npub1paul" } });
         assert!(check_record("notes", "note", &relayed, channels.get("notes"), None).is_err_and(|e| e.contains("door")), "a job step's record that relays");
         assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": relayed }]), &channels, None).is_err(), "a mutation's effect that relays");
+        // nor answers anyone's question (permit.rs `may_answer`): an
+        // `answers` naming a seq is refused whole, valid or not; one that
+        // names none is the app's own field
+        for answers in [json!({ "channel": "notes", "seq": 3 }), json!({ "channel": "notes", "seq": "3" })] {
+            let answer = json!({ "kind": "prompt_response", "option": "yes", "answers": answers });
+            assert!(check_record("notes", "note", &answer, channels.get("notes"), None).is_err_and(|e| e.contains("answers no question")), "a job step's answer: {answer}");
+            assert!(decode(&json!([{ "channel": "notes", "kind": "message", "body": answer }]), &channels, None).is_err(), "a mutation's effect's answer: {answer}");
+        }
+        assert!(check_record("notes", "quiz", &json!({ "answers": { "q1": "b" } }), channels.get("notes"), None).is_ok(), "a quiz's own answers");
     }
 
     /// Goal: a hosted door's fragment publishes a record relaying its owner

@@ -55,7 +55,7 @@ use fragment_core::inbox::Answer;
 use fragment_core::manifest::{InboxCheck, InboxDecl};
 use fragment_core::secrets::placeholders;
 use fragment_core::steps::{Fetch, NextStep, Step, StepOutcome, StepResult};
-use fragment_core::{cron::Cron, egress, glob, npub};
+use fragment_core::{cron::Cron, egress, glob, npub, run_retention};
 use fragment_proto::ledger::Why;
 use fragment_proto::{
     limits, valid_secret_name, Author, ChannelRecord, ErrorCode, OpKind, Replay, Role, Run, RunList, RunStatus, SetPaused, TriggerDecl, TriggerOn, Via,
@@ -993,6 +993,14 @@ impl FragmentCell {
         let blessed = self.blessed().map_err(|e| StepFail::Retry(e.message))?;
         let door = fragment_core::door::door_route(&f.url, blessed.as_deref()).map_err(permanent)?;
         let to_door = door.is_some();
+        // a file of its owner's SimpleX app, or for it: between the
+        // connector's blobs and its own door alone, never the internet
+        if (f.blob.is_some() || f.keep) && !to_door {
+            return Err(permanent(format!("a fetch carries one of its blobs, or keeps its answer as one, to and from https://{}/ alone", fragment_core::door::DOOR_HOST)));
+        }
+        if f.blob.is_some() && f.body.is_some() {
+            return Err(permanent("a fetch's body is its text or one of its blobs, not both"));
+        }
         let url = match door {
             Some(url) => url,
             None => egress::check(&f.url, self.cfg.egress_local, &self.cfg.egress_allow).map_err(permanent)?,
@@ -1074,6 +1082,19 @@ impl FragmentCell {
             }
             false => None,
         };
+        // one of its blobs, streamed as the body with its length
+        let blob = match &f.blob {
+            Some(sha) => {
+                let found = match fragment_core::blob::valid_sha(sha) {
+                    true => js::blob_get(&self.env, js::BLOBS, &self.blob_key(sha).map_err(|e| StepFail::Retry(e.message))?, None).await.map_err(|e| StepFail::Retry(e.message))?,
+                    false => None,
+                };
+                let found = found.ok_or_else(|| permanent(format!("{} is none of its blobs", sha.chars().take(64).collect::<String>())))?;
+                headers.set("content-length", &found.size.to_string()).map_err(|e| permanent(e.to_string()))?;
+                Some(found.body)
+            }
+            None => None,
+        };
         let mut init = RequestInit::new();
         // A redirect comes back to the job as its 3xx: following it here
         // would skip the egress check for where it points.
@@ -1084,12 +1105,16 @@ impl FragmentCell {
             }
             init.with_body(Some(JsValue::from_str(&body)));
         }
+        if let Some(body) = blob {
+            init.with_body(Some(body.into()));
+        }
         let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
         let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;
         let deadline = Duration::from_millis(limits::FETCH_TIMEOUT_MS);
         let answer = match &door {
+            Some(name) if f.keep => return self.keep_file(crate::routed::send(&self.env, "SIMPLEX_DOOR", name, req), deadline, &host, &redact).await,
             Some(name) => crate::cs::answer_all(crate::routed::send(&self.env, "SIMPLEX_DOOR", name, req), deadline, max).await,
             None => crate::cs::fetch_all(req, deadline, max).await,
         };
@@ -1103,6 +1128,52 @@ impl FragmentCell {
         }
         let out_headers: Map<String, Value> = answer.headers.entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).gathered();
         Ok(json!({ "status": status, "headers": out_headers, "body": redact(String::from_utf8_lossy(&answer.body).into_owned()) }))
+    }
+
+    /// A door's answer to a fetch that keeps it (`keep`): a 2xx's body, the
+    /// file its `FILE_SHA_HEADER` names, stored as that blob of this
+    /// fragment's, its bytes checked against the name as they stream in
+    /// (stored and recorded already, nothing is read), typed as the door said when that
+    /// is passive media; answered `{status, headers, blob: {sha256, size,
+    /// type}}`. Any other answer, as a fetch's.
+    async fn keep_file(&self, send: impl std::future::Future<Output = CellResult<Response>>, deadline: Duration, host: &str, redact: &dyn Fn(String) -> String) -> Result<Value, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(redact(format!("{host}: {}", e.message)));
+        let kept = async {
+            let mut resp = send.await.map_err(retry)?;
+            let status = resp.status_code();
+            if status == 429 || status >= 500 {
+                return Err(StepFail::Retry(format!("{host} answered {status}")));
+            }
+            let headers: Map<String, Value> = resp.headers().entries().map(|(k, v)| (k.to_ascii_lowercase(), Value::String(redact(v)))).gathered();
+            if !(200..300).contains(&status) {
+                let (body, _) = crate::cs::read_answer(&mut resp, limits::FETCH_RESPONSE_MAX_BYTES).await.map_err(retry)?;
+                return Ok(json!({ "status": status, "headers": headers, "body": redact(String::from_utf8_lossy(&body).into_owned()) }));
+            }
+            let sha = headers.get(fragment_core::door::FILE_SHA_HEADER).and_then(Value::as_str).filter(|s| fragment_core::blob::valid_sha(s)).ok_or_else(|| permanent(format!("{host} named no file ({})", fragment_core::door::FILE_SHA_HEADER)))?.to_string();
+            let size = headers.get("content-length").and_then(Value::as_str).and_then(|l| l.parse::<u64>().ok()).filter(|n| (1..=limits::BLOB_MAX_BYTES).contains(n)).ok_or_else(|| permanent(format!("{host} answered a file of no length it said, or past {} bytes", limits::BLOB_MAX_BYTES)))?;
+            let mime = headers.get("content-type").and_then(Value::as_str).and_then(fragment_core::blob::served_type);
+            let key = self.blob_key(&sha).map_err(retry)?;
+            // stored already only where a verified write recorded it (its
+            // row): bytes at the key with none are hashed again here
+            let recorded = !self.rows("SELECT 1 FROM blobs WHERE sha = ?", vec![sha.as_str().into()]).map_err(retry)?.is_empty();
+            if !recorded || js::blob_head(&self.env, &key).await.map_err(retry)?.is_none() {
+                let ResponseBody::Stream(body) = resp.body() else { return Err(permanent(format!("{host} answered no bytes"))) };
+                let body = body.clone();
+                let digest = js::blob_put(&self.env, &key, body, size).await.map_err(retry)?;
+                if digest != sha {
+                    js::blob_delete(&self.env, js::BLOBS, &[key]).await.map_err(retry)?;
+                    return Err(permanent(format!("{host}'s file hashes to {digest}, not {sha}")));
+                }
+            }
+            self.record_blob(&sha, size, mime).map_err(retry)?;
+            Ok(json!({ "status": status, "headers": headers, "body": "", "blob": { "sha256": sha, "size": size, "type": mime } }))
+        };
+        let timer = Delay::from(deadline);
+        futures_util::pin_mut!(kept, timer);
+        match futures_util::future::select(kept, timer).await {
+            futures_util::future::Either::Left((kept, _)) => kept,
+            futures_util::future::Either::Right(_) => Err(StepFail::Retry(format!("{host}: no whole file within {deadline:?}"))),
+        }
     }
 
     /// `job.publish(channel, body, kind)`: keyed by (run, step), so a
@@ -1557,12 +1628,24 @@ impl FragmentCell {
         }
     }
 
-    /// From the alarm: finished runs past their retention go.
+    /// From the alarm: finished runs past their retention go, and past the
+    /// count kept, all but those that guard a call that ran, which a retry
+    /// may still repeat (`run_retention`): they stay until their window
+    /// ends, a succeeded one shed to its guard, so a retry never starts a
+    /// run that ran twice.
     pub(crate) fn trim_runs(&self) -> CellResult<()> {
+        let now = js::now_ms();
+        let window_start = now - crate::channels::retry_horizon_ms();
         self.exec(
-            "DELETE FROM runs WHERE status NOT IN ('queued', 'running') AND (finished_at < ? OR id <= (SELECT MAX(id) FROM runs) - ?)",
-            vec![SqlStorageValue::Integer(js::now_ms() - limits::RUN_RETENTION_MS), SqlStorageValue::Integer(limits::RUNS_KEPT)],
+            run_retention::RUNS_TRIM_SQL,
+            vec![
+                SqlStorageValue::Integer(now - limits::RUN_RETENTION_MS),
+                SqlStorageValue::Integer(limits::RUNS_KEPT),
+                SqlStorageValue::Integer(window_start),
+                SqlStorageValue::Integer(limits::HELD_RUNS_GUARDED),
+            ],
         )?;
+        self.exec(run_retention::RUNS_SHED_SQL, vec![SqlStorageValue::Integer(window_start), SqlStorageValue::Integer(limits::RUNS_KEPT)])?;
         // a run's charges, what its steps bought and asked for go with it (the ledger keeps the month's usage)
         self.exec("DELETE FROM charges WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
         self.exec("DELETE FROM paid WHERE run NOT IN (SELECT id FROM runs)", vec![])?;
@@ -1643,11 +1726,7 @@ impl FragmentCell {
     pub(crate) async fn replay(&self, caller: &Caller, body: Replay) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
         self.writable().await?;
-        let rows = self.rows(
-            "UPDATE runs SET status = 'queued', attempt = attempt + 1, error = NULL, output = NULL, finished_at = NULL, launched_at = NULL
-             WHERE id = ? AND status IN ('held', 'blocked') RETURNING op, attempt",
-            vec![SqlStorageValue::Integer(body.run)],
-        )?;
+        let rows = self.rows(run_retention::RUN_REPLAY_SQL, vec![SqlStorageValue::Integer(body.run)])?;
         let Some(row) = rows.first() else {
             let exists = !self.rows("SELECT id FROM runs WHERE id = ?", vec![SqlStorageValue::Integer(body.run)])?.is_empty();
             return Err(match exists {

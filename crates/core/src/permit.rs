@@ -46,7 +46,10 @@
 //!    umbrella of this email' access"): a member's agents reach what the
 //!    member does, capped as above.
 //! 5. **A connector is its owner's alone to edit**: everyone else, their
-//!    own agent acting for them included, is at most a viewer there.
+//!    own agent acting for them included, is at most a viewer there. Its
+//!    one exception: the agent it is an open door of, acting as itself,
+//!    uploads the files its replies there carry (`Action::Upload`), which
+//!    its door sends on; it is a viewer there for everything else.
 //! 6. **The repo is its members'** (`Action::Repo`): its whole history,
 //!    whatever the visibility; no floor, share link or agent of theirs
 //!    that is a member lends it.
@@ -64,6 +67,15 @@
 //! agent shares is recorded as the agent's, for its owner, so its owner
 //! sees it did.
 //!
+//! **A question is answered only by whom it asks** (`may_answer`). A
+//! record whose body names whom it `asks` is a question (a card: an agent
+//! asking its owner to confirm), and a record whose `answers` names it is
+//! its answer, taken only as that identity's own post: never an agent's
+//! for its owner, so an agent never answers its own card. The cell checks
+//! it as it takes a post (docs/api.md, "Questions and answers"); app code
+//! and the platform's own records answer nothing. Invites and offers are
+//! asked on the person's own routes (registry/invites.rs, offers.rs).
+//!
 //! Deleting a fragment and setting its money cap are dangerous
 //! (`Reserved::Dangerous`): today an agent is refused them, whomever it
 //! acts for, and its owner does them. That is not the design. Paul,
@@ -72,7 +84,8 @@
 //! when I do it myself in the UI." The target is in `the_rule_table`'s
 //! comment.
 
-use fragment_proto::{FragmentKind, IdentityKind, Member, Role, Visibility};
+use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Member, Role, Visibility};
+use serde_json::Value;
 
 /// What `decide` decides over: the fragment's visibility, what the caller
 /// brings to it, and what they would do. Read once per request, by the
@@ -96,12 +109,17 @@ pub enum Action {
     /// main's files. It is read first, as `Read`, then decided by
     /// memberships alone (rule 6).
     Repo(Role),
+    /// Upload a blob: a file one of its records will carry (`PUT
+    /// …/blobs/<sha256>`), an editor's act; on a connector, its bound
+    /// agent's too (rule 5's exception).
+    Upload,
 }
 
 impl Action {
     fn needs(self) -> Role {
         match self {
             Action::Read(role) | Action::Act(role) | Action::Repo(role) => role,
+            Action::Upload => Role::Editor,
         }
     }
 }
@@ -131,6 +149,9 @@ pub struct Standing {
     pub connector: bool,
     /// The caller is the fragment's owner, a person signing as themselves.
     pub owner_in_person: bool,
+    /// The caller is the agent this connector is an open door of, signing
+    /// as itself (rule 5's exception).
+    pub door_agent: bool,
 }
 
 impl Standing {
@@ -222,9 +243,15 @@ impl Refusal {
 pub fn decide(facts: &Facts) -> Verdict {
     let Facts { visibility, standing, action } = *facts;
     let needs = action.needs();
+    // rule 5's one exception: a connector's bound agent, as itself and a
+    // member there, uploads the files its replies there carry
+    let door_upload = action == Action::Upload && standing.connector && standing.door_agent && standing.cap.is_none() && standing.signed && standing.member.is_some();
+    if door_upload {
+        return Verdict::Allow(Role::Editor);
+    }
     let purpose = match action {
         Action::Read(_) | Action::Repo(_) => Purpose::Read,
-        Action::Act(_) => Purpose::Act,
+        Action::Act(_) | Action::Upload => Purpose::Act,
     };
     let role = match effective_role(visibility, standing, purpose) {
         Some(role) if role >= needs => role,
@@ -533,6 +560,45 @@ pub fn acts_as_itself(owner: Option<Role>, agent: Option<Role>) -> bool {
     owner.is_none() && agent.is_some_and(|role| role <= AGENT_ROLE_MAX)
 }
 
+/// The question a record answers, as its body names it (docs/api.md,
+/// "Questions and answers"): `answers`, the question's own record in the
+/// same fragment. A question is a record whose body names whom it `asks`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answers {
+    pub channel: String,
+    pub seq: i64,
+}
+
+/// `body`'s question, if it answers one: its `answers` names a `seq`. An
+/// `answers` naming none (a quiz's own answers) is its app's own field.
+/// What is wrong with one that names a `seq` but is not `{channel, seq}`.
+pub fn answers(body: &Value) -> Option<Result<Answers, &'static str>> {
+    let named = body.get("answers")?.as_object().filter(|o| o.contains_key("seq"))?;
+    let read = || -> Result<Answers, &'static str> {
+        let channel = named.get("channel").and_then(Value::as_str).filter(|c| valid_channel_name(c)).ok_or("names the question's channel")?;
+        let seq = named.get("seq").and_then(Value::as_i64).filter(|s| *s >= 1).ok_or("names the question's seq, an integer from 1")?;
+        if named.len() != 2 {
+            return Err("is {channel, seq} alone");
+        }
+        Ok(Answers { channel: channel.into(), seq })
+    };
+    Some(read())
+}
+
+/// A question is answered only by whom it asks (FIN-615): `asks` is whom
+/// the record an answer names asks (`None`: no such record, one its poster
+/// may not read, or one asking no one). An answer is an action, and its
+/// asker (`acts_for`, an agent's `for`, else the poster) and its writer
+/// are both that identity: its own post, written as itself
+/// (`Author::Person` or `Author::Agent`). Never anyone else, an agent for
+/// whom it asks (an agent never answers its own card), an agent asked a
+/// question answering it for someone, app code, the platform or a door.
+pub fn may_answer(asks: Option<&str>, poster: &str, author: Author, acts_for: Option<&str>) -> bool {
+    let asker = acts_for.unwrap_or(poster);
+    let same = |a: &str, b: &str| crate::npub::display(a) == crate::npub::display(b);
+    matches!(author, Author::Person | Author::Agent) && same(asker, poster) && asks.is_some_and(|asks| same(asks, poster))
+}
+
 /// Why a membership change is refused, or `None` when it is allowed. Only
 /// the owner manages members (their own agent sharing for them acts with
 /// their role: `agent_shares`); the owner's own row is never changed here
@@ -645,7 +711,7 @@ mod tests {
     ///   stay; only the move between them goes.
     #[test]
     fn the_rule_table() {
-        use Action::{Act, Read, Repo};
+        use Action::{Act, Read, Repo, Upload};
         let anon = st(None, false, false);
         let link = st(None, true, false);
         let signed = st(None, false, true);
@@ -653,6 +719,7 @@ mod tests {
         let held = |held, s: Standing| Standing { held: Some(held), ..s };
         let beside = |s: Standing| Standing { beside_person: true, ..s };
         let connector = |s: Standing| Standing { connector: true, ..s };
+        let door = |s: Standing| Standing { door_agent: true, ..s };
         let rows: &[(&str, Visibility, Standing, Action, Verdict)] = &[
             // rule 1: a caller's own role
             ("anonymous reads a public page", V::Public, anon, Read(Public), Verdict::Allow(Public)),
@@ -700,6 +767,16 @@ mod tests {
             ("a connector's owner as their own agent is a viewer", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Act(Editor), refused(Editor, Why::Capped, false)),
             ("a connector's owner's agent reads", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Read(Viewer), Verdict::Allow(Viewer)),
             ("a connector, by its link", V::Link, connector(link), Read(Viewer), Verdict::Allow(Viewer)),
+            // rule 5's exception: its bound agent uploads its replies' files there
+            ("a connector's bound agent, as itself, uploads its replies' files", V::Members, door(connector(member(Viewer))), Upload, Verdict::Allow(Editor)),
+            ("…and does nothing else an editor does", V::Members, door(connector(member(Viewer))), Act(Editor), refused(Editor, Why::Short, false)),
+            ("the same agent acting for someone uploads nothing there", V::Members, door(connector(acting(Some(Owner), Some(Viewer), Some(Owner)))), Upload, refused(Editor, Why::Capped, false)),
+            ("another agent, a member there, uploads nothing", V::Members, connector(member(Viewer)), Upload, refused(Editor, Why::Short, false)),
+            ("its owner's other agent, acting for its owner, uploads nothing", V::Members, connector(acting(Some(Owner), None, Some(Owner))), Upload, refused(Editor, Why::Capped, false)),
+            ("its bound agent's fact on a fragment no connector lends nothing", V::Members, door(member(Viewer)), Upload, refused(Editor, Why::Short, false)),
+            ("a connector's owner, in person, uploads", V::Members, Standing { owner_in_person: true, ..connector(member(Owner)) }, Upload, Verdict::Allow(Owner)),
+            ("an editor uploads", V::Members, member(Editor), Upload, Verdict::Allow(Editor)),
+            ("a viewer uploads nothing", V::Members, member(Viewer), Upload, refused(Editor, Why::Short, false)),
             // a role kept from earlier (a socket's)
             ("a kept role reaches what it holds", V::Members, Standing::kept(Editor), Read(Editor), Verdict::Allow(Editor)),
             ("a kept role is short of more", V::Members, Standing::kept(Viewer), Read(Editor), refused(Editor, Why::Short, false)),
@@ -767,7 +844,7 @@ mod tests {
                     for held in [None, Some(Viewer), Some(Editor)] {
                         for bits in 0u8..32 {
                             let flag = |i: u8| bits & (1 << i) != 0;
-                            let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false };
+                            let standing = Standing { member, owns_member_agent: flag(0), link: flag(1), signed: flag(2), cap: *cap, held, beside_person: flag(3), connector: flag(4), owner_in_person: false, door_agent: false };
                             for standing in [standing, Standing { owner_in_person: true, ..standing }] {
                                 for &action in &actions {
                                     let new = decide(&Facts { visibility, standing, action });
@@ -1225,5 +1302,61 @@ mod tests {
         assert!(refuse_remove(Some(Editor), false, Some(Viewer)).is_some());
         assert!(refuse_remove(Some(Owner), true, Some(Owner)).is_some());
         assert!(refuse_remove(Some(Owner), false, None).is_some());
+    }
+
+    /// Goal: a question is answered only by whom it asks, in their own
+    /// post. Method: Ana's agent Juniper asks her on a card, and each
+    /// writer answers it; an answer to a record that asks no one, or is
+    /// not there, is no one's; `asks` and the poster in either form (an
+    /// npub, 64 hex) are one identity; a retried post decides the same.
+    #[test]
+    fn a_question_is_answered_by_whom_it_asks() {
+        let hex = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+        let ana = crate::npub::encode(hex);
+        let juniper = crate::npub::encode(&"1".repeat(64));
+        let ben = crate::npub::encode(&"2".repeat(64));
+        // (case, whom it asks, poster, author, whom the poster acts for, answered)
+        type Row<'a> = (&'a str, Option<&'a str>, &'a str, Author, Option<&'a str>, bool);
+        let rows: &[Row] = &[
+            ("Ana answers her card", Some(&ana), &ana, Author::Person, None, true),
+            ("Ana's signed key, as 64 hex", Some(&ana), hex, Author::Person, None, true),
+            ("a card naming Ana as 64 hex", Some(hex), &ana, Author::Person, None, true),
+            ("Ben answers Ana's card", Some(&ana), &ben, Author::Person, None, false),
+            ("Juniper answers its own card, as itself", Some(&ana), &juniper, Author::Agent, None, false),
+            ("Juniper answers its own card, for Ana", Some(&ana), &juniper, Author::Agent, Some(&ana), false),
+            ("a question asking Juniper, answered by Juniper", Some(&juniper), &juniper, Author::Agent, None, true),
+            ("a question asking Juniper, answered by Juniper for Ana", Some(&juniper), &juniper, Author::Agent, Some(&ana), false),
+            ("app code Ana called writes the answer", Some(&ana), &ana, Author::Code, None, false),
+            ("the platform writes it as Ana", Some(&ana), &ana, Author::Platform, None, false),
+            ("a door relays Ana's answer", Some(&ana), &ana, Author::Door, None, false),
+            ("an answer to what asks no one, is not there, or its poster may not read", None, &ana, Author::Person, None, false),
+        ];
+        for (case, asks, poster, author, acts_for, ok) in rows {
+            assert_eq!(may_answer(*asks, poster, *author, *acts_for), *ok, "{case}");
+            // replay: the same post again decides the same
+            assert_eq!(may_answer(*asks, poster, *author, *acts_for), *ok, "{case}, again");
+        }
+
+        let named = |answers: Value| super::answers(&serde_json::json!({ "kind": "prompt_response", "option": "yes", "answers": answers }));
+        assert_eq!(named(serde_json::json!({ "channel": "work", "seq": 12 })), Some(Ok(Answers { channel: "work".into(), seq: 12 })));
+        // an `answers` naming no seq is its app's own: no question
+        for own in [serde_json::json!(["a", "b"]), serde_json::json!({ "q1": "a" }), serde_json::json!("work/12"), serde_json::json!(12)] {
+            assert_eq!(named(own.clone()), None, "{own}");
+        }
+        assert_eq!(super::answers(&serde_json::json!("a bare string body")), None);
+        // one that names a seq is checked whole: a reader of either kind (a
+        // JSON number read in JavaScript) finds the record the platform did
+        for bad in [
+            serde_json::json!({ "channel": "work", "seq": "12" }),
+            serde_json::json!({ "channel": "work", "seq": 12.0 }),
+            serde_json::json!({ "channel": "work", "seq": 0 }),
+            serde_json::json!({ "channel": "work", "seq": -3 }),
+            serde_json::json!({ "channel": "work", "seq": u64::MAX }),
+            serde_json::json!({ "seq": 12 }),
+            serde_json::json!({ "channel": "Work!", "seq": 12 }),
+            serde_json::json!({ "channel": "work", "seq": 12, "by": "npub1ana" }),
+        ] {
+            assert!(named(bad.clone()).is_some_and(|r| r.is_err()), "{bad}");
+        }
     }
 }

@@ -4,8 +4,9 @@
 // page, framed and signed in as any of the person's fragments is (shell.js
 // `framed`), or a frame its caller made (SimpleX's link page, a port of its
 // agent's computer: connections.js), and Done. What the page does is the
-// connector's (templates/telegram/site/setup.html, images/bridge's
-// simplex/page.html); the dialog knows only where it is.
+// connector's (templates/telegram/site/setup.html,
+// templates/simplex/site/setup.html, images/bridge's simplex/page.html);
+// the dialog knows only where it is.
 //
 // The frame is one height, the tallest step of such a page on a phone (a
 // longer page scrolls within it), so no message from the page sizes it;
