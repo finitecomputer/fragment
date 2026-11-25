@@ -69,7 +69,9 @@ pub struct Class {
     /// hold, each with the statement that makes it step 1's.
     pub variants: &'static [Variant],
     /// The tables a life's end keeps (`remake`): the ended lives', or the
-    /// one row a wipe leaves. Every other table is the life's.
+    /// one row a wipe leaves. Every other table is the life's. Each is
+    /// made by one of its steps: step 1's every object holds, a later
+    /// step's those that ran it.
     pub kept: &'static [&'static str],
 }
 
@@ -121,6 +123,8 @@ pub const FRAGMENT: Class = Class {
         step!("face_forward_only", "fragment/0010_face_forward_only.sql"),
         step!("record_author", "fragment/0011_record_author.sql"),
         step!("pending_code", "fragment/0012_pending_code.sql"),
+        step!("ended_doors", "fragment/0013_ended_doors.sql"),
+        step!("trigger_kinds", "fragment/0014_trigger_kinds.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -128,7 +132,7 @@ pub const FRAGMENT: Class = Class {
         fix: "ALTER TABLE members DROP COLUMN people_only",
         why: "people-only shares (#116, 2026-10-03) until they went (#313, 2026-10-13): unread and unwritten since, at its default",
     }],
-    kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_errors"],
+    kept: &["ended", "ended_index", "ended_repos", "ended_agents", "ended_doors", "ended_errors"],
 };
 
 pub const REGISTRY: Class = Class {
@@ -499,11 +503,14 @@ fn object(statement: &str) -> Object {
 /// it holds but `class.kept` (the ended lives', or a wipe's mark), and
 /// makes each again as the object holds it now, with its indexes and
 /// triggers. A wipe's or a delete's, in the caller's one synchronous step.
-/// Answers the tables made again.
+/// Answers the tables made again. A kept table of step 1's it must hold;
+/// one a later step makes it keeps where it holds it (an object that
+/// refuses its schema ends at its version, short of that step).
 pub fn remake(db: &impl Db, class: &Class) -> Result<Vec<String>, SchemaError> {
     let store = |error: String| SchemaError::Store { class: class.name, error };
     let found = objects(db, class)?;
-    for kept in class.kept {
+    let first = declared(class.steps[0].sql);
+    for kept in class.kept.iter().filter(|k| first.iter().any(|o| o.kind == "table" && o.name == **k)) {
         if !found.iter().any(|o| o.kind == "table" && o.name == *kept) {
             return Err(store(format!("it lacks {kept}, a table its life's end keeps")));
         }
@@ -977,7 +984,7 @@ mod tests {
     /// before versions). Method: each run bare, then migrated.
     #[test]
     fn every_deployed_schema_is_adopted() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations/deployed");
+        let root = std::path::PathBuf::from("migrations/deployed");
         let mut commits: Vec<String> = std::fs::read_dir(&root).expect("the deployed schemas").map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned()).collect();
         commits.sort();
         assert_eq!(commits, ["035ee8e8", "33e323cd", "76adcb35", "7b84dcd3", "e62d9991"]);
@@ -1080,13 +1087,37 @@ mod tests {
         assert_eq!(db.count("SELECT COUNT(*) FROM meta"), 1, "nothing dropped");
     }
 
+    /// Goal: an object short of the step that makes a kept table (one
+    /// that refuses its schema ends at its version) is remade all the
+    /// same, keeping the kept tables it holds; once it holds that table,
+    /// its rows are kept too. Method: the fragment at step 1, then at
+    /// every step, an ended life's rows in its kept tables, and `remake`.
+    #[test]
+    fn remake_keeps_a_later_steps_kept_table_where_it_ran() {
+        let later: Vec<&str> = FRAGMENT.kept.iter().copied().filter(|k| !declared(FRAGMENT.steps[0].sql).iter().any(|o| o.name == *k)).collect();
+        assert_eq!(later, ["ended_doors"], "the fragment's one kept table of a later step");
+        let short = Lite::new();
+        migrated(&short, &with(ONE), 1).expect("v1");
+        short.exec("INSERT INTO ended (incarnation, name, npub, facet, ended_at, next_at) VALUES (1, 'a', 'npub1a', 'f', 1, 1)").expect("an ended life");
+        let tables = short.transaction(|db| remake(db, &FRAGMENT)).expect("remade short of step 13");
+        assert!(!tables.contains(&"ended_doors".to_string()) && !tables.contains(&"ended".to_string()), "{tables:?}");
+        assert_eq!(short.count("SELECT COUNT(*) FROM ended"), 1, "its ended life is kept");
+        assert_eq!(short.count("SELECT COUNT(*) FROM sqlite_master WHERE name = 'ended_doors'"), 0, "and nothing made it");
+
+        let whole = Lite::new();
+        migrated(&whole, &FRAGMENT, 1).expect("the newest");
+        whole.exec("INSERT INTO ended_doors (incarnation, door, next_at) VALUES (1, 'door-1', 1)").expect("an ended door");
+        whole.transaction(|db| remake(db, &FRAGMENT)).expect("remade");
+        assert_eq!(whole.count("SELECT COUNT(*) FROM ended_doors"), 1, "its ended door is kept");
+    }
+
     /// Goal: each class's declaration holds: steps named as their files
     /// are, every file under its directory declared in order, each
-    /// variant a shape of a step 1 object, and each kept table one step 1
-    /// makes. Method: the migrations directory, read.
+    /// variant a shape of a step 1 object, and each kept table one of its
+    /// steps makes. Method: the migrations directory, read.
     #[test]
     fn every_class_declares_its_files_in_order() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let root = std::path::PathBuf::from("migrations");
         for class in CLASSES {
             let dir = root.join(class.name.to_ascii_lowercase());
             let mut files: Vec<String> = std::fs::read_dir(&dir).expect("its directory").map(|e| e.expect("an entry").file_name().to_string_lossy().into_owned()).collect();
@@ -1097,8 +1128,10 @@ mod tests {
                 assert_eq!(std::fs::read_to_string(dir.join(file)).expect("the file"), step.sql, "{file} is the step's text");
             }
             let made = declared(class.steps[0].sql);
+            let newest = Lite::new();
+            migrated(&newest, class, 1).expect("every step applies");
             for kept in class.kept {
-                assert!(made.iter().any(|o| o.kind == "table" && o.name == *kept), "{}: step 1 makes {kept}", class.name);
+                assert_eq!(newest.count(&format!("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = '{kept}'")), 1, "{}: a step makes {kept}", class.name);
             }
             for v in class.variants {
                 let d = made.iter().find(|o| o.name == v.name).expect("a variant of step 1's object");

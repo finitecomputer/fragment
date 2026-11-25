@@ -16,9 +16,12 @@
 .action-tooltip.is-description { max-width: min(260px, calc(100vw - 12px)); padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: normal; }
 /* thin scrollbars */
 :root { --scrollbar-thumb: rgba(180, 180, 180, .28); --scrollbar-hover: rgba(180, 180, 180, .45); }
+/* light: the system's unless the person chose dark, or their choice of
+   light (Settings, Theme: theme.js sets the root's data-theme) */
 @media (prefers-color-scheme: light) {
-  :root { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
+  :root:where(:not([data-theme="dark"])) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 }
+:root:where([data-theme="light"]) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
@@ -61,8 +64,10 @@
   --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
+/* light, as the scrollbars are: the system's unless the person chose dark,
+   or their choice */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:where(:not([data-theme="dark"])) {
     --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
     --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
     --chat-composer:#fffdf9; --chat-code:#ece8df;
@@ -74,6 +79,18 @@
     --wallpaper-dark-opacity: 0;
     color-scheme: light;
   }
+}
+:root:where([data-theme="light"]) {
+  --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
+  --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
+  --chat-composer:#fffdf9; --chat-code:#ece8df;
+  --tooltip-bg:var(--bg-card); --tooltip-shadow:rgba(0,0,0,.1);
+  --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
+  --accent-blue:#315fbd; --success:#167a52;
+  --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
+  --danger-text:#81112f;
+  --wallpaper-dark-opacity: 0;
+  color-scheme: light;
 }
 
 @media (min-width: 48rem) { :root { --type-field: 400 .875rem/1.45 var(--font-sans); } }
@@ -371,6 +388,7 @@ body.reordering iframe { pointer-events: none; }
    (disabled while it saves or arms: fragment-title.js holds its width) */
 .rename-actions button { font: var(--type-control); min-height: 40px; padding: 0 18px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--surface-muted); }
 .rename-actions button[type=submit] { border-color: var(--text-primary); background: var(--text-primary); color: var(--bg-window); }
+.rename-actions button[type=submit].danger { border-color: transparent; background: var(--danger-text); }
 button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 3px; }
 @media (max-width: 760px) { .topbar { min-height: 64px; padding: 8px; gap: 5px; } .topbar .grow { display: none; } }
 
@@ -405,14 +423,67 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 @media (prefers-reduced-motion: reduce) { .search-dialog[open], .search-dialog[open] .search-panel { animation: none; } }
 .search-input-wrap { display: flex; flex: none; align-items: flex-end; gap: 8px; padding: 10px 12px 10px 22px; background: transparent; }
 /* one line at rest, growing to INPUT_MAX_PX (launcher.js) or the visual viewport's room, then scrolling; files and a status keep their room too */
-#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: min(200px, calc(var(--vh) - var(--search-top) - 44px - var(--search-file-room) - var(--search-status-room))); padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
+#workspace-search { display: block; flex: 1; min-width: 0; width: 100%; height: 44px; max-height: min(200px, calc(var(--vh) - var(--search-top) - 44px - var(--search-file-room) - var(--search-agent-room, 0px) - var(--search-status-room))); padding: 10px 0; overflow-y: auto; resize: none; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; font-size: 17px; line-height: 24px; box-shadow: none; }
 /* on one line too, cut short on a phone (a textarea's would wrap to a second) */
 #workspace-search::placeholder { color: var(--text-secondary); opacity: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #workspace-search:focus-visible { outline: none; }
 /* centred on the input's last line (its 24px line, 10px padding) */
-.search-send { flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%; background: var(--primary); color: var(--primary-foreground); }
-.search-send:hover { background: var(--text-secondary); }
-.search-send:disabled { background: var(--bg-hover); color: var(--text-tertiary); cursor: default; }
+/* The send: a glass bead, as the iOS app's (HomeView.swift, launcherGlass,
+   at 36 of its 44: its light scaled to match): a body of the text's colour
+   at 85%, a tight gloss above, light pooled at its foot, a rim lit top and
+   bottom, and a shadow under it. With nothing to send it is a lighter bead
+   with a white arrow, never dimmed, the two easing into each other. Its
+   shadow falls below it alone, as under light from above: each offset as
+   far down as its blur reaches past its spread, so none shows over its top.
+   Hovered, it rises toward that light on a spring (--bead-spring: past its
+   rest, once back, then still): it grows, its gloss, pooled light and rim
+   brighten, its shadow falls further and softer, and its arrow lifts a
+   pixel. Pressed, it gives a little and springs back. Reduced motion keeps
+   the light's change alone. Only the bead (its .bead, index.html) moves:
+   the button, what a press hits, holds still under the pointer (the bead
+   past its edge hits nothing), so a press that begins on its rim ends
+   there and sends. */
+/* its light as numbers, so they ease (a gradient's own colours cannot) */
+@property --bead-gloss { syntax: "<number>"; inherits: true; initial-value: .5; }
+@property --bead-pool { syntax: "<number>"; inherits: true; initial-value: .42; }
+@property --bead-rim { syntax: "<number>"; inherits: true; initial-value: .7; }
+.search-send {
+  --bead: var(--primary); --bead-glyph: var(--primary-foreground); --bead-off: #48484a;
+  --bead-spring: linear(0, .009, .035 2.1%, .141, .281 6.7%, .723 12.9%, .938 16.7%, 1.017, 1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%, 1.051 39.6%, 1.017 43.1%, .991, .977 51%, .974 53.8%, .975 57.1%, .997 69.8%, 1.003 76.9%, 1.004 83.8%, 1);
+  position: relative; flex: none; width: 36px; height: 36px; margin-bottom: 4px; border-radius: 50%;
+}
+/* the icon buttons' own hover (.icon-button:hover) is the bead's light here */
+.search-send, .search-send:hover { background: none; }
+.search-send .bead {
+  position: absolute; inset: 0; isolation: isolate; display: grid; place-items: center; border-radius: 50%; pointer-events: none;
+  background-color: color-mix(in srgb, var(--bead) 85%, transparent);
+  background-image: radial-gradient(circle 21px at 50% 100%, rgba(255, 255, 255, var(--bead-pool)), transparent);
+  color: var(--bead-glyph);
+  box-shadow: 0 1px 2px -1px rgba(0, 0, 0, .2), 0 4px 8px -4px rgba(0, 0, 0, .22);
+  transition: background-color 300ms ease, color 300ms ease, transform 600ms var(--bead-spring), box-shadow 400ms ease, --bead-gloss 300ms ease, --bead-pool 300ms ease, --bead-rim 300ms ease;
+}
+@media (prefers-color-scheme: light) { .search-send { --bead-off: #c7c7cc; } }
+/* where linear() is not read (Safari before 17.2), one overshoot and back */
+@supports not (transition-timing-function: linear(0, 1)) { .search-send { --bead-spring: cubic-bezier(.34, 1.56, .64, 1); } }
+.search-send .bead::before, .search-send .bead::after { content: ""; position: absolute; z-index: -1; pointer-events: none; }
+/* the gloss: an ellipse 24.5 by 12.3, its centre 10.2 above the bead's */
+.search-send .bead::before { top: 1.65px; left: 50%; width: 24.5px; height: 12.3px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-gloss)), rgba(255, 255, 255, .03)); transform: translateX(-50%); transition: transform 600ms var(--bead-spring); }
+/* the rim, inside the glass: a .75 ring, bright above, faint at its sides, bright again below */
+.search-send .bead::after { inset: 0; padding: .75px; border-radius: 50%; background: linear-gradient(rgba(255, 255, 255, var(--bead-rim)), rgba(255, 255, 255, .05), rgba(255, 255, 255, calc(var(--bead-rim) - .2))); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0); }
+.search-send svg { stroke-width: 2.2; transition: transform 600ms var(--bead-spring); }
+@media (hover: hover) {
+  .search-send:not(:disabled):hover .bead { --bead-gloss: .85; --bead-pool: .8; --bead-rim: 1; transform: scale(1.12); box-shadow: 0 1px 2px -1px rgba(0, 0, 0, .2), 0 8px 12px -6px rgba(0, 0, 0, .3); }
+  .search-send:not(:disabled):hover .bead::before { transform: translateX(-50%) translateY(-.5px) scale(1.1, 1.18); }
+  .search-send:not(:disabled):hover svg { transform: translateY(-1.5px); }
+}
+/* a press gives at once, and the spring brings it back */
+.search-send:not(:disabled):active .bead { transform: scale(.95); transition-duration: 300ms, 300ms, 90ms, 400ms, 300ms, 300ms, 300ms; transition-timing-function: ease, ease, ease-out, ease, ease, ease, ease; }
+.search-send:disabled { --bead: var(--bead-off); --bead-glyph: #fff; cursor: default; }
+@media (prefers-reduced-motion: reduce) {
+  .search-send .bead, .search-send .bead::before, .search-send svg { transition: background-color 300ms ease, color 300ms ease, --bead-gloss 300ms ease, --bead-pool 300ms ease, --bead-rim 300ms ease; }
+  .search-send:not(:disabled):hover .bead, .search-send:not(:disabled):active .bead, .search-send:not(:disabled):hover svg { transform: none; }
+  .search-send:not(:disabled):hover .bead::before { transform: translateX(-50%); }
+}
 .search-results { min-height: 0; max-height: 400px; overflow-y: auto; margin: 0; padding: 8px; border-top: 1px solid var(--border); background: transparent; }
 .search-results:empty, .search-status:empty { display: none; }
 .search-dialog .row { color: var(--text-primary); }
@@ -430,10 +501,48 @@ button:focus-visible, .rename-agent input:focus-visible { outline: 2px solid var
 .search-status { flex: none; margin: 0; padding: 10px 18px 14px; font-size: 12px; color: var(--text-secondary); background: transparent; }
 .search-result .meta { flex: none; }
 .search-enter { display: flex; align-items: center; }
-/* the start row's agent, with more than one (launcher.js `withPick`) */
-.search-start-row { display: flex; align-items: center; gap: 8px; }
-.search-start-row .search-start { flex: 1; min-width: 0; }
-.search-agent { flex: none; max-width: 40%; height: 30px; padding: 0 8px; border: 1px solid var(--border-strong); border-radius: 999px; background: var(--bg-window); color: var(--text-primary); font: 600 13px var(--font-sans); }
+/* the agents, with more than one (launcher.js `renderPick`), under the
+   input as the iOS app's under its composer (HomeView.swift,
+   AgentSegments): their faces in a row, no track behind them, the picked
+   one on a pill round its face, its name beside it; a long row scrolls.
+   The pill is 6 out from the face (iOS's 5, and 1 more: the web's face is
+   a monitor, not a circle, and its corners need the room in the pill's
+   round end). The pill sits as far from the panel's left as from its
+   bottom, 12 each way, so it nests in the panel's round corner (33, the
+   pill's 19 and 12 more); 3 above leave its shadow room in the scroll's
+   clip. A pick opens its name and
+   closes the last one's over --agent-pick-ms, the pill following
+   (launcher.js `choose`, PILL_SLIDE_MS, the same ease-out cubic). The
+   pill's shadow falls below it alone, as under light from above: each
+   offset as far down as its blur reaches past its spread. */
+.search-dialog.has-agents { --search-agent-room: 53px; }
+.search-agent { flex: none; --agent-pill: color-mix(in srgb, var(--chat-composer) 80%, transparent); --agent-pill-shadow: 0 1px 2px -1px rgba(0, 0, 0, .14), 0 3px 6px -3px rgba(0, 0, 0, .12); --agent-pick-ms: 300ms; --agent-pick-ease: cubic-bezier(.33, 1, .68, 1); overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; padding: 3px 12px 12px; }
+.search-agent[hidden] { display: none; }
+.search-agent::-webkit-scrollbar { display: none; }
+.search-agent-track { position: relative; isolation: isolate; display: flex; gap: 2px; width: max-content; }
+.search-agent-face { position: relative; z-index: 1; display: inline-flex; flex: none; align-items: center; padding: 6px; border: 0; border-radius: 999px; background: transparent; color: var(--text-primary); font: 500 14px/18px var(--font-sans); cursor: pointer; }
+/* the face settles into its pill as it is picked, and lifts a touch under a pointer */
+/* a picture cut to a circle, the image too, so no corner shows while the
+   face scales (a transformed box's rounded clip can let its corners through) */
+.search-agent-face .agent-avatar.picture, .search-agent-face .agent-avatar.picture img { border-radius: 50%; clip-path: circle(50%); }
+.search-agent-face .agent-avatar.small { width: 26px; height: 26px; transform: scale(.94); transition: transform var(--agent-pick-ms) var(--agent-pick-ease); }
+.search-agent-face.on .agent-avatar.small { transform: none; }
+/* the name: a column opening from nothing to its words, which fade in as it opens */
+.search-agent-name { display: grid; grid-template-columns: 0fr; opacity: 0; transition: grid-template-columns var(--agent-pick-ms) var(--agent-pick-ease), opacity 160ms ease; }
+.search-agent-face.on .search-agent-name { grid-template-columns: 1fr; opacity: 1; transition: grid-template-columns var(--agent-pick-ms) var(--agent-pick-ease), opacity 200ms ease 80ms; }
+.search-agent-clip { min-width: 0; overflow: hidden; }
+.search-agent-label { display: block; width: max-content; max-width: 180px; padding: 0 8px 0 7px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.search-agent-face.on, .search-agent-pill { background: var(--agent-pill); box-shadow: var(--agent-pill-shadow); }
+/* the pill on its way (launcher.js `choose`): drawn by itself, under the faces */
+.search-agent-face.on.arriving { background: transparent; box-shadow: none; }
+.search-agent-pill { position: absolute; top: 0; left: 0; z-index: 0; height: 100%; border-radius: 999px; pointer-events: none; will-change: transform, width; }
+@media (hover: hover) {
+  .search-agent-face:not(.on):not(:disabled):hover { background: var(--bg-hover); }
+  .search-agent-face:not(.on):not(:disabled):hover .agent-avatar.small { transform: scale(1.04); }
+}
+.search-dialog .search-agent-face:focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 0; }
+.search-agent-face:disabled { cursor: default; opacity: .6; }
+@media (prefers-reduced-motion: reduce) { .search-agent-face .agent-avatar.small, .search-agent-name, .search-agent-face.on .search-agent-name { transition: none; } }
 .search-message .agent-preview { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 /* the launcher's Knowledge (launcher.js): a page of the person's brains or
    Session Archive, its snippet two lines, its fragment at its end */
@@ -784,9 +893,6 @@ label.settings-line { cursor: pointer; }
 .provider-body { min-width: 0; }
 .provider-name { display: block; font: var(--type-body-strong); }
 .provider-sub { display: block; margin-top: 2px; font: var(--type-body-sm); color: var(--text-secondary); }
-/* its note whole, wrapped (one line of the deployment's, at most 280
-   characters: a clamp cut its words in half); a key's price its own line */
-.provider-price { display: block; }
 .provider-foot { grid-column: 2 / 4; margin-top: 6px; font: var(--type-caption); color: var(--text-tertiary); }
 /* its light: on, green; waiting on the person, amber; off, an empty ring */
 .provider-state { display: grid; place-items: center; width: 22px; height: 22px; }
@@ -804,12 +910,20 @@ label.settings-line { cursor: pointer; }
 .provider-about { margin: 0 0 14px; color: var(--text-secondary); }
 .provider-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: -2px 0 14px; }
 .provider-chips span { display: inline-flex; align-items: center; padding: 3px 10px; border: 1px solid var(--border-strong); border-radius: 999px; font: var(--type-body-sm); }
-.provider-status { display: flex; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
+.provider-status { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-height: 48px; padding: 8px 8px 8px 12px; margin-bottom: 8px; border-radius: 12px; background: var(--surface-muted); font: var(--type-body); }
 .provider-status .provider-state { width: 12px; height: 12px; flex: none; }
 .provider-status-text { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+/* its state on one line: the buttons wrap under it first */
+.provider-state-name { white-space: nowrap; }
 .provider-account { font: var(--type-body-sm); color: var(--text-secondary); overflow-wrap: anywhere; }
 .provider-access { font: var(--type-body-sm); color: var(--text-secondary); }
-.provider-status .settings-actions { flex: none; margin: 0; }
+.provider-status .settings-actions { flex: none; margin: 0 0 0 auto; }
+/* on a phone, its buttons go under what it says, side by side and the row's
+   width, never past the sheet's edge */
+@media (max-width: 520px) {
+  .provider-status .settings-actions { flex: 1 0 100%; margin: 2px 0 0; }
+  .provider-status .settings-actions > button { flex: 1 1 auto; justify-content: center; }
+}
 .provider-status .quiet { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; background: var(--bg-active); color: var(--text-primary); }
 .provider-status [data-action=disconnect], .provider-status [data-action=remove-key] { color: var(--danger-text); }
 .provider-details { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0 2px; }
@@ -1250,7 +1364,12 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 #chats { flex: 1 1 auto; min-height: 0; max-height: none; overflow-x: hidden; padding-inline: 2px; }
 /* its rows keep their height: past the room, the list scrolls, never squeezes them */
 #chats > * { flex-shrink: 0; }
-#chats .agent-hero { --edge-light: 0; flex: none; gap: 10px; height: 48px; margin: 10px 0 2px; padding: 8px 13px; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
+#chats .agent-hero { --edge-light: 0; flex: none; gap: 0; height: 48px; margin: 10px 0 2px; padding: 0; border: 1px solid transparent; border-radius: 999px; background: var(--bg-sidebar); }
+/* its face and name, which open its menu, then its New chat (chat-list.js `hero`) */
+.agent-hero-open { display: flex; flex: 1; align-items: center; gap: 10px; min-width: 0; height: 100%; padding: 8px 6px 8px 13px; border: 0; border-radius: inherit; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.agent-new-chat { display: grid; flex: none; place-items: center; width: 32px; height: 32px; margin-right: 8px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--text-secondary); cursor: pointer; }
+.agent-new-chat:hover { background: var(--bg-hover); color: var(--text-primary); }
+.agent-new-chat svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 #chats .agent-hero:first-child { margin-top: 2px; }
 #chats .agent-hero:hover { background: var(--bg-active); }
 .agent-hero-face { display: flex; flex: none; }
@@ -1285,7 +1404,7 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .launcher-key { color: var(--text-tertiary); font: 500 12px/1 var(--font-sans); white-space: nowrap; }
 @media (pointer: coarse) and (not (any-pointer: fine)) { .launcher-key { display: none; } .sidebar-new-chat { padding: 0; } }
 .sidebar-new-chat, #chats .agent-hero { position: relative; border-color: transparent; }
-#chats .agent-hero:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
+#chats .agent-hero-open:focus-visible, .agent-new-chat:focus-visible, .sidebar-new-chat:focus-visible, #new-chat:focus-visible, .search-dialog button:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; }
 /* The composer's pointer-following reflection, with no resting outline. */
 .sidebar-new-chat::before, .sidebar-new-chat::after, .agent-hero::before, .agent-hero::after, .agent-menu-edge::before, .agent-menu-edge::after {
   content: ""; position: absolute; inset: -1px; z-index: 1; border-radius: inherit; padding: 1px; pointer-events: none;
@@ -1298,8 +1417,8 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .sidebar-new-chat::after, .agent-hero::after, .agent-menu-edge::after { filter: blur(2px); opacity: calc(var(--edge-light) * .35); }
 /* an agent's hero, open: its menu hangs from it, one surface with it, and
    the menu's edge (shell.js `menuEdge`) is lit in the hero's place */
-#chats .agent-hero[aria-expanded="true"] { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
-.agent-hero[aria-expanded="true"]::before, .agent-hero[aria-expanded="true"]::after { opacity: 0; }
+#chats .agent-hero:has(> .agent-hero-open[aria-expanded="true"]) { border-radius: 24px 24px 0 0; background: var(--bg-sidebar); }
+.agent-hero:has(> .agent-hero-open[aria-expanded="true"])::before, .agent-hero:has(> .agent-hero-open[aria-expanded="true"])::after { opacity: 0; }
 .menu.agent-menu { --edge-light: 0; min-width: 0; padding: 4px 8px 10px; border: 0; border-radius: 0 0 24px 24px; background: var(--bg-sidebar); box-shadow: none; overflow-y: auto; }
 .menu.agent-menu button { min-height: 34px; border-radius: 8px; font-size: 13px; }
 .agent-menu-edge { --edge-light: 0; position: fixed; z-index: 21; border-radius: 24px; pointer-events: none; }
@@ -1317,6 +1436,8 @@ button.skills-row-managed { flex-direction: row; align-items: center; gap: 14px;
 .chat-line, .chat-sub { display: flex; align-items: center; gap: 6px; min-width: 0; }
 .chat-line .label { color: var(--text-primary); font-size: 14px; line-height: 19px; }
 .chat-line .pin-mark, .agent-hero .pin-mark { display: inline-grid; flex: none; place-items: center; color: var(--text-tertiary); }
+/* a line with no time to give the ⋯ its place keeps the ⋯'s room, so its marks (pin, bell) never sit under it */
+#chats .chat-line:not(:has(time)) { padding-right: 24px; }
 .chat-line .pin-mark svg, .agent-hero .pin-mark svg { width: 12px; height: 12px; stroke-width: 2; }
 .chat-line time { flex: none; margin-left: auto; color: var(--text-tertiary); font-size: 11.5px; line-height: 19px; }
 .chat-sub { min-height: 17px; color: var(--text-tertiary); font-size: 12.5px; line-height: 17px; }

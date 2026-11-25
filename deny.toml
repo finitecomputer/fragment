@@ -1,0 +1,38 @@
+# cargo-deny's policy for the root workspace's Cargo.lock: the advisories
+# check alone, run by `cargo xtask audit` (xtask/src/audit.rs) in CI's
+# `audit` workflow, never by `check`. What is scanned, when, and how a
+# finding is handled: docs/security/dependency-scanning.md.
+#
+# Every finding fails the run but an entry below. Each entry names the
+# advisory, why it may wait, and the Linear issue that removes it. An
+# entry no longer matched fails the run too (`unused-ignored-advisory`),
+# so a fixed finding leaves this list in the same change that fixes it.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# A vulnerability, at any depth, is always a finding (cargo-deny has no
+# scope for those). An unsoundness is one at any depth too: cargo-deny 0.20
+# counts only workspace crates' unless told "all". A crate the workspace
+# depends on directly that RustSec calls unmaintained is one too; one only
+# deeper in the graph is not (chrono, through others).
+unsound = "all"
+unmaintained = "workspace"
+# a yanked version locked: shown, and fails nothing
+yanked = "warn"
+unused-ignored-advisory = "deny"
+ignore = [
+    # crypto-bigint 0.5.5 (through k256/p256 0.13): operations meant to be
+    # constant time may branch on secrets. Fixed only in 0.7.6, which
+    # needs the k256/p256 0.14 migration (FIN-636). Remote timing on a
+    # signing path (the CLI's NIP-98, p256 tokens in fragment-core) is
+    # noisy; verification handles public data only.
+    { id = "RUSTSEC-2026-0387", reason = "needs the k256/p256 0.14 migration: FIN-636" },
+    # rsa 0.9 (Marvin, timing): in crates/fakes alone, the vendor fakes
+    # that sign test tokens on this machine and in CI. Nothing that ships
+    # links it (cargo tree -i rsa), so no secret of ours is at stake. No
+    # 0.9 release fixes it.
+    { id = "RUSTSEC-2023-0071", reason = "test fakes only (crates/fakes); nothing shipped links rsa" },
+]

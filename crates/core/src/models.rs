@@ -500,6 +500,10 @@ pub struct Models {
     /// embeddings`, crate::embed): no chat slot, so no call names it as
     /// one, and no route falls back to it.
     pub embeddings: crate::embed::Slot,
+    /// Where the route's transcriptions run, and their price (`models.
+    /// transcription`, crate::transcribe), when the deployment names one:
+    /// no chat slot either. Unnamed, it transcribes nothing.
+    pub transcription: Option<crate::transcribe::Slot>,
 }
 
 /// A slot (`models.slots.<name>`): where its model runs, whether it says
@@ -604,6 +608,10 @@ fn slots_of(slots: Map<String, Value>) -> Result<Vec<(ModelSlot, Option<String>)
         let at = format!("models.slots.{name}");
         if !valid_slot_name(&name) {
             return Err(format!("models.slots: {name:?} is no slot's name: 1 to {SLOT_NAME_MAX_BYTES} of a-z, 0-9 and _, a letter first"));
+        }
+        // a slot's key is bound by its name (`secrets_store::model_key`)
+        if [crate::embed::EMBEDDINGS, crate::transcribe::TRANSCRIPTION].contains(&name.as_str()) {
+            return Err(format!("models.slots: {name:?} is models.{name}'s own name, whose key is bound by it: name the chat slot otherwise"));
         }
         let o = row.as_object_mut().ok_or_else(|| format!("{at}: a slot is where a model runs, an object"))?;
         let fallback = match o.remove(FALLBACK) {
@@ -732,8 +740,10 @@ pub fn legacy(models: &Value) -> Result<Value, String> {
     }
     let mut old = old.clone();
     let mut out = Map::new();
-    if let Some(e) = old.remove(crate::embed::EMBEDDINGS) {
-        out.insert(crate::embed::EMBEDDINGS.into(), e);
+    for own in [crate::embed::EMBEDDINGS, crate::transcribe::TRANSCRIPTION] {
+        if let Some(e) = old.remove(own) {
+            out.insert(own.into(), e);
+        }
     }
     let mut slots = Map::new();
     for (name, model) in [("cheap", CHEAP_MODEL), ("medium", MEDIUM_MODEL), (FALLBACK, FALLBACK_MODEL_DEFAULT), (VISION, VISION_MODEL_DEFAULT)] {
@@ -770,8 +780,8 @@ impl Models {
     }
 
     /// A deployment's models: `named` (`FRAGMENT_MODELS`: `{default,
-    /// routes, slots, embeddings?}`), or `default_config` when it names
-    /// none, checked. Refused, saying why: a key it does not take, a
+    /// routes, slots, embeddings?, transcription?}`), or `default_config`
+    /// when it names none (no transcription), checked. Refused, saying why: a key it does not take, a
     /// default that is none of its routes, the slots' and routes' own
     /// refusals (`slots_of`, `routes_of`), a fallback that is no other
     /// slot, or one that reads no images behind a slot a route sends its
@@ -794,6 +804,7 @@ impl Models {
             None => default_config(),
         };
         let embeddings = crate::embed::slot_of(&mut v)?;
+        let transcription = crate::transcribe::slot_of(&mut v)?;
         let Value::Object(mut top) = v else { return Err("models is an object: its default, routes and slots".into()) };
         let default = match top.remove("default") {
             Some(Value::String(d)) => d,
@@ -802,7 +813,7 @@ impl Models {
         let Some(Value::Array(routes)) = top.remove("routes") else { return Err("models.routes is the list of routes people pick: [{name, label?, slot, vision?, deep?}]".into()) };
         let Some(Value::Object(slots)) = top.remove("slots") else { return Err("models.slots is an object of slots by name, each where a model runs".into()) };
         if let Some(key) = top.keys().next() {
-            return Err(format!("models: {key} is none of default, routes, slots, embeddings"));
+            return Err(format!("models: {key} is none of default, routes, slots, embeddings, transcription"));
         }
         let read = slots_of(slots)?;
         let slot_at = |name: &str| read.iter().position(|(s, _)| s.name == name);
@@ -816,7 +827,7 @@ impl Models {
         }
         let slots: Vec<ModelSlot> = read.into_iter().zip(fallbacks).map(|((s, _), fallback)| ModelSlot { fallback, ..s }).collect();
         let default = routes.iter().position(|r| r.name == default).ok_or_else(|| format!("models.default is {default:?}, which is none of its routes"))?;
-        let models = Models { slots, routes, default, embeddings };
+        let models = Models { slots, routes, default, embeddings, transcription };
         for (at, s) in models.slots.iter().enumerate() {
             if s.opts.reasoning.is_some() && !models.routes.iter().any(|r| r.slot == at || r.deep == Some(at)) {
                 return Err(format!("models.slots.{}: reasoning is a mode's, a route's own slot's or its deep's", s.name));
@@ -840,6 +851,9 @@ impl Models {
         check(embeddings, book, loopback).map_err(|e| format!("models.embeddings: {e}"))?;
         if let Some(s) = models.slots.iter().find(|s| s.upstream.model() == embeddings.model()) {
             return Err(format!("models.embeddings: {:?} is models.slots.{}'s model, a chat model: an embeddings slot runs a model of its own", embeddings.model(), s.name));
+        }
+        if let Some(t) = &models.transcription {
+            place(&t.upstream, loopback, crate::transcribe::OPENAI_PATH).map_err(|e| format!("models.transcription: {e}"))?;
         }
         private_closed(&models)?;
         Ok(models)
@@ -871,10 +885,16 @@ impl Models {
 
     /// The book's rows for what a slot's API says a call cost (FIN-616):
     /// OpenRouter's (`Upstream::used`), whatever the slots, so a row queued
-    /// before a deploy that moved its slot off OpenRouter is still priced.
+    /// before a deploy that moved its slot off OpenRouter is still priced;
+    /// and what a transcription on an OpenAI-compatible API cost
+    /// (`transcribe::cost_key`), the same way.
     pub fn cost_keys(&self) -> Vec<crate::price::KeyPrice> {
         let (micros, per) = OPENROUTER_COST_PRICE;
-        vec![crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }]
+        let mut keys = vec![crate::price::KeyPrice { key: OPENROUTER_COST.to_string(), micros, per }];
+        // and what a transcription on an OpenAI-compatible API cost, also
+        // whatever the slots
+        keys.push(crate::transcribe::cost_key());
+        keys
     }
 
     /// The place of the slot named `name`.
@@ -1190,16 +1210,27 @@ impl UnknownRoute {
     }
 }
 
-/// One slot's model, checked (`Models::parse`).
-fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), String> {
-    if let Upstream::Openai { base_url, model, body, .. } = upstream {
+/// Where a slot's model runs, checked: its id, and an OpenAI-compatible
+/// API's `base_url` https on a host name (`loopback`: or a local fleet's
+/// fake), without a query or a trailing `/`, as the route adds `path`.
+fn place(upstream: &Upstream, loopback: bool, path: &str) -> Result<(), String> {
+    if let Upstream::Openai { base_url, .. } = upstream {
         crate::catalog::row_url(base_url, loopback).map_err(|e| format!("base_url: {e}"))?;
         if base_url.ends_with('/') || base_url.contains('?') {
-            return Err("base_url is named without a query or a trailing /: the route adds /chat/completions".into());
+            return Err(format!("base_url is named without a query or a trailing /: the route adds {path}"));
         }
-        if !crate::catalog::valid_model_id(model) {
-            return Err(format!("{model:?} is no model id (1-{} of letters, digits and . _ - : / @)", crate::catalog::MODEL_ID_MAX_BYTES));
-        }
+    }
+    let model = upstream.model();
+    if !crate::catalog::valid_model_id(model) {
+        return Err(format!("{model:?} is no model id (1-{} of letters, digits and . _ - : / @)", crate::catalog::MODEL_ID_MAX_BYTES));
+    }
+    Ok(())
+}
+
+/// One slot's model, checked (`Models::parse`).
+fn check(upstream: &Upstream, book: &PriceBook, loopback: bool) -> Result<(), String> {
+    if let Upstream::Openai { body, .. } = upstream {
+        place(upstream, loopback, "/chat/completions")?;
         if let Some(body) = body {
             let bytes = serde_json::to_vec(body).expect("a JSON object serializes").len();
             if bytes > UPSTREAM_BODY_MAX_BYTES {
@@ -3037,7 +3068,7 @@ mod tests {
         refused(&|v| v["routes"][2] = json!("american"), "models.routes: each is {name, label?, slot, vision?, deep?}");
         refused(&|v| v["default"] = json!("american_typo"), "models.default is \"american_typo\", which is none of its routes");
         refused(&|v| { v.as_object_mut().unwrap().remove("default"); }, "models.default names the route agents run on unless they name another, not null");
-        refused(&|v| v["tiers"] = json!({}), "models: tiers is none of default, routes, slots, embeddings");
+        refused(&|v| v["tiers"] = json!({}), "models: tiers is none of default, routes, slots, embeddings, transcription");
         refused(&|v| v["slots"] = json!({}), &format!("models.slots: 1 to {SLOTS_MAX} slots, each where a model runs, not 0"));
         // a private route reaching the American slots is refused: privacy is a slot's, never a name's
         refused(&|v| v["slots"]["cheap"]["fallback"] = json!("inkling"), "models.slots.inkling: the route cheap is private, and its agents' failures and stalls reach inkling, so mark a private model there (\"private\": true)");
@@ -3792,6 +3823,59 @@ mod tests {
         }
         let err = old_parse(r#"{"embeddings": {"provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024, "private": true}}"#, &book, false).unwrap_err();
         assert!(err.contains("models.embeddings: Workers AI and OpenRouter are not private"), "{err}");
+    }
+
+    /// Goal: a deployment's transcription slot is its own
+    /// (crate::transcribe), named by its config alone: none unnamed (the
+    /// code names no model); Workers AI's at its neurons, no book row; a
+    /// box's own server on an OpenAI-compatible API, its seconds a row of
+    /// the book's keys at its price; checked where it runs as every slot
+    /// is; no chat slot of its name. Method: parse each, either shape.
+    #[test]
+    fn the_transcription_slot_is_its_own() {
+        let book = PriceBook::defaults();
+        assert_eq!(Models::defaults().transcription, None, "the default config transcribes nothing");
+        assert_eq!(old_parse("{}", &book, false).unwrap().transcription, None);
+        let whisper = json!({ "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 } });
+        let m = old_parse(&json!({ "transcription": whisper }).to_string(), &book, false).unwrap();
+        let t = m.transcription.as_ref().unwrap();
+        assert_eq!((t.upstream.model(), t.price), ("@cf/openai/whisper-large-v3-turbo", crate::transcribe::Price::Neurons { milli_a_minute: 46_630 }));
+        assert!(m.slots.iter().all(|s| s.name != crate::transcribe::TRANSCRIPTION), "no chat slot");
+        assert_eq!(m.cost_keys(), Models::defaults().cost_keys(), "the same rows whatever the slots");
+        let listed = legacy(&json!({ "transcription": whisper })).unwrap();
+        assert_eq!(listed["transcription"], whisper, "the old shape's lifted, as embeddings'");
+        let local = json!({ "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:18092/v1", "model": "whisper-large-v3", "price": { "audio_minute": 0.006 } } });
+        let m = old_parse(&local.to_string(), &book, true).unwrap();
+        let keys = m.cost_keys();
+        assert!(keys.contains(&crate::transcribe::cost_key()) && keys == Models::defaults().cost_keys(), "{keys:?}");
+        let mut priced = m.priced(book.clone());
+        priced.keys.extend(keys);
+        assert_eq!(priced.validate(), Ok(()));
+        let minute = crate::transcribe::usage_of(m.transcription.as_ref().unwrap(), &json!({ "duration": 60.0 })).unwrap();
+        assert_eq!(priced.price(&minute).unwrap().list, 6_000, "a minute at $0.006");
+        let openai = |extra: Value| {
+            let mut v = local.clone();
+            v["transcription"].as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            old_parse(&v.to_string(), &book, false)
+        };
+        for (got, why) in [
+            (openai(json!({})), "models.transcription: base_url:"),
+            (openai(json!({ "base_url": "https://stt.example/v1/" })), "the route adds /audio/transcriptions"),
+            (openai(json!({ "base_url": "https://stt.example/v1", "model": "two words" })), "is no model id"),
+            (openai(json!({ "base_url": "https://stt.example/v1", "price": { "input": 0, "output": 0 } })), "audio_minute"),
+            (old_parse(r#"{"medium": {"provider": "workers_ai", "model": "@cf/zai-org/glm-5.3"}, "transcription": {"provider": "workers_ai", "model": "@cf/m"}}"#, &book, false), "neurons_a_minute"),
+        ] {
+            let err = got.unwrap_err();
+            assert!(err.contains(why), "{err} ({why})");
+        }
+        assert!(openai(json!({ "base_url": "https://stt.example/v1" })).is_ok(), "https on a host name");
+        for own in [crate::transcribe::TRANSCRIPTION, crate::embed::EMBEDDINGS] {
+            let mut slots = Map::new();
+            slots.insert(own.to_string(), json!({ "provider": "workers_ai", "model": CHEAP_MODEL }));
+            let v = json!({ "default": "cheap", "routes": [{ "name": "cheap", "slot": own }], "slots": slots });
+            let err = Models::parse(Some(&v.to_string()), &book, false).unwrap_err();
+            assert!(err.contains(&format!("models.slots: {own:?} is models.{own}'s own name")), "{err}");
+        }
     }
 
     /// Goal: a deployment whose tiers are private embeds nothing on a slot

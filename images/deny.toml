@@ -1,0 +1,18 @@
+# cargo-deny's policy for images/' Cargo.lock (the bridge, the stub and
+# Hermes' boot, on computers): as the root's deny.toml, which says how this
+# list is kept; docs/security/dependency-scanning.md.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+unsound = "all"
+unmaintained = "workspace"
+yanked = "warn"
+unused-ignored-advisory = "deny"
+ignore = [
+    # crypto-bigint 0.5.5 (through k256 0.13): the SimpleX door signs with
+    # k256. Fixed only in 0.7.6, behind the k256 0.14 migration (FIN-636).
+    { id = "RUSTSEC-2026-0387", reason = "needs the k256 0.14 migration: FIN-636" },
+]

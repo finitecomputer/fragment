@@ -58,7 +58,14 @@ function storage() {
       throw e;
     }
   };
-  return { sql, transactionSync, alarms, setAlarm: async (t) => void alarms.push(t) };
+  const st = { sql, transactionSync, alarms, setAlarm: async (t) => void alarms.push(t) };
+  st.deleteAlarm = async () => void (alarms.length = 0);
+  // its storage gone whole: every table, as a Durable Object's SQLite's
+  st.deleteAll = async () => {
+    for (const { name } of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()) db.exec(`DROP TABLE ${name}`);
+  };
+  st.tables = () => db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all().map((t) => t.name);
+  return st;
 }
 
 // The bucket: `uploading`, when set, is awaited in the middle of each put.
@@ -72,6 +79,11 @@ function bucket() {
     return { size: bytes.length };
   };
   b.delete = async (ks) => [].concat(ks).forEach((k) => b.files.delete(k));
+  // a page of the keys under `prefix` (R2's list, at most `limit`)
+  b.list = async ({ prefix, limit = 1000 }) => {
+    const keys = [...b.files.keys()].filter((k) => k.startsWith(prefix)).sort();
+    return { objects: keys.slice(0, limit).map((key) => ({ key })), truncated: keys.length > limit };
+  };
   return b;
 }
 
@@ -85,6 +97,11 @@ function container() {
   };
   c.monitor = () => new Promise(() => {});
   c.signal = async (n) => void c.signals.push(n);
+  c.destroyed = 0;
+  c.destroy = async () => {
+    c.running = false;
+    c.destroyed += 1;
+  };
   // its runner: `answers`, each ask's (status, body) in turn, then 202
   c.asked = [];
   c.answers = [];
@@ -113,7 +130,7 @@ function door({ noDoors = false } = {}) {
   const inbox = { status: 200, posts: [] };
   const front = { fetch: async (url, init) => (inbox.posts.push({ url, secret: init.headers["x-simplex-door-secret"], body: JSON.parse(init.body) }), new Response("{}", { status: inbox.status })) };
   const ctx = { storage: st, container: c, exports: { DoorEgress: () => ({}), default: front }, blockConcurrencyWhile: (f) => f() };
-  const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_COMPUTER_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
+  const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   const call = (method, path, headers = {}, body) => o.fetch(new Request(`http://door${path}`, { method, headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
   const d = { o, st, c, blobs, call, inbox };
   // its connector's job, as the platform sends it (the door and the connector named)
@@ -130,8 +147,29 @@ function door({ noDoors = false } = {}) {
   d.restore = (started) => call("GET", "/egress/save", { "x-door-generation": String(started) });
   d.save = (life, seq, bytes = `save ${life}-${seq}`) => call("PUT", `/egress/save?seq=${seq}`, { "x-door-generation": String(life), "x-door-mark": "0", "content-length": String(bytes.length) }, bytes);
   d.unreadable = (life, save) => call("POST", "/egress/unreadable", { "x-door-generation": String(life) }, JSON.stringify({ save, why: "a test's" }));
+  // its end, as the platform asks it: its connector unbound, or (`last`)
+  // its connector's life over (deleted, wiped, other code)
+  d.end = (name = DOOR, last = false) => call("POST", "/door/end", {}, JSON.stringify({ door: name, final: last }));
+  // the same object started again over its storage (an eviction)
+  d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
+  d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
+  // a file its runner gives (`life`'s), and one its connector gives or reads
+  d.give = (life, sha, bytes, type = "audio/mp4") => call("PUT", `/egress/file/${sha}`, { "x-door-generation": String(life), "content-type": type, "content-length": String(bytes.length) }, bytes);
+  d.jobFile = (method, sha, bytes) => call(method, `/job/file/${sha}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...(bytes ? { "content-type": "application/pdf", "content-length": String(bytes.length) } : {}) }, bytes);
   return d;
 }
+
+const sha = (n) => String(n).padStart(2, "0").repeat(32);
+
+// A file its runner gives (`life`'s) and a delivery names (`id`), which
+// its connector keeps and says so: one nothing uses any more.
+async function used(d, life, n, id = `u${n}`) {
+  await d.give(life, sha(n), "x");
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "x", type: "application/octet-stream", size: 1 } }));
+  await d.jobFile("GET", sha(n));
+  await d.job("kept", { id });
+}
+const uses = (d, n) => d.st.sql.exec("SELECT owner FROM uses WHERE sha = ? ORDER BY owner", sha(n)).toArray().map((u) => u.owner);
 
 const life = (r) => Number(r.headers.get("x-door-life"));
 
@@ -389,4 +427,414 @@ test("a link asked again after its unlink (a job's retry, a request of its own) 
   assert.equal((await again.json()).error, "overtaken");
   assert.deepEqual(d.c.asked.filter((a) => a.method === "POST").map((a) => a.path), ["/link", "/unlink"], "never a link after the unlink");
   assert.equal((await d.job("link", { n: 3 })).status, 202, "a newer link goes");
+});
+
+// ---- its end (its connector deleted, unbound, or running other code) ----
+
+// a connected door that saved: its connector's door, one save and a file
+// of its own beside (the end deletes its whole prefix)
+async function saved() {
+  const d = door();
+  assert.equal((await d.connect()).status, 200);
+  const l = life(await d.restore(1));
+  assert.equal((await d.save(l, 1)).status, 200);
+  d.blobs.files.set(`doors/${DOOR}/saves/stray`, "a file a crash left");
+  d.blobs.files.set(`doors/${NAME}--fedcba987654/saves/1-1`, "another life's door");
+  return { d, l };
+}
+
+test("its end ends it: no last save, every file under its prefix gone, its storage whole gone, its watch let go; asked again, the same", async () => {
+  const { d } = await saved();
+  assert.equal(d.prefixed().length, 2);
+  const r = await d.end();
+  assert.equal(r.status, 200);
+  assert.deepEqual(await r.json(), { ended: DOOR, files: 2 });
+  assert.equal(d.c.destroyed, 1, "its container ended at once");
+  assert.deepEqual(d.c.signals, [], "never asked to save last");
+  assert.deepEqual(d.prefixed(), [], "every file of its own gone");
+  assert.ok(d.blobs.files.has(`doors/${NAME}--fedcba987654/saves/1-1`), "another life's door's files untouched");
+  assert.deepEqual(d.st.tables(), [], "its storage gone whole");
+  assert.deepEqual(d.st.alarms, [], "its watch let go");
+  assert.equal((await d.job("state")).status, 410, "ended, it answers its connector's asks no more");
+  assert.deepEqual(d.st.tables(), [], "and keeps nothing for them");
+  const again = await d.end();
+  assert.deepEqual(await again.json(), { ended: DOOR, files: 0 }, "asked again, the same");
+});
+
+test("an upload under way across its end lets go of its own file, which nothing names", async () => {
+  const d = door();
+  await d.connect();
+  const l = life(await d.restore(1));
+  let holding, release;
+  const held = new Promise((r) => (holding = r));
+  const gate = new Promise((r) => (release = r));
+  d.blobs.uploading = async () => {
+    d.blobs.uploading = null;
+    holding();
+    await gate;
+  };
+  const upload = d.save(l, 1);
+  await held;
+  assert.equal((await d.end()).status, 200, "ended while its save uploads");
+  release();
+  assert.equal((await upload).status, 410, "the save is refused: its door ended");
+  assert.deepEqual(d.prefixed(), [], "its file, landed after the end's deletion, gone too");
+  assert.deepEqual(d.st.tables(), []);
+});
+
+test("a door already stopped ends the same: its saves and storage gone", async () => {
+  const { d } = await saved();
+  assert.equal((await d.lever("stop")).status, 200);
+  assert.ok(d.row().stopped);
+  assert.equal((await d.end()).status, 200);
+  assert.deepEqual(d.prefixed(), []);
+  assert.deepEqual(d.st.tables(), []);
+});
+
+test("a door never started keeps nothing at its end (a connector that never connected)", async () => {
+  const d = door();
+  assert.equal((await d.end()).status, 200);
+  assert.deepEqual(d.st.tables(), [], "its schema, made as it began, gone too");
+  assert.deepEqual(d.prefixed(), []);
+});
+
+test("ended, its connector's connect starts a new door, nothing of the old", async () => {
+  const { d } = await saved();
+  await d.end();
+  const r = await d.connect();
+  assert.equal(r.status, 200, "a new door, never refused for the old one's saves");
+  assert.equal(d.row().saved, 0);
+  assert.equal(d.row().stopped, null);
+  assert.equal(life(await d.restore(d.row().started)), d.row().started + 1);
+  assert.equal((await d.restore(d.row().started)).status, 204, "none to restore: a new door");
+});
+
+test("its last end (its connector's life over) is for good: a connect delivered late starts nothing, then or after a restart", async () => {
+  const { d } = await saved();
+  assert.equal((await d.end(DOOR, true)).status, 200);
+  assert.deepEqual(d.prefixed(), []);
+  const late = await d.connect();
+  assert.equal(late.status, 410, "a connect sent before its end, come after it");
+  assert.equal((await late.json()).error, "over");
+  assert.equal((await d.start()).status, 410, "nor the lever's start");
+  assert.equal(d.c.starts.length, 1, "no container started again");
+  assert.deepEqual(d.st.tables(), ["over"], "its one row, all it keeps");
+  // started again over its storage, as an eviction does
+  const o = d.again();
+  const call = (path, headers, body) => o.fetch(new Request(`http://door${path}`, { method: "POST", headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
+  const r = await call("/job/connect", { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "x-door-secret": "s3cret-of-the-inbox" }, JSON.stringify({ name: "Juniper" }));
+  assert.equal(r.status, 410);
+  assert.equal((await call("/door/end", {}, JSON.stringify({ door: DOOR, final: true }))).status, 200, "ended again, the same");
+  assert.deepEqual(d.st.tables(), ["over"]);
+  await o.alarm();
+  assert.equal(d.c.starts.length, 1, "its alarm starts nothing");
+  // an unbound connector's end is not its last: bound again, it connects
+  const { d: e } = await saved();
+  await e.end();
+  assert.equal((await e.connect()).status, 200);
+});
+
+test("its end names its own door alone", async () => {
+  const { d } = await saved();
+  assert.equal((await d.end(`${NAME}--fedcba987654`)).status, 409, "another life's door is not this one");
+  assert.equal((await d.end("not a door name!")).status, 400);
+  assert.equal(d.prefixed().length, 2, "nothing ended");
+  assert.ok(d.st.tables().includes("door"));
+});
+
+test("a file its runner received is held for its connector: once, from its running life alone, while there is room", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  assert.equal((await d.give(life1, sha(1), "voice bytes")).status, 200);
+  assert.deepEqual(await (await d.give(life1, sha(1), "voice bytes")).json(), { kept: sha(1), again: true }, "given again: held once");
+  assert.equal((await d.give(life1 + 1, sha(2), "x")).status, 409, "another life's: refused");
+  assert.equal((await d.give(life1, "nope", "x")).status, 400, "a file named by no SHA-256");
+  assert.equal((await d.call("PUT", `/egress/file/${sha(3)}`, { "x-door-generation": String(life1) })).status, 400, "no bytes, no length: refused");
+  // its connector keeps it as one of its blobs: its bytes, its type, named
+  const r = await d.jobFile("GET", sha(1));
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.headers.get("x-door-sha256"), r.headers.get("content-type"), r.headers.get("content-length"), await r.text()], [sha(1), "audio/mp4", "11", "voice bytes"]);
+  assert.equal((await d.jobFile("GET", sha(9))).status, 404, "one it does not hold");
+  assert.equal((await d.call("GET", `/job/file/${sha(1)}`, { "x-fragment-door": `${NAME}--fedcba987654`, "x-fragment-connector": NAME })).status, 409, "another life's connector: refused");
+  // as many as it may hold: a file nothing uses any more (its delivery
+  // kept) makes room; one still used never does; with none unused, a new
+  // one is refused until older ones go
+  assert.deepEqual(uses(d, 1), ["given"], "given: its runner's use, until a delivery names it");
+  for (let n = 10; n < 10 + 62; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
+  await used(d, life1, 80);
+  assert.equal((await d.give(life1, sha(98), "x")).status, 200, "the one nothing uses made room");
+  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files WHERE sha = ?", sha(80)).toArray(), [], "it was let go");
+  assert.ok(!d.prefixed().includes(`doors/${DOOR}/files/${sha(80)}`), "its file too");
+  assert.ok(d.st.sql.exec("SELECT 1 FROM files WHERE sha = ?", sha(1)).toArray().length, "read by its connector, never said kept: still used, held");
+  const full = await d.give(life1, sha(99), "x");
+  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"], "every one still used: refused");
+  // a day on, its watch lets them go, rows and files
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 0);
+  assert.deepEqual(d.prefixed().filter((k) => k.includes("/files/")), [], "their files gone too");
+  assert.equal((await d.give(life1, sha(99), "x")).status, 200, "room again");
+});
+
+test("files on their way in hold their room: two given at once past it, one is refused", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  for (let n = 10; n < 10 + 63; n += 1) await d.give(life1, sha(n), "x");
+  // the first held mid-upload while the second is given
+  let release;
+  const held = new Promise((r) => (release = r));
+  d.blobs.uploading = () => held;
+  const first = d.give(life1, sha(1), "one");
+  await new Promise((r) => setTimeout(r, 10));
+  d.blobs.uploading = null;
+  const second = await d.give(life1, sha(2), "two");
+  release();
+  assert.equal((await first).status, 200);
+  assert.deepEqual([second.status, (await second.json()).error], [503, "files_full"], "the second refused: the first held its room");
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 64, "never past its bound");
+  // the same file given twice at once (room for one, a file none uses):
+  // the second asked again later, "uploading"
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "u10", kind: "file", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(10), name: "x", type: "application/octet-stream", size: 1 } }));
+  await d.job("kept", { id: "u10" });
+  d.blobs.uploading = () => new Promise((r) => setTimeout(r, 20));
+  const [a, b] = await Promise.all([d.give(life1, sha(3), "three"), d.give(life1, sha(3), "three")]);
+  assert.deepEqual([a.status, b.status, (await b.json()).error], [200, 503, "uploading"]);
+});
+
+test("every delivery its inbox has yet to take keeps its file past a day", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  for (const n of [1, 2]) {
+    await d.give(life1, sha(n), `voice ${n}`);
+    await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: `v${n}`, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(n), name: "memo.m4a", type: "audio/mp4", size: 7 } }));
+  }
+  await d.give(life1, sha(3), "named by no delivery");
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files ORDER BY sha").toArray().map((f) => f.sha), [sha(1), sha(2)], "both waiting deliveries kept theirs, the oldest and the one behind it; the other went");
+  d.inbox.status = 200;
+  await d.o.alarm();
+  for (const n of [1, 2]) assert.equal((await d.jobFile("GET", sha(n))).status, 200, `its connector keeps file ${n} once its inbox takes the delivery`);
+});
+
+test("a reply's file is used until its reply is done, whatever its runner reads; said done again, another reply's use stays", async () => {
+  const d = door();
+  await d.connect();
+  const give = (key) => d.call("PUT", `/job/file/${sha(5)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF");
+  await give("chat:9");
+  assert.deepEqual(uses(d, 5), ["r:chat:9"], "given for its reply");
+  await d.call("GET", `/egress/file/${sha(5)}`);
+  assert.deepEqual(uses(d, 5), ["r:chat:9"], "its runner's read ends nothing (a reply read again after a sync finds it)");
+  await give("chat:10");
+  assert.deepEqual(uses(d, 5), ["r:chat:10", "r:chat:9"], "another reply's too");
+  const files = [{ sha256: sha(5), name: "plan.pdf", type: "application/pdf", size: 4 }];
+  d.c.answers.push([200, { files: true }], [202, { done: false }]);
+  await d.job("reply", { key: "chat:9", text: "", files });
+  assert.deepEqual(uses(d, 5), ["R:chat:9", "r:chat:10"], "not yet done: taken by its runner, its use its runner's");
+  for (let n = 0; n < 2; n += 1) {
+    d.c.answers.push([200, { files: true }], [200, { done: true }]);
+    await d.job("reply", { key: "chat:9", text: "", files });
+  }
+  assert.deepEqual(uses(d, 5), ["r:chat:10"], "done, said twice: its own use ended, the other reply's stays");
+  // a full door: a file still used is never let go for room
+  const life1 = life(await d.restore(d.row().started));
+  for (let n = 10; n < 10 + 63; n += 1) await d.give(life1, sha(n), "x");
+  const full = await d.give(life1, sha(99), "x");
+  assert.deepEqual([full.status, (await full.json()).error], [503, "files_full"]);
+});
+
+const replyFileOf = (d, n, key) => d.call("PUT", `/job/file/${sha(n)}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, "content-type": "application/pdf", "content-length": "4", "x-door-for": key }, "%PDF");
+const replyFiles1 = (n) => [{ sha256: sha(n), name: "plan.pdf", type: "application/pdf", size: 4 }];
+
+test("a reply sent as its text alone (a runner that carries no files) lets go of its files once done: a full door takes a new file after (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  // as many replies' files as it holds, each refused by a runner that
+  // carries none, then sent as its text alone under the same key, done
+  for (let n = 1; n <= 64; n += 1) {
+    assert.equal((await replyFileOf(d, n, `chat:${n}`)).status, 200, `file ${n}`);
+    d.c.answers.push([200, { phase: "linked" }]);
+    assert.equal((await d.job("reply", { key: `chat:${n}`, text: "here", files: replyFiles1(n) })).status, 409, "its runner carries no files");
+    d.c.answers.push([200, { done: true }]);
+    assert.equal((await d.job("reply", { key: `chat:${n}`, text: "here", files: [] })).status, 200);
+  }
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM uses").one().n, 0, "no done reply's use left");
+  const taken = await replyFileOf(d, 99, "chat:99");
+  assert.equal(taken.status, 200, `a full door makes room of files nothing uses: ${await taken.clone().text()}`);
+});
+
+test("a reply its runner says ended (410: its link ended first) lets go of its files, as its text alone or with them; one pending, or another reply's, keeps its own (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  await replyFileOf(d, 1, "chat:1");
+  d.c.answers.push([200, { phase: "linked" }]);
+  await d.job("reply", { key: "chat:1", text: "here", files: replyFiles1(1) });
+  d.c.answers.push([410, { done: false, ended: true }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "here", files: [] })).status, 410);
+  assert.deepEqual(uses(d, 1), [], "ended as its text alone: let go");
+  await replyFileOf(d, 2, "chat:2");
+  await replyFileOf(d, 2, "chat:3");
+  d.c.answers.push([200, { files: true }], [202, { done: false }]);
+  await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) });
+  assert.deepEqual(uses(d, 2), ["R:chat:2", "r:chat:3"], "pending: kept, its runner's");
+  d.c.answers.push([200, { files: true }], [410, { done: false, ended: true }]);
+  assert.equal((await d.job("reply", { key: "chat:2", text: "", files: replyFiles1(2) })).status, 410);
+  assert.deepEqual(uses(d, 2), ["r:chat:3"], "ended with its files: its own use let go, the other reply's kept");
+});
+
+test("a reply its runner refuses for good (not linked, or not there to ask) lets go of its files: its connector asks no more, and a full door takes a new file after (the fix-check of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  // as many replies' files as it holds, each refused: its link unlinked
+  // (409 not linked), or its runner not up to say (its state unread)
+  for (let n = 1; n <= 64; n += 1) {
+    assert.equal((await replyFileOf(d, n, `chat:${n}`)).status, 200, `file ${n}`);
+    if (n % 2) d.c.answers.push([200, { phase: "off", files: true }], [409, { error: "not_linked" }]);
+    else d.c.answers.push([503, { error: "starting" }]);
+    const r = await d.job("reply", { key: `chat:${n}`, text: "here", files: replyFiles1(n) });
+    assert.ok([409, 503].includes(r.status), `refused: ${r.status}`);
+  }
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM uses").one().n, 0, "no refused reply's use left");
+  const taken = await replyFileOf(d, 99, "chat:99");
+  assert.equal(taken.status, 200, `a full door makes room of files nothing uses: ${await taken.clone().text()}`);
+});
+
+test("a reply its runner took (202) keeps its files across an answer that says nothing (its state unread, 503), however full the door, until its runner says it is done (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  assert.equal((await replyFileOf(d, 1, "chat:1")).status, 200);
+  d.c.answers.push([200, { phase: "linked", files: true }], [202, { done: false }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 202, "taken by its runner");
+  // its runner restarting: its state unread on the next poll
+  d.c.answers.push([503, { error: "starting" }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 503);
+  // a full door makes room of files nothing uses: never that one
+  for (let n = 2; n <= 70; n += 1) {
+    await replyFileOf(d, n, `chat:${n}`);
+    d.c.answers.push([200, { phase: "off", files: true }], [409, { error: "not_linked" }]);
+    await d.job("reply", { key: `chat:${n}`, text: "", files: replyFiles1(n) });
+  }
+  const read = await d.call("GET", `/egress/file/${sha(1)}`);
+  assert.deepEqual([read.status, await read.text()], [200, "%PDF"], "its runner, started again, reads its bytes");
+  d.c.answers.push([200, { phase: "linked", files: true }], [200, { done: true }]);
+  assert.equal((await d.job("reply", { key: "chat:1", text: "", files: replyFiles1(1) })).status, 200);
+  assert.deepEqual(uses(d, 1), [], "done: let go");
+});
+
+test("an old file a waiting delivery keeps counts toward the door's bounds (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  await d.give(life1, sha(1), "voice");
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 } }));
+  d.st.sql.exec("UPDATE files SET at = at - ?", 24 * 60 * 60 * 1000);
+  await d.o.alarm();
+  for (let n = 10; n < 10 + 63; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `file ${n}`);
+  const past = await d.give(life1, sha(99), "x");
+  assert.deepEqual([past.status, (await past.json()).error], [503, "files_full"], "64 held, the old one among them: no 65th");
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM files").one().n, 64);
+});
+
+test("one file two messages name: said kept for the first, twice, still there for the second however full the door (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  d.inbox.status = 503;
+  const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 5 };
+  for (const id of ["v1", "v2"]) {
+    await d.give(life1, sha(1), "voice");
+    await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id, kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+  }
+  d.inbox.status = 200;
+  await d.o.alarm();
+  assert.deepEqual(d.st.sql.exec("SELECT id, sent FROM deliveries ORDER BY mark").toArray(), [{ id: "v1", sent: 1 }, { id: "v2", sent: 1 }], "both taken by its inbox, neither kept yet");
+  assert.deepEqual(uses(d, 1), ["d:v1", "d:v2"], "each delivery's use, its runner's gives become theirs");
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200, "the first kept");
+  for (let n = 0; n < 2; n += 1) await d.job("kept", { id: "v1" });
+  assert.deepEqual(uses(d, 1), ["d:v2"], "said kept twice for the first: the second's use stays");
+  // full of files nothing uses, newer than it
+  for (let n = 10; n < 10 + 63; n += 1) await used(d, life1, n);
+  for (let n = 90; n < 95; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `room made for ${n}`);
+  assert.equal((await d.jobFile("GET", sha(1))).status, 200, "the second still kept: never let go while a message uses it");
+});
+
+test("a keep cut off before its connector has the file: never let go for room, read again whole (the review of #1538)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 } }));
+  await d.o.alarm();
+  // its connector's read, cut off: its answer opened and dropped, no kept said
+  const cut = await d.jobFile("GET", sha(1));
+  await cut.body.cancel();
+  for (let n = 10; n < 10 + 63; n += 1) await used(d, life1, n);
+  for (let n = 90; n < 95; n += 1) assert.equal((await d.give(life1, sha(n), "x")).status, 200, `room made for ${n}`);
+  const again = await d.jobFile("GET", sha(1));
+  assert.deepEqual([again.status, await again.text()], [200, "voice bytes"], "read again, whole");
+  await d.job("kept", { id: "v1" });
+  assert.deepEqual(uses(d, 1), [], "kept: nothing uses it");
+  d.st.sql.exec("UPDATE files SET at = (SELECT min(at) FROM files) - 1 WHERE sha = ?", sha(1));
+  await d.give(life1, sha(99), "x");
+  assert.deepEqual(d.st.sql.exec("SELECT sha FROM files WHERE sha = ?", sha(1)).toArray(), [], "then it makes room, the oldest none uses");
+});
+
+test("a delivery names its file by its SHA-256; a file named otherwise (an older runner's) goes as none", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  const file = { sha256: sha(1), name: "memo.m4a", type: "audio/mp4", size: 11 };
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v1", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file }));
+  await d.call("POST", "/egress/deliver", {}, JSON.stringify({ id: "v2", kind: "voice", text: "", at: "2026-11-24T00:00:00Z", file: { name: "memo.m4a", size: 11 } }));
+  await d.o.alarm();
+  assert.deepEqual(d.inbox.posts.map((p) => [p.body.payload.id, p.body.payload.file]), [["v1", file], ["v2", null]]);
+});
+
+test("a reply's files: given by its connector, then sent to a runner that carries files; one it does not hold, or a runner that carries none, refused", async () => {
+  const d = door();
+  await d.connect();
+  assert.equal((await d.jobFile("PUT", sha(5), "%PDF-1.7")).status, 200);
+  const files = [{ sha256: sha(5), name: "plan.pdf", type: "application/pdf", size: 8 }];
+  const no = await d.job("reply", { key: "chat:8", text: "here", files: [{ ...files[0], sha256: sha(6) }] });
+  assert.deepEqual([no.status, (await no.json()).error], [409, "no_file"], "a file it does not hold");
+  d.c.answers.push([200, { phase: "linked" }]);
+  const old = await d.job("reply", { key: "chat:8", text: "here", files });
+  assert.deepEqual([old.status, (await old.json()).error], [409, "no_files"], "a runner that carries no files: its connector sends the text alone");
+  d.c.answers.push([200, { phase: "linked", files: true }]);
+  assert.equal((await d.job("reply", { key: "chat:8", text: "here", files })).status, 202);
+  const asked = d.c.asked.filter((a) => a.path === "/reply");
+  assert.deepEqual(asked.map((a) => a.body), [{ key: "chat:8", text: "here", files }], "the runner asked once, with its files");
+  assert.equal((await d.job("reply", { key: "chat:8", text: "here", files: Array.from({ length: 9 }, () => files[0]) })).status, 400, "past a message's files");
+  // the file it holds is its runner's to read
+  const r = await d.call("GET", `/egress/file/${sha(5)}`);
+  assert.deepEqual([r.status, await r.text()], [200, "%PDF-1.7"]);
+});
+
+test("its end lets go of the files it holds with the rest", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(1), "voice bytes");
+  await d.jobFile("PUT", sha(2), "%PDF");
+  assert.equal(d.prefixed().filter((k) => k.includes("/files/")).length, 2);
+  await d.end();
+  assert.deepEqual(d.prefixed(), [], "every file under its prefix gone");
+});
+
+test("the e2e's lever gives a file as its runner does, and hashes again what it holds", async () => {
+  const d = door();
+  await d.connect();
+  const given = await d.lever("file", { door: DOOR, bytes: btoa("voice bytes"), type: "audio/mp4" });
+  assert.equal(given.status, 200, await given.clone().text());
+  const { sha256, size } = await given.json();
+  assert.equal(size, 11);
+  assert.deepEqual(d.st.sql.exec("SELECT owner FROM uses WHERE sha = ?", sha256).toArray().map((u) => u.owner), ["given"], "its runner's use, until the delivery naming it is made");
+  const looked = await (await d.lever("file", { door: DOOR, sha: sha256 })).json();
+  assert.deepEqual(looked, { sha256, size: 11, type: "audio/mp4" });
 });

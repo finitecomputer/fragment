@@ -1,7 +1,9 @@
 //! `multipart/form-data` (RFC 7578), read as OpenAI's SDKs write it: the
 //! body of the model route's transcriptions (crate::transcribe), a file and
 //! a few fields. Pure and bounded: each part is a slice of the body, never
-//! a copy, and a body out of shape is refused whole, saying where.
+//! a copy, and a body out of shape is refused whole, saying where. A form
+//! is written the same way (`form`): a transcription sent on to an
+//! OpenAI-compatible API.
 //!
 //! Ours rather than the runtime's `Request::form_data()`: the route's
 //! NIP-98 signature binds the body's hash, so the cell reads the bytes
@@ -107,6 +109,56 @@ fn param(value: &str, key: &str) -> Option<String> {
     None
 }
 
+/// One field of a form `form` writes: its name, its file's name and type
+/// when it is a file, and its bytes. Its name, file name and type are
+/// written into its headers as they are, so each is `header_safe`: a quote
+/// or a line break in a client's file name would write a field of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Field<'a> {
+    pub name: &'a str,
+    pub filename: Option<&'a str>,
+    pub content_type: Option<&'a str>,
+    pub data: &'a [u8],
+}
+
+/// A header value's most bytes as `form` writes it.
+pub const HEADER_VALUE_MAX_BYTES: usize = 128;
+
+/// Whether `s` may be written into a part's headers as it is: 1 to
+/// `HEADER_VALUE_MAX_BYTES` of printable ASCII, no quote, backslash or
+/// `;` (none ends its parameter early).
+pub fn header_safe(s: &str) -> bool {
+    (1..=HEADER_VALUE_MAX_BYTES).contains(&s.len()) && s.bytes().all(|b| (0x20..0x7f).contains(&b) && !matches!(b, b'"' | b'\\' | b';'))
+}
+
+/// `fields` as a `multipart/form-data` body with `boundary`, 1 to
+/// `BOUNDARY_MAX` letters, digits and `-`; `None` when the boundary occurs
+/// in a field's bytes (a random one does not: its caller picks another).
+pub fn form(boundary: &str, fields: &[Field<'_>]) -> Option<Vec<u8>> {
+    assert!((1..=BOUNDARY_MAX).contains(&boundary.len()) && boundary.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'), "a form's boundary is the writer's own: {boundary:?}");
+    let named = |f: &Field<'_>| [Some(f.name), f.filename, f.content_type].into_iter().flatten().all(header_safe);
+    assert!(fields.len() <= PARTS_MAX && fields.iter().all(named), "a form's fields are the writer's own, header-safe");
+    let open = format!("--{boundary}");
+    if fields.iter().any(|f| find(f.data, open.as_bytes(), 0).is_some()) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(fields.iter().map(|f| f.data.len() + 256).sum::<usize>() + open.len() + 4);
+    for f in fields {
+        out.extend(format!("{open}\r\nContent-Disposition: form-data; name=\"{}\"", f.name).as_bytes());
+        if let Some(file) = f.filename {
+            out.extend(format!("; filename=\"{file}\"").as_bytes());
+        }
+        if let Some(kind) = f.content_type {
+            out.extend(format!("\r\nContent-Type: {kind}").as_bytes());
+        }
+        out.extend(b"\r\n\r\n");
+        out.extend(f.data);
+        out.extend(b"\r\n");
+    }
+    out.extend(format!("{open}--\r\n").as_bytes());
+    Some(out)
+}
+
 /// The parts of `body`, a `multipart/form-data` body with `boundary`.
 pub fn parts<'a>(body: &'a [u8], boundary: &str) -> Result<Vec<Part<'a>>, Malformed> {
     let open = format!("--{boundary}");
@@ -195,6 +247,28 @@ mod tests {
 
     fn boundary_of(ct: &str) -> Result<String, Malformed> {
         boundary(ct)
+    }
+
+    /// Valid: a form written reads back as its fields, a file's bytes as
+    /// they were (a CRLF and a boundary-like run among them); a boundary
+    /// that occurs in them writes none; a name no header may carry is
+    /// none `form` takes.
+    #[test]
+    fn a_form_written_reads_back() {
+        let audio = b"OggS\r\n--fragment-x\r\n\xff".to_vec();
+        let fields = [
+            Field { name: "model", filename: None, content_type: None, data: b"local-whisper" },
+            Field { name: "file", filename: Some("memo.ogg"), content_type: Some("audio/ogg"), data: &audio },
+        ];
+        let body = super::form("fragment-0a1b", &fields).unwrap();
+        let p = parts(&body, "fragment-0a1b").unwrap();
+        assert_eq!(p.iter().map(|p| (p.name.as_str(), p.filename.as_deref(), p.content_type.as_deref(), p.data)).collect::<Vec<_>>(), [("model", None, None, &b"local-whisper"[..]), ("file", Some("memo.ogg"), Some("audio/ogg"), &audio[..])]);
+        assert_eq!(super::form("fragment-x", &fields), None, "its boundary in the audio: another is picked");
+        assert_eq!(parts(&super::form("b", &[]).unwrap(), "b"), Ok(vec![]));
+        for bad in ["a\"b.ogg", "a\r\nX: y", "a;b", "a\\b", "", &"a".repeat(HEADER_VALUE_MAX_BYTES + 1), "é.ogg"] {
+            assert!(!header_safe(bad), "{bad:?}");
+        }
+        assert!(header_safe("voice memo (1).m4a") && header_safe("audio/mp4"));
     }
 
     /// Invalid: what is no multipart form is refused, saying which way.

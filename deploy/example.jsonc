@@ -158,7 +158,16 @@
                                         "quantizations": ["fp8", "bf16"],
                                         "max_price": { "prompt": 0.15, "completion": 0.5 } } } },
     "fallback": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
-    "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" }
+    "vision": { "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" },
+    // Transcription (docs/api.md, Models): an agent's voice memos, here on
+    // Workers AI's Whisper at its neurons a minute of audio. A self-hosted
+    // deployment names its own OpenAI-compatible server, at its dollars a
+    // minute (docs/self-host.md, "Use your own models"):
+    //   "transcription": { "provider": "openai", "base_url": "https://stt.example.internal/v1",
+    //                      "key": "fragment-transcription-key", "model": "whisper-large-v3",
+    //                      "price": { "audio_minute": 0 } }
+    "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo",
+                       "price": { "neurons_a_minute": 46.63 } }
     // Embeddings (docs/api.md, Models): BGE-M3 on Workers AI unnamed, as
     // if named so:
     //   "embeddings": { "provider": "workers_ai", "model": "@cf/baai/bge-m3", "dimensions": 1024 }
@@ -339,25 +348,25 @@
       "deny": ["GET /api/*/browsers", "* /api/*/profiles/**", "GET /api/*/sessions",
         "GET /api/*/tasks", "GET /api/*/runs", "* /api/*/workspaces/**", "* /api/*/integrations/**",
         "* /api/*/billing/**"] },
-    { "name": "google", "kind": "connection",
-      "hosts": ["gmail.googleapis.com", "www.googleapis.com", "people.googleapis.com", "sheets.googleapis.com", "docs.googleapis.com", "slides.googleapis.com"],
-      "placements": [{ "header": "authorization", "format": "Bearer {}" }],
-      // while Google reviews the app's sign-in:
+    // A connection is a row of the checkout (deploy/providers/<name>.jsonc:
+    // its hosts, its OAuth endpoints and scopes, and what people call it
+    // and them), named here and never copied, so it ships with the release
+    // that reads it (deploy/providers/README.md lists them). Named alone,
+    // as dev and the e2e offer Google, it is offered through Pipes without
+    // its browser-bound connect. Any other field beside `row` is the
+    // deployment's own, over the row's.
+    { // while Google reviews the app's sign-in:
       // "note": "Google is still reviewing Finite, so Google shows a warning that the app isn't verified when you connect. Your data is handled the same way either way.",
-      // its browser-bound connect, once its OAuth client's secret is in the
-      // store (docs/pipes-browser-binding.md): `include_granted_scopes` keeps
-      // what the person allowed before, so a reconnect asks only for the rest
-      // "key": "<the client secret's store name>",
-      // "connection_oauth": { "authorize": "https://accounts.google.com/o/oauth2/v2/auth?access_type=offline&include_granted_scopes=true&prompt=select_account%20consent",
-      //   "exchange": "https://oauth2.googleapis.com/token", "revoke": "https://oauth2.googleapis.com/revoke",
-      //   "client_id": "<the client's id>", "access": <the Google skill's references/google-workspace-access.json> },
+      // its browser-bound connect (docs/pipes-browser-binding.md), the
+      // deployment's two facts, both or neither: its OAuth client's
+      // secret, by its name in the store, and the client's id
+      // "key": "<the client secret's store name>", "client_id": "<the client's id>",
       // several Google accounts a person (personal and work), each agent
       // using the one picked for it in Settings, once WorkOS has enabled
-      // additional connections and a release that knows the field is
-      // deployed (docs/pipes-browser-binding.md, Several accounts): 2 to 25;
-      // absent, one, as before
+      // additional connections (docs/pipes-browser-binding.md, Several
+      // accounts): 2 to 25; absent, one
       // "accounts_max": 5,
-      "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"] },
+      "row": "google" },
     { "name": "perplexity", "kind": "operator", "hosts": ["api.perplexity.ai"],
       "placements": [{ "header": "authorization", "format": "Bearer {}" }],
       "env": ["PERPLEXITY_API_KEY"], "key": "fragment-perplexity-api-key",

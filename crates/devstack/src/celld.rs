@@ -1,7 +1,7 @@
 //! The stack on celld (docs/self-host.md, seam 1): one `celld dev` process
 //! serving the platform Worker, as `wrangler dev` does, from the config a
 //! local node runs (`crate::local_config`), and with its `.dev.vars`.
-//! celld is a self-hosted Workers runtime (github.com/futurepaul/celld: its
+//! celld is a self-hosted Workers runtime (github.com/finitecomputer/celld: its
 //! `selfhost` line is upstream's release and the fork's parity fixes).
 //!
 //! celld presents Cloudflare's binding surface, so the cell runs on it as
@@ -17,6 +17,12 @@
 //! container is there, not running, and a start throws (docs/self-host.md,
 //! seam 2).
 //!
+//! The operators' admin Worker runs beside the cell, as on Cloudflare and
+//! wrangler: `celld dev --with` co-hosts it under its own name, the cell's
+//! `ADMIN` service binding reaches it, and its object bindings reach the
+//! cell's objects by `script_name` (the fork's `durable-object-script-name-v1`,
+//! its selfhost line from finitecomputer/celld#35).
+//!
 //! The node's port is its front door's (front.rs), as on wrangler: celld
 //! listens on a port of its own, which the front door learns from its
 //! `ready` line and passes each connection to.
@@ -31,29 +37,31 @@ use anyhow::{bail, Context, Result};
 
 use crate::{boot_log, front, spawn_node, Node, NodeOptions, READY_TIMEOUT};
 
-/// What the celld render leaves out of the local config, and why.
-pub const DROPPED: [(&str, &str); 2] = [
-    ("build", "worker-build has run (cargo xtask build)"),
-    // the cell then answers the admin's routes with a host failure saying
-    // so (cell/src/admin.rs `forward`; docs/technical-debt-ledger.md)
-    ("services", "celld runs one Worker, the cell: not the admin Worker beside it"),
-];
+/// What the celld render leaves out of a local config, and why.
+pub const DROPPED: [(&str, &str); 1] = [("build", "worker-build has run (cargo xtask build)")];
 
-/// The config celld runs: `wrangler.celld.jsonc`, beside the project's own
-/// (so its paths and `.dev.vars` resolve the same), the local config a node
-/// runs (`crate::local_config`, its secrets bound by name as on wrangler)
-/// less `DROPPED`. `Fleet::configure` writes the local config first.
-pub fn celld_config(project: &Path) -> Result<PathBuf> {
-    let local = crate::local_config(project);
-    let text = fs::read_to_string(&local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
+/// The configs celld runs: the cell's (`wrangler.celld.jsonc`) and its admin
+/// Worker's (`wrangler.admin.celld.jsonc`), beside the project's own (so
+/// their paths and `.dev.vars` resolve the same), each the local config a
+/// node runs (`crate::local_config`, `crate::admin_local_config`, secrets
+/// bound by name as on wrangler) less `DROPPED`. `Fleet::configure` writes
+/// the local configs first.
+pub fn celld_config(project: &Path) -> Result<(PathBuf, PathBuf)> {
+    let cell = render(&crate::local_config(project), &project.join("wrangler.celld.jsonc"))?;
+    let admin = render(&crate::admin_local_config(project), &project.join("wrangler.admin.celld.jsonc"))?;
+    Ok((cell, admin))
+}
+
+/// The local config at `local`, less `DROPPED`, written to `to`.
+fn render(local: &Path, to: &Path) -> Result<PathBuf> {
+    let text = fs::read_to_string(local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
     let mut config: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parse {}", local.display()))?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for (key, _) in DROPPED {
         obj.remove(key);
     }
-    let path = project.join("wrangler.celld.jsonc");
-    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
-    Ok(path)
+    fs::write(to, serde_json::to_string_pretty(&config)?)?;
+    Ok(to.to_path_buf())
 }
 
 /// The celld node's secrets file (its `CELLD_SECRETS_FILE`), beside the
@@ -161,7 +169,10 @@ impl Engine {
     /// run killed outright (a signal's `kill_started`) left its node no
     /// chance to, and the engine keeps a VM until it is told. Only this
     /// project's node's containers are touched (`container_prefix`): the
-    /// engine serves every stack and person on the machine.
+    /// engine serves every stack and person on the machine. So is celld's
+    /// image builder when the celld that started it is gone (`orphan_builder`):
+    /// a run killed while its node built images left it holding the
+    /// engine's memory.
     pub fn remove(&self, project: &Path) -> Result<u32> {
         let Engine::Krun(socket) = self else { return Ok(0) };
         let prefix = container_prefix(&dev_node(project)?);
@@ -175,8 +186,78 @@ impl Engine {
             anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {name}: {status} {}", String::from_utf8_lossy(&body));
             removed += 1;
         }
+        // On the builder's lock: a session holding it runs, and reaps a
+        // builder left before it itself; one that starts after this waits.
+        if let Some(_turn) = builder_turn(socket)? {
+            let (status, body) = engine_call(socket, "GET", &format!("/v1/containers/{BUILDER}"))?;
+            if status == 200 {
+                let builder: serde_json::Value = serde_json::from_slice(&body).context("the krun engine's builder is JSON")?;
+                if orphan_builder(&builder, proc_start) {
+                    let (status, body) = engine_call(socket, "POST", &format!("/v1/containers/{BUILDER}/destroy"))?;
+                    anyhow::ensure!(status == 200 || status == 404, "the krun engine's destroy of {BUILDER}: {status} {}", String::from_utf8_lossy(&body));
+                    removed += 1;
+                }
+            }
+        }
         Ok(removed)
     }
+}
+
+/// celld's image builder on the krun engine (the fork's krun_build.rs):
+/// one VM by this name, its owner in the label of the same name as
+/// `<pid>-<start>`, the celld process and its start time (`/proc/<pid>/stat`
+/// field 22), so a reused pid is told apart.
+const BUILDER: &str = "celld-builder";
+
+/// The lock celld's build sessions on the engine at `socket` take turns
+/// by (the fork's krun_build.rs `lock_path`, `engine_id`):
+/// `celld-builder-<uid>-<12 hex of the SHA-256 of the socket's canonical
+/// path>.lock`, in `/run/user/<uid>` when there is one, else `/tmp`.
+fn builder_lock(socket: &Path, uid: u32, runtime: Option<&Path>) -> PathBuf {
+    use sha2::Digest as _;
+    let canonical = fs::canonicalize(socket).unwrap_or_else(|_| socket.to_path_buf());
+    let digest = sha2::Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let name = format!("celld-builder-{uid}-{}.lock", &format!("{digest:x}")[..12]);
+    runtime.unwrap_or(Path::new("/tmp")).join(name)
+}
+
+/// The builder's lock, taken when no session holds it; `None` while one
+/// does.
+fn builder_turn(socket: &Path) -> Result<Option<fs::File>> {
+    use std::os::unix::fs::MetadataExt as _;
+    let uid = fs::metadata("/proc/self").context("this process's user")?.uid();
+    let runtime = PathBuf::from(format!("/run/user/{uid}"));
+    let path = builder_lock(socket, uid, runtime.is_dir().then_some(runtime.as_path()));
+    let file = fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).with_context(|| format!("open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(fs::TryLockError::WouldBlock) => Ok(None),
+        Err(fs::TryLockError::Error(e)) => Err(e).with_context(|| format!("lock {}", path.display())),
+    }
+}
+
+/// Whether `builder` (the engine's view of it) belongs to a celld that is
+/// gone: its owner's pid runs no more, or runs a process started at
+/// another time (`start` reads a pid's start). One with no owner is left.
+fn orphan_builder(builder: &serde_json::Value, start: impl Fn(u32) -> Option<u64>) -> bool {
+    let Some((pid, at)) = builder["labels"][BUILDER].as_str().and_then(|o| o.split_once('-')) else { return false };
+    match (pid.parse::<u32>(), at.parse::<u64>()) {
+        (Ok(pid), Ok(at)) => start(pid) != Some(at),
+        _ => false,
+    }
+}
+
+/// A running process's start time, in clock ticks since boot:
+/// `/proc/<pid>/stat`'s field 22, after its command's parenthesis. None
+/// for one that has exited, a zombie (`Z`) or dead (`X`) included: a
+/// celld a run killed and has not reaped yet still has its start there.
+fn proc_start(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    if matches!(fields.next()?, "Z" | "X") {
+        return None;
+    }
+    fields.nth(18)?.parse().ok()
 }
 
 /// The name `celld dev` gives its node on `project` (the fork's dev.rs):
@@ -262,7 +343,7 @@ impl CelldTools {
         engine.check()?;
         let celld = std::env::var_os("CELLD_BIN")
             .map(PathBuf::from)
-            .context("set CELLD_BIN to a celld built from github.com/futurepaul/celld's selfhost line (cargo build --release -p celld)")?;
+            .context("set CELLD_BIN to a celld built from github.com/finitecomputer/celld's selfhost line, with object bindings across scripts (finitecomputer/celld#35): cargo build --release -p celld")?;
         if !celld.is_file() {
             bail!("no celld at {} (CELLD_BIN)", celld.display());
         }
@@ -318,7 +399,7 @@ fn ready_line(port: u16) -> String {
 /// it says so. It stops on SIGINT, as Ctrl-C stops it; `Node`'s stop and
 /// crash serve it as they serve wrangler's.
 pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-    let config = celld_config(&opts.project)?;
+    let (config, admin) = celld_config(&opts.project)?;
     let secrets = secrets_file(&opts.project);
     anyhow::ensure!(secrets.is_file(), "no secrets file for the celld node at {} (Fleet::configure writes it, with Secrets::Vars or Secrets::OpenBao)", secrets.display());
     let port = opts.port();
@@ -332,7 +413,7 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
     let esbuild_dir = tools.esbuild.parent().context("esbuild's directory")?;
     let path = std::env::join_paths(std::iter::once(esbuild_dir.to_path_buf()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
     let mut cmd = Command::new(&tools.celld);
-    cmd.arg("dev").arg(&config).args(["--host", "127.0.0.1", "--port", &runtime.to_string(), "--logs", "--no-watch"]);
+    cmd.arg("dev").arg(&config).arg("--with").arg(&admin).args(["--host", "127.0.0.1", "--port", &runtime.to_string(), "--logs", "--no-watch"]);
     // the fork's hardening (its docs/hardening.md): a facet's database
     // capped past the cell's own, and loaded code locked down
     cmd.env("PATH", path)
@@ -345,6 +426,8 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
         .env(Engine::VAR, tools.engine.value())
         .env("NO_COLOR", "1");
     cmd.current_dir(&opts.project);
+    // its state is the run's, in RAM for the e2e (`shm`): gone with it
+    crate::dies_with_this_process(&mut cmd);
     let t0 = Instant::now();
     let child = spawn_node(cmd, opts, out, heard.clone())?;
     let mut node = Node { child, own_group: opts.own_group, what: "celld dev", base: format!("http://127.0.0.1:{port}"), port, log: log.clone(), reaped: false, _front: front };
@@ -443,10 +526,11 @@ mod tests {
         assert_eq!(policy.entries()[0], fragment_core::connectors::Policy::default().entries()[0], "SimpleX as the default names it");
     }
 
-    /// Goal: celld runs the local config a wrangler node runs, its secrets
-    /// bound by name, less `build` and the binding to the admin Worker
-    /// (`DROPPED`): the services it does not run and
-    /// the computers' containers stay in it, for celld binds them all. With
+    /// Goal: celld runs the local configs a wrangler node runs, its secrets
+    /// bound by name, less `build` (`DROPPED`): the cell's, its binding to
+    /// the admin Worker kept, the services it does not run and the
+    /// computers' containers in it, for celld binds them all; and the admin
+    /// Worker's, each of the cell's objects bound by the cell's script. With
     /// no local config written yet, it is refused, naming the file. Replay:
     /// rendered twice, the same. Method: cell/wrangler.jsonc, through
     /// `write_local_config` with a secret bound.
@@ -454,8 +538,65 @@ mod tests {
         serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
     }
 
+    /// Goal: a builder whose celld is gone is told apart from a live one's,
+    /// as the fork labels it. Valid: a live owner's is kept; a dead pid's,
+    /// or a reused pid's (another start), goes. Invalid: no label, or one
+    /// not of the form, is kept: it is not known to be an orphan.
     #[test]
-    fn renders_the_local_config_less_build() {
+    fn an_orphan_builder_is_one_whose_celld_is_gone() {
+        let mine = std::process::id();
+        let started = super::proc_start(mine).expect("this process's start");
+        let builder = |owner: &str| serde_json::json!({ "name": super::BUILDER, "labels": { super::BUILDER: owner } });
+        assert!(!super::orphan_builder(&builder(&format!("{mine}-{started}")), super::proc_start), "a live celld's");
+        assert!(super::orphan_builder(&builder(&format!("{mine}-{}", started + 1)), super::proc_start), "a reused pid");
+        assert!(super::orphan_builder(&builder("4194305-1"), super::proc_start), "past pid_max: gone");
+        assert!(!super::orphan_builder(&serde_json::json!({ "labels": {} }), super::proc_start), "no owner");
+        assert!(!super::orphan_builder(&builder("x"), super::proc_start));
+    }
+
+    /// Goal: a celld killed and not yet reaped (a zombie, its start time
+    /// still in `/proc`) is gone: a run's Ctrl-C kills its node, then
+    /// reaps the builder before it waits for the node.
+    #[test]
+    fn a_zombie_owner_is_gone() {
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id();
+        let stat = || fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+        let t0 = std::time::Instant::now();
+        // bounded: `true` exits at once
+        while !stat().rsplit_once(')').is_some_and(|(_, rest)| rest.trim_start().starts_with('Z')) {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the child is a zombie");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(super::proc_start(pid), None, "a zombie runs no more");
+        child.wait().unwrap();
+        assert_eq!(super::proc_start(pid), None);
+    }
+
+    /// Goal: devstack takes the builder's lock where celld does, so a
+    /// session that holds it keeps its builder. Method: the fork's naming,
+    /// a symlink to the socket naming the same lock, and the lock held.
+    #[test]
+    fn the_builders_lock_is_celld_s() {
+        let dir = std::env::temp_dir().join(format!("celld-lock-{}", crate::random_hex(6)));
+        fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("engine.sock");
+        fs::write(&socket, "").unwrap();
+        std::os::unix::fs::symlink(&socket, dir.join("link.sock")).unwrap();
+        let lock = super::builder_lock(&socket, 1000, Some(&dir));
+        assert_eq!(lock, super::builder_lock(&dir.join("link.sock"), 1000, Some(&dir)));
+        let name = lock.file_name().unwrap().to_str().unwrap().to_string();
+        assert!(name.starts_with("celld-builder-1000-") && name.ends_with(".lock") && name.len() == "celld-builder-1000-".len() + 12 + 5, "{name}");
+        assert!(super::builder_lock(&socket, 1000, None).starts_with("/tmp"));
+        let held = fs::File::create(&lock).unwrap();
+        held.try_lock().unwrap();
+        let other = fs::OpenOptions::new().write(true).open(&lock).unwrap();
+        assert!(matches!(other.try_lock(), Err(fs::TryLockError::WouldBlock)), "a session holds it: the builder is kept");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn renders_the_local_configs_less_build() {
         let dir = std::env::temp_dir().join(format!("celld-config-{}", crate::random_hex(6)));
         fs::create_dir_all(&dir).unwrap();
         // as a staged copy is: its images' Dockerfiles the source tree's
@@ -465,21 +606,31 @@ mod tests {
         fs::copy(crate::cell_dir().join(crate::ADMIN_CONFIG), dir.join(crate::ADMIN_CONFIG)).unwrap();
         let e = celld_config(&dir).unwrap_err().to_string();
         assert!(e.contains("wrangler.local.jsonc"), "{e}");
-        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[], false).unwrap();
+        crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[], true, false, false).unwrap();
         let local = json(&crate::local_config(&dir));
+        let admin_local = json(&crate::admin_local_config(&dir));
         for _ in 0..2 {
-            let v = json(&celld_config(&dir).unwrap());
-            assert!(v.get("build").is_none() && v.get("services").is_none(), "build and the admin's binding dropped");
-            assert!(local.get("services").is_some(), "which the local config has");
+            let (cell, admin) = celld_config(&dir).unwrap();
+            assert_eq!((cell.file_name().unwrap(), admin.file_name().unwrap()), (std::ffi::OsStr::new("wrangler.celld.jsonc"), std::ffi::OsStr::new("wrangler.admin.celld.jsonc")));
+            let v = json(&cell);
+            assert!(v.get("build").is_none(), "build dropped");
+            assert!(local.get("build").is_some(), "which the local config has");
             for (k, kept) in local.as_object().unwrap() {
                 if !DROPPED.iter().any(|(d, _)| d == k) {
                     assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
                 }
             }
-            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets"] {
+            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets", "services"] {
                 assert!(v.get(k).is_some(), "{k} kept");
             }
             assert_eq!(v["secrets_store_secrets"][0]["secret_name"], "fragment-host-secret");
+            let a = json(&admin);
+            assert_eq!(v["services"], serde_json::json!([{ "binding": crate::ADMIN_BINDING, "service": a["name"] }]), "the cell's ADMIN binding names the admin Worker");
+            assert_eq!(a, admin_local, "the admin's local config, which has no build to drop");
+            let classes: Vec<&serde_json::Value> = v["durable_objects"]["bindings"].as_array().unwrap().iter().map(|b| &b["class_name"]).collect();
+            let bound: Vec<&serde_json::Value> = a["durable_objects"]["bindings"].as_array().unwrap().iter().map(|b| &b["class_name"]).collect();
+            assert_eq!(bound, classes, "every one of the cell's classes");
+            assert!(a["durable_objects"]["bindings"].as_array().unwrap().iter().all(|b| b["script_name"] == v["name"]), "each by the cell's script: {a}");
         }
         fs::remove_dir_all(&dir).unwrap();
     }

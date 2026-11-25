@@ -817,6 +817,18 @@ pub(crate) mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// `read` opens a database and its `-wal` out of an archive someone
+    /// else made. SQLite before 3.54.0 can return stale process memory
+    /// (this CLI's signing key among it) for a crafted pair whose page
+    /// sizes differ (RUSTSEC-2026-0459), which would then be uploaded as
+    /// chats. The bundled SQLite must be the fixed one.
+    #[test]
+    fn bundled_sqlite_has_the_wal_page_size_fix() {
+        const FIXED: i32 = 3_054_000;
+        let linked = rusqlite::version_number();
+        assert!(linked >= FIXED, "SQLite {} is linked; RUSTSEC-2026-0459 needs >= 3.54.0", rusqlite::version());
+    }
+
     /// A database with the tables and columns of Hermes v0.21.7's that a
     /// read uses (hermes_state_common.py's SCHEMA_SQL, these columns only),
     /// so a test writes the rows Hermes writes.
@@ -1304,6 +1316,6 @@ for table in ("sessions", "messages"):
             .output()
             .expect("docker runs");
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-        std::fs::write(concat!(env!("CARGO_MANIFEST_DIR"), "/src/session/hermes-v0.21.7.sql"), out.stdout).unwrap();
+        std::fs::write("src/session/hermes-v0.21.7.sql", out.stdout).unwrap();
     }
 }

@@ -73,6 +73,11 @@ impl Need {
         Need::Move,
     ];
 
+    /// Whether a section of `planned` that would run needs or uses this.
+    pub fn used_by(self, planned: &[crate::Planned]) -> bool {
+        planned.iter().any(|p| p.skip.is_none() && (p.needs.contains(&self) || p.uses.contains(&self)))
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Need::Fakes => "fakes",
@@ -123,7 +128,8 @@ pub enum Rung {
     /// docs/self-host.md, seam 1): everything but the move, and the
     /// runtime's own containers only when its node runs computers, on this
     /// machine's krun engine (`CELLD_CONTAINER_ENGINE=krun:<socket>`; seam
-    /// 2), where Docker builds their images.
+    /// 2), where the node builds their images too, with BuildKit in a
+    /// microVM of that engine: such a run asks Docker nothing.
     Celld { computers: bool },
     /// A branch deployment on real vendors.
     Hosted(Offers),

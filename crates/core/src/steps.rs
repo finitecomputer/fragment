@@ -84,6 +84,14 @@ pub struct Fetch {
     pub headers: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<String>,
+    /// One of its fragment's blobs as the body (`{blob: <sha256>}`): a
+    /// SimpleX connector's to its own door alone (cell/src/jobs.rs).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+    /// The answer's body kept as one of its fragment's blobs (`{keep:
+    /// true}`): its own door's answer alone, as `blob` is.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub keep: bool,
 }
 
 /// `job.files.write(path, content, {expect})`: one commit to `main`.
@@ -362,7 +370,9 @@ mod tests {
             Ok(Step::Call { op: "save".into(), input: json!(7) })
         );
         let Ok(Step::Fetch(f)) = step("fetch", json!({ "url": "https://x/", "method": "post", "headers": {}, "body": "{}" })) else { panic!() };
-        assert_eq!((f.method.as_str(), f.body.as_deref()), ("post", Some("{}")));
+        assert_eq!((f.method.as_str(), f.body.as_deref(), f.blob, f.keep), ("post", Some("{}"), None, false), "a fetch carries no blob, and keeps nothing, unless it says so");
+        let Ok(Step::Fetch(f)) = step("fetch", json!({ "url": "https://x/", "method": "PUT", "headers": {}, "blob": "ab", "keep": true })) else { panic!() };
+        assert_eq!((f.blob.as_deref(), f.keep), (Some("ab"), true));
         let Ok(Step::AiImage(i)) = step("ai.image", json!({ "prompt": "p", "path": "a.jpg" })) else { panic!() };
         assert_eq!(i.steps, None, "the model's own default unless named");
         // meatproxy's shape: a prompt, a path and a duration, the rest the model's defaults

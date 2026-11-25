@@ -1,0 +1,33 @@
+// The person's Microsoft 365 (a work, school or personal account): Pipes'
+// `microsoft` provider, one connection for Microsoft Graph (Outlook mail
+// and calendar, OneDrive, contacts), connected through the browser once
+// its Entra app's secret is in the store (the app Pipes' Microsoft
+// integration uses, with the platform's callback beside Pipes'). `common`
+// takes every kind of account; `offline_access` is what has Microsoft
+// answer a refresh token. Microsoft has no revocation endpoint: a
+// disconnect deletes the account at Pipes, and the person removes the app
+// in their account's settings. Several Microsoft accounts a person (work
+// and personal) are `"accounts_max": 5`, as Google's, once WorkOS has
+// enabled additional connections. Its skill is microsoft-finite.
+{ "name": "microsoft", "kind": "connection", "title": "Microsoft 365",
+  "hosts": ["graph.microsoft.com"],
+  "placements": [{ "header": "authorization", "format": "Bearer {}" }],
+  "note": "Some work accounts need an IT admin to approve Finite first.",
+  "connection_oauth": { "authorize": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize?prompt=select_account",
+    "exchange": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    "access": {
+      "read": { "scopes": ["openid", "email", "profile", "offline_access",
+        "https://graph.microsoft.com/User.Read", "https://graph.microsoft.com/Mail.Read",
+        "https://graph.microsoft.com/Calendars.Read", "https://graph.microsoft.com/Files.Read",
+        "https://graph.microsoft.com/Contacts.Read"] },
+      "write": { "scopes": ["openid", "email", "profile", "offline_access",
+        "https://graph.microsoft.com/User.Read", "https://graph.microsoft.com/Mail.ReadWrite",
+        "https://graph.microsoft.com/Mail.Send", "https://graph.microsoft.com/Calendars.ReadWrite",
+        "https://graph.microsoft.com/Files.ReadWrite", "https://graph.microsoft.com/Contacts.ReadWrite"] } } },
+  "scope_names": { "https://graph.microsoft.com/User.Read": "Profile",
+    "https://graph.microsoft.com/Mail.Read": "Mail (read)", "https://graph.microsoft.com/Mail.ReadWrite": "Mail (manage)",
+    "https://graph.microsoft.com/Mail.Send": "Mail (send)",
+    "https://graph.microsoft.com/Calendars.Read": "Calendar (read)", "https://graph.microsoft.com/Calendars.ReadWrite": "Calendar",
+    "https://graph.microsoft.com/Files.Read": "OneDrive (read)", "https://graph.microsoft.com/Files.ReadWrite": "OneDrive",
+    "https://graph.microsoft.com/Contacts.Read": "Contacts (read)", "https://graph.microsoft.com/Contacts.ReadWrite": "Contacts" },
+  "env": ["MICROSOFT_OAUTH_ACCESS_TOKEN"] }

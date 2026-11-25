@@ -1,0 +1,19 @@
+# cargo-deny's policy for the cell's Cargo.lock (the Worker's own
+# workspace): as the root's deny.toml, which says how this list is kept;
+# docs/security/dependency-scanning.md.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+unsound = "all"
+unmaintained = "workspace"
+yanked = "warn"
+unused-ignored-advisory = "deny"
+ignore = [
+    # crypto-bigint 0.5.5 (through k256/p256 0.13): the cell signs Web Push
+    # VAPID and code.storage tokens with p256 keys of the platform's. Fixed
+    # only in 0.7.6, behind the k256/p256 0.14 migration (FIN-636).
+    { id = "RUSTSEC-2026-0387", reason = "needs the k256/p256 0.14 migration: FIN-636" },
+]

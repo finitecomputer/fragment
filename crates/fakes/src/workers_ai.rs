@@ -60,16 +60,17 @@
 //! its input) `ICON_CHECKED`; `decide_next` scripts raw answers (a
 //! malformed one too), never an accuracy claim.
 //!
-//! The transcription model (`TRANSCRIBE_MODEL`, Whisper) answers as its
-//! catalog's output schema says, `{text, word_count, transcription_info:
-//! {language, duration, …}, segments, vtt}`, from the audio's own bytes: a
-//! WAV `spoken_wav` makes carries its words in a chunk of its own (`said`),
-//! which is the text, and its length is its samples'; any other audio is
-//! heard as `NO_WORDS`, its length its bytes at 16 kbps. Workers AI prices
-//! it by that length, which the cell meters itself. The real answer also
-//! carries a `usage` its schema does not name (the hosted lane, 2026-10-08),
-//! whose contents are not recorded yet, so the fake sends none: the cell
-//! reads none of it.
+//! The transcription model (`TRANSCRIBE_MODEL`, Whisper, as a deployment's
+//! transcription slot names it) answers as its catalog's output schema
+//! says, `{text, word_count, transcription_info: {language, duration, …},
+//! segments, vtt}`, from the audio's own bytes: a WAV `spoken_wav` makes
+//! carries its words in a chunk of its own (`said`), which is the text, and
+//! its length is its samples'; any other audio is heard as `NO_WORDS`, its
+//! length its bytes at 16 kbps (`heard`). Workers AI prices it by that
+//! length, which the cell meters itself. The real answer also carries a
+//! `usage` its schema does not name (the hosted lane, 2026-10-08), whose
+//! contents are not recorded yet, so the fake sends none: the cell reads
+//! none of it.
 //!
 //! A chat call may carry images (`image_url` parts, OpenAI's shape) to a
 //! model that reads them (`TAKES_IMAGES`, as Workers AI's catalog marks
@@ -123,6 +124,17 @@
 //! on a key of its own (`accept_key_for`): another API's key, Finite
 //! Private's among them, is its 401.
 //!
+//! It also transcribes, as a self-hosted Whisper server answers OpenAI's
+//! `POST /v1/audio/transcriptions` (`TRANSCRIPTIONS_PATH`): a
+//! `multipart/form-data` form, `model` `OPENAI_TRANSCRIBE_MODEL` (any other
+//! a 400), the audio as `file`, heard as Workers AI's face hears it
+//! (`heard`), keyed and failed by the same levers as its chat; answered in
+//! the `response_format` asked, `verbose_json` with the audio's `duration`
+//! and OpenAI's `usage` of type `duration` (its seconds, rounded up),
+//! `json` with that usage, or the text alone. A call is kept with its form's
+//! fields as its body (`file` its audio in base64, `filename` and
+//! `content_type` the file part's).
+//!
 //! It also serves GLM-5.3 Flash by OpenRouter's id (`OPENROUTER_FLASH`, a
 //! Finite deployment's tiers since 2026-10-15), and DeepSeek V4.1 Flash by
 //! its (`OPENROUTER_DEEPSEEK`, Standard's Deep), answered as OpenRouter
@@ -149,8 +161,13 @@ use crate::http::{Handler, Request, Response, Server};
 pub use fragment_core::media::IMAGE_MODEL;
 /// The video model's (fragment_core::media::VIDEO_MODEL).
 pub use fragment_core::media::VIDEO_MODEL;
-/// The transcription model's (fragment_core::transcribe::TRANSCRIBE_MODEL).
-pub use fragment_core::transcribe::TRANSCRIBE_MODEL;
+/// Workers AI's Whisper large v3 turbo, as a deployment's transcription
+/// slot names it (preview's config, the e2e's plain node): a model only a
+/// config names, so its id is the fake's and the e2e's, not the cell's.
+pub const TRANSCRIBE_MODEL: &str = "@cf/openai/whisper-large-v3-turbo";
+/// The transcription model the OpenAI-compatible face serves: a
+/// self-hosted Whisper, as a box's own server names one.
+pub const OPENAI_TRANSCRIBE_MODEL: &str = "local-whisper-large-v3";
 /// The decision models (the Clef family): a typed-decision vendor
 /// boundary, never proof of a real model's accuracy.
 pub use fragment_core::decide::Model as DecisionModel;
@@ -214,6 +231,13 @@ pub const OPENAI_PATH: &str = "/v1/chat/completions";
 /// Its embeddings' path (a self-hosted deployment's embeddings slot, on a
 /// model of its own).
 pub const EMBEDDINGS_PATH: &str = "/v1/embeddings";
+/// Its transcriptions' path (a deployment's transcription slot on an
+/// OpenAI-compatible API).
+pub const TRANSCRIPTIONS_PATH: &str = "/v1/audio/transcriptions";
+/// Where a redirect a test asked for may lead (`redirect_next`): a call
+/// that reaches it is kept, its model `REDIRECTED`, and answered 200.
+pub const REDIRECTED_PATH: &str = "/v1/redirected";
+pub const REDIRECTED: &str = "(followed a redirect)";
 /// The model its embeddings face serves, BGE-M3 as a self-hosted
 /// deployment names it (fragment_core::embed).
 pub const OPENAI_EMBEDDING_MODEL: &str = "BAAI/bge-m3";
@@ -361,6 +385,9 @@ struct State {
     /// The next streamed answers end before their usage, in order.
     breaks: VecDeque<bool>,
     delays: VecDeque<u64>,
+    /// Where the next transcriptions on the OpenAI-compatible face
+    /// redirect (`redirect_next`), in order: a 307 to it.
+    redirects: VecDeque<String>,
     sleep_ms: u64,
     tool_calls: u64,
     answers: u64,
@@ -1045,6 +1072,14 @@ fn answer(s: &mut State, req: &Request) -> Response {
     if req.path == EMBEDDINGS_PATH {
         return openai_embeddings(s, req);
     }
+    if req.path == TRANSCRIPTIONS_PATH {
+        return openai_transcription(s, req);
+    }
+    if req.path == REDIRECTED_PATH {
+        let authorization = req.header("authorization").map(str::to_string);
+        s.calls.push(AiCall { face: Face::OpenAi, model: REDIRECTED.into(), body: json!({ "bytes": req.body.len() }), metadata: Value::Null, affinity: None, authorization });
+        return Response::json(200, &json!({ "text": "followed", "duration": 1.0 }));
+    }
     if let Some(video) = req.path.strip_prefix("/video/").filter(|_| req.method == "GET") {
         return video_served(s, video);
     }
@@ -1166,6 +1201,56 @@ fn openai_embeddings(s: &mut State, req: &Request) -> Response {
     let tokens: usize = texts.iter().map(|t| t.split_whitespace().count().max(1)).sum();
     let data: Vec<Value> = texts.iter().enumerate().map(|(index, t)| json!({ "object": "embedding", "index": index, "embedding": embedding(t, EMBEDDING_DIMENSIONS) })).collect();
     Response::json(200, &json!({ "object": "list", "data": data, "model": model, "usage": { "prompt_tokens": tokens, "total_tokens": tokens } }))
+}
+
+/// The OpenAI-compatible face's transcriptions (the module's doc): a form
+/// in, kept as its fields; answered in the format it asked for.
+fn openai_transcription(s: &mut State, req: &Request) -> Response {
+    let refuse = |why: &str| limiter_error(400, "invalid_request_error", "invalid_request", why);
+    let content_type = req.header("content-type").unwrap_or_default();
+    let Ok(boundary) = fragment_core::multipart::boundary(content_type) else { return refuse("a transcription is a multipart/form-data form") };
+    let Ok(parts) = fragment_core::multipart::parts(&req.body, &boundary) else { return refuse("the form is out of shape") };
+    let field = |name: &str| parts.iter().find(|p| p.name == name);
+    let text = |name: &str| field(name).map(|p| String::from_utf8_lossy(p.data).into_owned());
+    let mut body = json!({});
+    for name in ["model", "response_format", "language", "prompt"] {
+        if let Some(v) = text(name) {
+            body[name] = json!(v);
+        }
+    }
+    if let Some(file) = field("file") {
+        body["file"] = json!(base64::engine::general_purpose::STANDARD.encode(file.data));
+        body["filename"] = json!(file.filename);
+        body["content_type"] = json!(file.content_type);
+    }
+    let model = text("model").unwrap_or_default();
+    let authorization = req.header("authorization").map(str::to_string);
+    s.calls.push(AiCall { face: Face::OpenAi, model: model.clone(), body, metadata: Value::Null, affinity: None, authorization: authorization.clone() });
+    if let Some(refused) = unkeyed(s, &model, authorization.as_deref()) {
+        return refused;
+    }
+    if model != OPENAI_TRANSCRIBE_MODEL {
+        return limiter_error(400, "invalid_request_error", "unsupported_model", "The requested model is not available here.");
+    }
+    if let Some(Some(status)) = s.failures.pop_front() {
+        return failure(Face::OpenAi, status);
+    }
+    if let Some(location) = s.redirects.pop_front() {
+        return Response::json(307, &json!({ "error": { "message": "moved" } })).with_header("location", &location);
+    }
+    let Some(audio) = field("file").map(|p| p.data).filter(|a| !a.is_empty()) else { return refuse("file is the audio") };
+    s.answers += 1;
+    let (words, duration) = heard(audio);
+    let usage = json!({ "type": "duration", "seconds": duration.ceil() });
+    match text("response_format").as_deref() {
+        Some("verbose_json") => Response::json(
+            200,
+            &json!({ "task": "transcribe", "language": text("language").unwrap_or_else(|| "english".into()), "duration": duration, "text": words, "segments": [{ "id": 0, "start": 0.0, "end": duration, "text": words }], "usage": usage }),
+        ),
+        None | Some("json") => Response::json(200, &json!({ "text": words, "usage": usage })),
+        Some("text") => Response::bytes(200, "text/plain", words.into_bytes()),
+        Some(other) => refuse(&format!("response_format {other} is not one this server answers")),
+    }
 }
 
 /// A chat call's answer on `face`, from the test's levers or as it would.
@@ -1412,6 +1497,13 @@ impl WorkersAi {
     /// through by `pass_next`).
     pub fn fail_next(&self, statuses: &[u16]) {
         self.state().failures.extend(statuses.iter().map(|s| Some(*s)));
+    }
+
+    /// The next transcriptions on the OpenAI-compatible face answer a 307
+    /// to `location`, as an API moved elsewhere would; a call that follows
+    /// one to `REDIRECTED_PATH` here is kept as a call to `REDIRECTED`.
+    pub fn redirect_next(&self, location: &str) {
+        self.state().redirects.push_back(location.to_string());
     }
 
     /// The next `n` calls answer as they would, before any failure queued after.
@@ -1891,7 +1983,44 @@ mod tests {
         let r = transcription_answer(&input, "log");
         let v: Value = serde_json::from_slice(&r.body).unwrap();
         assert_eq!((v["text"].clone(), v["transcription_info"]["duration"].clone(), v["word_count"].clone()), (json!("hello from a voice memo"), json!(3.0), json!(5)));
-        assert_eq!(fragment_core::transcribe::usage_of(&v), Some(fragment_core::price::Usage::Neurons { milli: 2_332 }), "the cell meters what the answer says");
+        let slot = fragment_core::transcribe::slot_of(&mut json!({ "transcription": { "provider": "workers_ai", "model": TRANSCRIBE_MODEL, "price": { "neurons_a_minute": 46.63 } } })).unwrap().unwrap();
+        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Neurons { milli: 2_332 }), "the cell meters what the answer says");
+    }
+
+    /// Goal: the OpenAI-compatible face transcribes as a Whisper server
+    /// answers OpenAI's form, keeping the form's fields, and the cell
+    /// meters what its answer says. Method: a form in each format, one to
+    /// another model, one without the key, and one failed by the levers.
+    #[test]
+    fn its_openai_face_transcribes_a_form() {
+        let wav = spoken_wav("hello from a voice memo", 3);
+        let form = |model: &str, format: &str| {
+            let fields = [
+                fragment_core::multipart::Field { name: "model", filename: None, content_type: None, data: model.as_bytes() },
+                fragment_core::multipart::Field { name: "response_format", filename: None, content_type: None, data: format.as_bytes() },
+                fragment_core::multipart::Field { name: "file", filename: Some("memo.wav"), content_type: Some("audio/wav"), data: &wav },
+            ];
+            fragment_core::multipart::form("b0", &fields).unwrap()
+        };
+        let post = |s: &mut State, body: &[u8], key: &str| answer(s, &Request::new("POST", TRANSCRIPTIONS_PATH, &[("content-type", "multipart/form-data; boundary=b0"), ("authorization", key)], body));
+        let mut s = State { key: Some("tk".into()), ..State::default() };
+        let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "verbose_json"), "Bearer tk");
+        let v: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!((r.status, v["text"].clone(), v["duration"].clone(), v["usage"].clone()), (200, json!("hello from a voice memo"), json!(3.0), json!({ "type": "duration", "seconds": 3.0 })));
+        let call = s.calls.last().unwrap();
+        assert_eq!((call.face, call.model.as_str(), call.body["filename"].clone(), call.body["file"].clone()), (Face::OpenAi, OPENAI_TRANSCRIBE_MODEL, json!("memo.wav"), json!(base64::engine::general_purpose::STANDARD.encode(&wav))));
+        let slot = fragment_core::transcribe::slot_of(&mut json!({ "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:1/v1", "model": OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": 0.006 } } })).unwrap().unwrap();
+        assert_eq!(fragment_core::transcribe::usage_of(&slot, &v), Some(fragment_core::price::Usage::Key { key: fragment_core::transcribe::COST.into(), units: 18_000 }), "3 s at $0.006 a minute, in sixtieths of a micro-dollar");
+        let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "text"), "Bearer tk");
+        assert_eq!((r.status, r.body.as_slice()), (200, &b"hello from a voice memo"[..]));
+        assert_eq!(post(&mut s, &form("whisper", "json"), "Bearer tk").status, 400, "the route's name is no model of the server's");
+        assert_eq!(post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer other").status, 401);
+        s.failures.push_back(Some(503));
+        assert_eq!(post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer tk").status, 503);
+        s.redirects.push_back("http://127.0.0.1:1/v1/redirected".into());
+        let r = post(&mut s, &form(OPENAI_TRANSCRIBE_MODEL, "json"), "Bearer tk");
+        assert_eq!((r.status, r.headers.iter().find(|(k, _)| k == "location").map(|(_, v)| v.as_str())), (307, Some("http://127.0.0.1:1/v1/redirected")));
+        assert_eq!(post(&mut s, b"not a form", "Bearer tk").status, 400);
     }
 
     /// Goal: each Clef model answers System One's shape, mechanically and

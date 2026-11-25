@@ -161,13 +161,23 @@
       <div class="rename-actions"><button id="add-agent-cancel" type="button">Cancel</button><button type="submit" id="add-agent-go" disabled>Add</button></div>
     </form>
   </dialog>
+  <!-- a chat of the person's own deleted: asked once more, naming it (shell.js `askDelete`) -->
+  <dialog class="rename-agent" id="delete-chat-dialog" aria-labelledby="delete-chat-title" aria-describedby="delete-chat-text">
+    <form id="delete-chat-form">
+      <h2 id="delete-chat-title">Delete this chat?</h2>
+      <p id="delete-chat-text">Its messages and files are deleted for everyone in it. This can't be undone.</p>
+      <p id="delete-chat-error" class="form-error" role="alert" hidden></p>
+      <div class="rename-actions"><button id="delete-chat-cancel" type="button">Cancel</button><button type="submit" id="delete-chat-go" class="danger">Delete</button></div>
+    </form>
+  </dialog>
   <dialog class="search-dialog" id="search-dialog" aria-label="Ask anything or find a chat">
     <div class="wallpaper" aria-hidden="true"></div>
     <div class="search-panel">
       <form class="search-input-wrap" id="search-form">
         <textarea id="workspace-search" rows="1" aria-label="Ask anything or find a chat" placeholder="Ask anything, or find a chat or app…" autocomplete="off" maxlength="4000" enterkeyhint="send" autofocus aria-controls="search-results"></textarea>
-        <button class="icon-button search-send" id="search-send" type="submit" aria-label="Start a new chat" title="Start a new chat" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></button>
+        <button class="icon-button search-send" id="search-send" type="submit" aria-label="Start a new chat" title="Start a new chat" disabled><span class="bead"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6"/></svg></span></button>
       </form>
+      <div class="search-agent" id="search-agents" role="group" aria-label="Agent" hidden></div>
       <div class="search-files" id="search-files" hidden></div>
       <div class="search-drop" id="search-drop" aria-hidden="true">Drop to attach</div>
       <div class="search-results" id="search-results"></div>

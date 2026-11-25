@@ -128,7 +128,7 @@ const FILES_MAX: usize = 32;
 /// a server it cannot reach for good, and says nothing (a computer on
 /// Cloudflare reaches no XFTP server: docs/bridge.md, "SimpleX"); a voice
 /// note or a photo arrives in seconds.
-const FILE_WAIT_MS: u64 = 3 * 60 * 1000;
+pub const FILE_WAIT_MS: u64 = 3 * 60 * 1000;
 /// Files given up on that a link keeps, at most (`Saved::abandoned`).
 const ABANDONED_MAX: usize = 64;
 /// A cancel still to be taken is asked again this often while its core runs.
@@ -145,7 +145,7 @@ const USED_MAX: usize = 64;
 /// 2 GiB a computer a day (`fragment_core::relay`), so this, padded into
 /// XFTP's 4 MB chunks (28 MB), is one connection's worth: about four
 /// minutes at 100 KB/s. A reply's larger file stays in the chat alone.
-const FILE_BYTES_MAX: u64 = 25 * 1024 * 1024;
+pub const FILE_BYTES_MAX: u64 = 25 * 1024 * 1024;
 /// `fragment_core::relay::BYTES_MAX`, which the cell holds a relay to (its
 /// own workspace: a copy, for the assertion below).
 const RELAY_BYTES_MAX: u64 = 32 << 20;
@@ -157,7 +157,7 @@ const SENDING_MAX: usize = crate::limits::ATTACHMENTS_MAX;
 /// The core retries a server it cannot reach for good, saying nothing (as
 /// for a receive, `FILE_WAIT_MS`); `FILE_BYTES_MAX` at 100 KB/s is about
 /// four minutes.
-const SEND_WAIT_MS: u64 = 5 * 60 * 1000;
+pub const SEND_WAIT_MS: u64 = 5 * 60 * 1000;
 /// Entries of a link's `OUT_DIR` one sweep reads, at most.
 const OUT_SWEEP_MAX: usize = 1024;
 /// A maintenance read of an identity to adopt ends within this, or the
@@ -474,7 +474,7 @@ pub fn file_kind(media_type: &str, bytes: &[u8]) -> Kind {
 }
 
 /// What a file is, in a note's words, by its type alone (one never read).
-fn words_of(media_type: &str) -> &'static str {
+pub fn words_of(media_type: &str) -> &'static str {
     match media_type.split('/').next().unwrap_or("") {
         "audio" => "a voice message",
         "image" => "an image",
@@ -536,7 +536,7 @@ pub async fn outgoing(out: &Path, files: &[LocalFile]) -> (Vec<Outgoing>, Vec<&'
 /// A send's copy let go, by its folder in the link `dir`'s `OUT_DIR`: one
 /// name, never a path out of it (a `link.json` that says otherwise is no
 /// one's to follow).
-fn remove_copy(dir: &Path, folder: &str) {
+pub fn remove_copy(dir: &Path, folder: &str) {
     if !folder.is_empty() && folder != "." && folder != ".." && !folder.contains(['/', '\\', '\0']) {
         let _ = std::fs::remove_dir_all(dir.join(OUT_DIR).join(folder));
     }
@@ -551,12 +551,12 @@ fn let_go(path: &Path) {
 
 /// What the owner's app is told of a file of a reply's that stays in the
 /// chat alone.
-fn kept_note(words: &str) -> String {
+pub fn kept_note(words: &str) -> String {
     format!("(I sent {words}, in our chat.)")
 }
 
 /// What it is told of one whose upload failed, or was given up on.
-fn unsent_note(words: &str) -> String {
+pub fn unsent_note(words: &str) -> String {
     let mut w = words.chars();
     let words = w.next().map(|c| c.to_uppercase().chain(w).collect::<String>()).unwrap_or_default();
     format!("({words} I sent didn't arrive here: it's in our chat.)")
@@ -604,7 +604,7 @@ pub fn media_type(kind: &str, name: &str) -> &'static str {
 }
 
 /// What the agent's chat says of a file that could not be carried.
-fn file_note(kind: &str, why: &str) -> String {
+pub fn file_note(kind: &str, why: &str) -> String {
     let what = match kind {
         "voice" => "a voice message",
         "image" => "a photo",
