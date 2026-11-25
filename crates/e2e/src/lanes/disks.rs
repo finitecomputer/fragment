@@ -17,7 +17,6 @@ use anyhow::Result;
 use serde_json::{json, Value};
 
 use super::computers::{agent_replies, lever, lever_with, members_only, phase, put_to_sleep, told, AGENT_JSON, CHAT_JSON};
-use super::jobs::records;
 use crate::api::Api;
 use crate::{Need, Suite};
 
@@ -288,7 +287,10 @@ impl Talk<'_> {
         let r = self.api.signed(self.owner, "POST", &format!("/api/f/{}/channels/chat", self.chat), Some(&body))?;
         let seq = r.body["record"]["seq"].as_i64().unwrap_or(0);
         let turn = super::computers::turn_of(self.agent, self.chat, "chat", seq);
-        let reply = || agent_replies(&records(self.api, self.owner, self.chat, "chat"), self.identity).into_iter().find(|x| x["body"]["turn"] == turn.as_str());
+        // the records after its message: a chat of a thousand cycles is more
+        // than a page from its start
+        let after = || self.api.signed(self.owner, "GET", &format!("/api/f/{}/channels/chat?after={seq}", self.chat), None).ok().and_then(|r| r.body["records"].as_array().cloned()).unwrap_or_default();
+        let reply = || agent_replies(&after(), self.identity).into_iter().find(|x| x["body"]["turn"] == turn.as_str());
         s.eventually(WAKE, || reply().is_some());
         Ok(reply().and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     }
