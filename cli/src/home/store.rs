@@ -248,9 +248,10 @@ fn groups(keep: Vec<Keep>, part_bytes: u64, root: &str) -> Vec<Group> {
 }
 
 /// Each note under `notes` (iterative), by its path, read: what it says is
-/// kept. A file named as a note is (`<name>.offloaded.md`) that is the
-/// home's own file, `brought` back from its note (FIN-757), is that file;
-/// any other that is not a note a move or an import writes is refused.
+/// kept, its places held. Every file named as a note is
+/// (`<name>.offloaded.md`) whose record reads is one, whatever else holds
+/// its bytes. One whose record does not read is refused, but the home's
+/// own file `brought` back from its note (FIN-757), which holds no place.
 fn notes_under(notes: &Path, brought: &dyn Fn(&Path) -> bool) -> Result<Vec<(PathBuf, Record)>> {
     let mut out = Vec::new();
     let mut folders = vec![notes.to_path_buf()];
@@ -265,10 +266,16 @@ fn notes_under(notes: &Path, brought: &dyn Fn(&Path) -> bool) -> Result<Vec<(Pat
             let t = e.file_type()?;
             if t.is_dir() {
                 folders.push(e.path());
-            } else if t.is_file() && e.file_name().to_str().is_some_and(|n| n.ends_with(NOTE_SUFFIX)) && !brought(&e.path()) {
-                let text = std::fs::read_to_string(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
-                let r = offload::record_of(&text).map_err(|why| coded(Code::Conflict, format!("{} is not a note this import or `fragment offload` wrote ({why:#}): move it aside, then run this again", e.path().display())))?;
-                out.push((e.path(), r));
+            } else if t.is_file() && e.file_name().to_str().is_some_and(|n| n.ends_with(NOTE_SUFFIX)) {
+                // every record there is a note, its places held, whatever
+                // else holds its bytes; one that reads as none is refused,
+                // but a home's file brought back
+                let text = std::fs::read(e.path()).with_context(|| format!("reading {}", e.path().display()))?;
+                match String::from_utf8(text).map_err(anyhow::Error::new).and_then(|t| offload::record_of(&t)) {
+                    Ok(r) => out.push((e.path(), r)),
+                    Err(_) if brought(&e.path()) => {}
+                    Err(why) => bail!(coded(Code::Conflict, format!("{} is not a note this import or `fragment offload` wrote ({why:#}): move it aside, then run this again", e.path().display()))),
+                }
             }
         }
     }
@@ -326,8 +333,8 @@ fn keep_within(c: &Client, src: &Source, keep: Vec<String>, into: &str, notes: &
     // paths its parts hold, by fragment
     let mut covered: HashMap<String, Moved> = HashMap::new();
     let mut taken: HashMap<(String, String), String> = HashMap::new();
-    // a file there named as a note is, the home's own with its bytes, was
-    // brought back from its note: it is that file
+    // a file there named as a note is, reading as no note, the home's own
+    // with its bytes, was brought back from its note: it is that file
     let brought = |at: &Path| -> bool {
         let rel = at.strip_prefix(&notes).ok().and_then(Path::to_str);
         let sums = rel.and_then(|rel| Some((src.get(rel)?.size, src.sums(rel).ok()??.0)));
@@ -784,6 +791,32 @@ mod tests {
         let e = crate::offload::back(&s.c, note).err().map(|e| format!("{e:#}")).unwrap_or_default();
         assert!(e.contains("not those stored") || e.contains("other bytes"), "{e}");
         assert!(note.exists(), "the note stays");
+    }
+
+    /// Goal (Codex on #1561): a note's place is never freed by a copy of the
+    /// note in the home. A home holding its own copy of a note this import
+    /// wrote, and other bytes for the file that note keeps, is refused
+    /// before anything is written, and the note still brings back its own.
+    #[test]
+    fn a_copy_of_a_note_in_the_home_never_frees_its_place() {
+        let mut files = home();
+        files.push(("model.gguf".into(), bytes(4096, 17)));
+        let s = setup(&files);
+        bring(&s.c, &s.src, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).unwrap();
+        let note = s.notes.join(format!("model.gguf{NOTE_SUFFIX}"));
+        let mut changed = files.clone();
+        changed.last_mut().unwrap().1[0] ^= 1;
+        changed.push((format!("model.gguf{NOTE_SUFFIX}"), std::fs::read(&note).unwrap()));
+        let zip = s._t.0.join("stage-copy.zip");
+        fragment_fakes::old_home::zip(&zip, &changed).unwrap();
+        s.mock.seed_stage("old1.p1.3", std::fs::read(&zip).unwrap());
+        let src2 = crate::home::open_from(Some(&s.c), Path::new("stage:old1.p1.3"), &layout()).unwrap();
+        let head = s.mock.branch(STORE, "main");
+        let e = bring(&s.c, &src2, &layout(), FILES, Some(Store { into: STORE, notes: &s.notes })).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(e.contains("other bytes than this home's") && e.contains("model.gguf"), "{e}");
+        assert_eq!(s.mock.branch(STORE, "main"), head, "nothing written");
+        crate::offload::back(&s.c, &note).unwrap();
+        assert_eq!(std::fs::read(s.notes.join("model.gguf")).unwrap(), files.last().unwrap().1, "the note brings back its own");
     }
 
     /// Goal (Codex on #1389): a home whose files differ from what its
