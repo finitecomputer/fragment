@@ -250,7 +250,14 @@ Not built either:
   reaches another), and the door posts its
   owner's messages to the connector's inbox as a webhook does, which
   publishes each to the bound agent; the agent's computer wakes for it as
-  for any message, so it may sleep. Settings makes one for every seat,
+  for any message, so it may sleep. It carries files both ways (S1): its
+  owner's (a voice message, a photo) received by its core and given to the
+  door, which holds each a moment under `doors/<door>/files/` until its
+  connector keeps it as one of the chat's blobs; a reply's, which the bound
+  agent uploads to the connector's chat (a viewer there, it may upload its
+  replies' files), given to the door by its connector and sent after the
+  reply's text; its core's XFTP traffic through the door's relay (below).
+  Settings makes one for every seat,
   its setup page showing the invitation's QR code (D3); an always-on
   computer that does SimpleX keeps each agent's own (decision 32) until
   existing links move to doors.
@@ -343,27 +350,35 @@ draws them over every chat and Settings with no code of its own for any.
 
 ## Preview and production
 
-**There's preview and there's prod** (Paul, 2026-10-31). One image name,
-`hermes`: preview runs master's image, and production runs the digest
-preview proved, promoted by Paul.
+**There's preview and there's prod** (Paul, 2026-10-31). Two images, each
+by its name (xtask/src/image.rs, `IMAGES`): the computers' `hermes`, and
+the SimpleX doors' `door`. Preview runs master's of each, and production
+runs the digests preview proved, promoted by Paul.
 
 - **Pins are digests.** Every image a CI config names is pinned at
   `…@sha256:<64 hex>` (deploy.rs's `pinned_ok`); tags only find them. A
   computer is pinned to an image by its name in the config (`hermes` by
-  default). A computer pinned to a name the deployment no longer has has
-  no image to start: move its pins (`fragment operator pin`) before a
-  name goes.
+  default); the doors' image is the config's `doors.image`. A computer
+  pinned to a name the deployment no longer has has no image to start:
+  move its pins (`fragment operator pin`) before a name goes.
 - **Preview follows master.** Each green master push deploys, as
-  `hermes`, the image its checkout's inputs make, reused by its input key
-  when it was built before (`xtask/src/image/preview.rs`), else built
-  beside the push's e2e by master's job, the only writer of an input tag.
-- **What changes a version.** Only the image's inputs (Paul, 2026-10-14:
-  a change to the cell or the shell needs no image rollout); a host test
-  holds that list to the Dockerfile.
+  `hermes` and as the doors' image, the images its checkout's inputs make,
+  each reused by its own input key when it was built before
+  (`xtask/src/image/preview.rs`), in its own preview repository
+  (`fragment-preview-computer-hermes-canary`, `fragment-preview-door`),
+  else built beside the push's e2e by master's job, the only writer of an
+  input tag. The deploy pins them in memory (`--preview-image
+  hermes=sha256:… --preview-image door=sha256:…`) over what preview's
+  config pins; a config that names no doors runs none.
+- **What changes a version.** Only an image's own inputs (Paul,
+  2026-10-14: a change to the cell or the shell needs no image rollout):
+  the door's runner moves the door alone, the CLI Hermes alone, and the
+  bridge both; a host test holds each list to its Dockerfile.
 - **Production stays pinned** (`production.jsonc` in
-  finitecomputer/fragment-deploy) to a digest a round proved, copied byte
-  for byte into production's registry (`cargo xtask image copy`), never
-  rebuilt. Only Paul promotes.
+  finitecomputer/fragment-deploy) to the digests a round proved, each
+  copied byte for byte into production's registry (`cargo xtask image
+  copy`: `fragment-computer-hermes`, `fragment-door`), never rebuilt.
+  Only Paul promotes.
 - **Guest-facing contracts stay additive.** The cell can be ahead of a
   computer for days (an awake computer keeps its image across a deploy),
   and production's image lags master by a round.
@@ -375,9 +390,9 @@ preview proved, promoted by Paul.
 
 ### One round before production
 
-1. Record the input key and digest from master's preview deploy summary,
-   and the running reference of each computer watched (a later push may
-   move preview).
+1. Record each image's input key and digest from master's preview deploy
+   summary, and the running reference of each computer watched (a later
+   push may move preview).
 2. Live on it: an old chat continues, a new one recalls a memory, skills,
    a routine, the screen and Take over, Google, a teammate's ask answered
    back. Watch `version == latest`, `rollbacks` unchanged, every save
@@ -396,9 +411,10 @@ preview proved, promoted by Paul.
 5. Soak the recorded digest for 24 hours, the watched computers having
    answered on it and the hosted runs green. A later image is another
    round.
-6. Paul promotes it: the Image workflow's production copy (`from` the
-   proven reference), its pin committed to `production.jsonc` with the
-   old line kept for rollback, then a move of `production`.
+6. Paul promotes it: the Image workflow's production copy of each image
+   (`from` its proven reference; the door's once production runs doors),
+   each pin committed to `production.jsonc` (Hermes's old line kept for
+   rollback), then a move of `production`.
 
 ## The guest's contract
 
@@ -891,6 +907,14 @@ it); past a bound the socket closes with code 4008. The platform sees the
 host, the port, the byte counts and the times, never what is carried. Any
 process in the computer may use it.
 
+A SimpleX door's container has the same relay (`GET /relay?host=&port=`
+at `door.fragment.internal`: entry.mjs `DoorEgress`, `DoorRelay.target` in
+cell/src/doors.rs, relay.mjs pipes both): the same targets and each
+relay's bounds, its runner opening at most `relay::OPEN_MAX` at once. It
+keeps no day's budget of its own: a door runs no one's code but the
+platform's, and carries only its owner's files and its agent's replies'
+files, each bounded by its runner and the door's holding.
+
 ### Connector policy
 
 The deployment's `connectors` (`FRAGMENT_CONNECTORS`;
@@ -994,7 +1018,10 @@ provider's own hosts.
   book's; or an `own` key the person gives), its
   hosts, where its credential goes on a request, and its environment
   variables. Adding a provider is a row; no code names one.
-  deploy/example.jsonc has the platform's. Connecting one is
+  deploy/example.jsonc has the platform's. A connection's row is a file
+  of the checkout (deploy/providers), which a deployment names beside
+  its own client id and secret and never copies, so the row ships with
+  the release that reads it (deploy/providers/README.md). Connecting one is
   docs/api.md's, Connections; its consent is browser-bound
   (docs/pipes-browser-binding.md), and a connection holds only the scopes
   its person allowed: read only or read and write, as they picked, and

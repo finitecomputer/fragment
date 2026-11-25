@@ -45,6 +45,11 @@ pub struct Record {
 /// effect or a job's step, in a fragment running its author's own code.
 pub const CODE: &str = "code";
 
+/// The author the platform stamps on its own records: what it appends as
+/// the fragment's own (a schedule firing, a routine, `joined`), under the
+/// fragment's key, which on an agent's fragment is the agent's identity.
+pub const PLATFORM: &str = "platform";
+
 /// Whom a turn names as asking when app code wrote the message that
 /// started it: no one, whoever called the code.
 pub const CODE_SAYS: &str = "app code";
@@ -60,6 +65,12 @@ impl Record {
     /// Whether these are `who`'s own words: written as them, not by code.
     pub fn by(&self, who: &str) -> bool {
         self.principal == who && !self.by_code()
+    }
+
+    /// Whether the platform appended it as the fragment's own (`PLATFORM`):
+    /// on an agent's fragment it names the agent, though no bridge wrote it.
+    pub fn by_platform(&self) -> bool {
+        self.author.as_deref() == Some(PLATFORM)
     }
 }
 

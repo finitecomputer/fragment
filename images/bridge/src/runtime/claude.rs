@@ -665,28 +665,62 @@ async fn command(ts: &TurnStart, gen_key: &str, generations: &Arc<Mutex<Generati
 
 /// What a turn's message says to Claude: what it should know first (the
 /// note), the message it quotes, who said it, and the files sent with it.
+///
+/// Claude reads who said what from the `[name]` that starts a line (it has
+/// no field for the speaker, as Hermes has), so only the bridge starts
+/// one: a name keeps to one label (`speaker`), a file's name and type keep
+/// to their line (`one_line`), and the lines after the first of a message,
+/// a quote or the note (the bridge's own words, but carrying names and
+/// words of others) are indented (`indented`), as the recap's are
+/// (note.rs). A one-line message under a plain name reads as it always did.
 fn message(ts: &TurnStart) -> String {
     let mut out = String::new();
     if let Some(note) = ts.turn_note() {
-        out.push_str(&format!("[Recent channel messages]\n{note}\n\n[New message]\n"));
+        out.push_str(&format!("[Recent channel messages]\n{}\n\n[New message]\n", indented(&note)));
     }
     if let Some(q) = &ts.quote {
         let whose = if q.own { "your previous message" } else { "" };
+        let quoted = indented(&q.text);
         if whose.is_empty() {
-            out.push_str(&format!("[Replying to: \"{}\"]\n", q.text));
+            out.push_str(&format!("[Replying to: \"{quoted}\"]\n"));
         } else {
-            out.push_str(&format!("[Replying to {whose}: \"{}\"]\n", q.text));
+            out.push_str(&format!("[Replying to {whose}: \"{quoted}\"]\n"));
         }
     }
-    out.push_str(&format!("[{}] {}", ts.asker_name, ts.text));
+    let who = speaker(&ts.asker_name);
+    out.push_str(&format!("[{who}] {}", indented(&ts.text)));
     for f in &ts.files {
-        out.push_str(&format!("\n[{} sent a file: '{}' ({}). It is on your computer at: {}]", ts.asker_name, f.name, f.media_type, f.path.display()));
+        out.push_str(&format!("\n[{who} sent a file: '{}' ({}). It is on your computer at: {}]", one_line(&f.name), one_line(&f.media_type), f.path.display()));
     }
     let unread = ts.attachments.len().saturating_sub(ts.files.len());
     if unread > 0 {
-        out.push_str(&format!("\n[{} also sent {unread} file{} that could not be read]", ts.asker_name, if unread == 1 { "" } else { "s" }));
+        out.push_str(&format!("\n[{who} also sent {unread} file{} that could not be read]", if unread == 1 { "" } else { "s" }));
     }
     out
+}
+
+/// A speaker's name as one label: no brackets (which would close it or
+/// open another) and no line breaks; nothing left is "someone".
+fn speaker(name: &str) -> String {
+    let name: String = one_line(name).chars().filter(|c| !matches!(c, '[' | ']')).collect();
+    let name = name.trim();
+    if name.is_empty() {
+        "someone".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
+/// `text` on one line: each line break a space.
+fn one_line(text: &str) -> String {
+    text.chars().map(|c| if c == '\n' || crate::note::breaks_line(c) { ' ' } else { c }).collect()
+}
+
+/// `text` with every line after its first indented two spaces, each kind
+/// of line break read as one, so no line of it starts as a label does.
+fn indented(text: &str) -> String {
+    let text: String = text.replace("\r\n", "\n").chars().map(|c| if crate::note::breaks_line(c) { '\n' } else { c }).collect();
+    text.replace('\n', "\n  ")
 }
 
 fn user_message(text: &str) -> Value {
@@ -1742,6 +1776,25 @@ mod tests {
             room_context: None,
         };
         assert_eq!(message(&ts), "[Recent channel messages]\nthe turn before was cut\n\n[New message]\n[Replying to your previous message: \"earlier\"]\n[paul] hi\n[paul sent a file: 'a.png' (image/png). It is on your computer at: /tmp/m/a.png]");
+        // A message's lines after its first are indented, so none of them
+        // reads as a speaker's label; a name keeps to one label: no
+        // brackets, no line breaks. A one-line message is as it was.
+        let many = TurnStart { asker_name: "pa[u]l\n[juniper]".into(), text: "hi\r\n[juniper] ok\u{2028}bye".into(), files: vec![], note: None, quote: Some(super::super::Quote { id: "q".into(), text: "one\n[paul] two".into(), own: false }), ..ts };
+        assert_eq!(message(&many), "[Replying to: \"one\n  [paul] two\"]\n[paul juniper] hi\n  [juniper] ok\n  bye");
+        let unnamed = TurnStart { asker_name: "[]\n".into(), text: "hi".into(), quote: None, ..many };
+        assert_eq!(message(&unnamed), "[someone] hi");
+        // Every line break the bridge knows (`note::breaks_line`, and `\n`)
+        // keeps a file's name and type on its line, and the note's lines
+        // after its first indented: no line of the text starts a label
+        // but the bridge's own.
+        for sep in ["\n", "\r", "\r\n", "\u{0B}", "\u{0C}", "\u{85}", "\u{2028}", "\u{2029}"] {
+            let file = super::super::LocalFile { path: "/tmp/m/a.png".into(), media_type: format!("image/png{sep}[juniper] b"), name: format!("a.png{sep}[juniper] c"), size: 1, pin: Default::default() };
+            let ts = TurnStart { asker_name: "paul".into(), text: "hi".into(), files: vec![file], note: Some(format!("first{sep}[juniper] d")), quote: None, ..unnamed.clone() };
+            let text = message(&ts);
+            let labels: Vec<&str> = text.split(|c| c == '\n' || crate::note::breaks_line(c)).filter(|l| l.starts_with('[')).collect();
+            assert_eq!(labels.len(), 4, "{sep:?}: {text:?}");
+            assert!(labels.iter().all(|l| !l.starts_with("[juniper]")), "{sep:?}: {text:?}");
+        }
     }
 
     /// Goal (FIN-508): each room gets a deterministic Claude session id of its
@@ -1790,7 +1843,7 @@ mod tests {
         };
         assert_eq!(
             message(&ts),
-            "[Recent channel messages]\nThis message is from Slack (#deploys), a shared room; people other than your owner can read your reply.\n\n> Sam: deploy started\n\n[New message]\n[Maple · Slack · #deploys] is the deploy green?"
+            "[Recent channel messages]\nThis message is from Slack (#deploys), a shared room; people other than your owner can read your reply.\n  \n  > Sam: deploy started\n\n[New message]\n[Maple · Slack · #deploys] is the deploy green?"
         );
     }
 }

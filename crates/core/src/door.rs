@@ -79,6 +79,11 @@ pub const DOOR_HOST: &str = "door.fragment.internal";
 pub const DOOR_NAME_HEADER: &str = "x-fragment-door";
 pub const CONNECTOR_HEADER: &str = "x-fragment-connector";
 
+/// A file a door answers its connector's job (`GET /file`) names its
+/// SHA-256 here: a fetch that keeps it (`keep`) stores it as that blob of
+/// the connector's, checked as it is stored (cell/src/jobs.rs).
+pub const FILE_SHA_HEADER: &str = "x-door-sha256";
+
 /// A door id's digits of its connector's life.
 pub const DOOR_LIFE_HEX: usize = 12;
 

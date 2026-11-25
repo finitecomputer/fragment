@@ -78,21 +78,22 @@
 //!                    input, or a file once), make a host secret, or list names
 //!                    and times; --local <state dir> for wrangler's local store
 //!                    instead (xtask/src/secret.rs)
-//!   deploy --config <file> [--branch <name>] [--pinned-only] [--preview-image-digest <sha256:…>]
+//!   deploy --config <file> [--branch <name>] [--pinned-only] [--preview-image <image>=<sha256:…>]…
 //!                    build and deploy to Cloudflare from a deployment's config
 //!                    (deploy/example.jsonc), once its secrets are all in the
 //!                    store: a branch gets a complete copy of its own at
 //!                    <branch>.<zone> (xtask/src/deploy.rs); --pinned-only
 //!                    (CI's) refuses a config that builds a computer image
 //!                    rather than keeping it at its digest
-//!                    --preview-image-digest requires --branch preview
+//!                    --preview-image (hermes, door) requires --branch preview
 //!                    --pinned-only, and changes only its in-memory pins
 //!   image preview --output <file> [--build | --dry-run] [--summary <file>]
-//!                    resolve master's input-keyed Hermes image, or build it,
-//!                    and prepare it (--build; one it builds held to the disk
-//!                    budget first); write its input key and digest
-//!                    for CI's preview deploy. --dry-run prints its plan
-//!                    without credentials or calls
+//!                    resolve each of master's input-keyed images (Hermes,
+//!                    the SimpleX door), or build it, and prepare them
+//!                    (--build; one it builds held to the disk budget first);
+//!                    write each one's input key and digest for CI's preview
+//!                    deploy. --dry-run prints its plan without credentials
+//!                    or calls
 //!   image disk <reference>
 //!                    an image's share of a fresh computer's disk, refused past
 //!                    IMAGE_DISK_MAX (xtask/src/image/disk.rs; images/'s
@@ -101,7 +102,7 @@
 //!                    CI's CLI input lookup/version plan, or record and
 //!                    verify inputs after publishing all four tarballs
 //!   image push <image> --repository <name> --tag <tag> [--summary <file>]
-//!                    build a computer image (hermes) as a deploy builds it and
+//!                    build an image (hermes, door) as a deploy builds it and
 //!                    push it to the registry of the account CLOUDFLARE_ACCOUNT_ID
 //!                    names, held to the disk budget (image disk), then print
 //!                    the digest a config pins it at
@@ -243,6 +244,16 @@ fn build_cmd(args: &[String]) -> Result<()> {
 }
 
 /// What `cargo xtask dev` is asked for: `--clean`, `--real-agent`, and
+/// A plain dev stack's models: the cell's defaults, every route on the
+/// Workers AI fake, and its transcriptions on the fake's Whisper (the model
+/// preview's config names, at its price), as a deploy reads them.
+fn dev_models() -> Result<String> {
+    let whisper = serde_json::json!({ "provider": "workers_ai", "model": fragment_fakes::workers_ai::TRANSCRIBE_MODEL, "price": { "neurons_a_minute": 46.63 } });
+    let models = serde_json::Value::Object([(fragment_core::transcribe::TRANSCRIPTION.to_string(), whisper)].into_iter().collect());
+    let (cell, _) = deploy::models_cell(&models, true)?;
+    Ok(cell.to_string())
+}
+
 /// `--models <config>` with it; `--runtime celld` (docs/self-host.md, seam 1).
 struct DevArgs {
     clean: bool,
@@ -372,7 +383,12 @@ fn dev(args: &[String]) -> Result<()> {
         // --real-agent puts the text tiers on real models
         ai_url: Some(ai.url.clone()),
         ai_gateway: None,
-        models: named.map(|(models, _, _)| models.clone()),
+        // and a plain stack's, the cell's defaults with its transcriptions
+        // on the fake's Whisper (`dev_models`)
+        models: Some(match named {
+            Some((models, _, _)) => models.clone(),
+            None => dev_models()?,
+        }),
         // its slots on an OpenAI-compatible API, each on the one key dev binds
         model_keys: named
             .map(|(_, slots, key)| slots.iter().map(|slot| devstack::ModelKey { slot: slot.clone(), name: devstack::store::MODEL_KEY.into(), value: key.clone() }).collect())
@@ -590,11 +606,14 @@ fn dev_providers(oauth: Option<serde_json::Value>) -> String {
     let bearer = serde_json::json!([{ "header": "authorization", "format": "Bearer {}" }]);
     let env = |name: &str| format!("{}_API_KEY", name.to_uppercase().replace('-', "_"));
     let notes = ["A stand-in web search.", "A stand-in page reader."];
+    // the stand-in's scopes for people, as a real row names its own; its
+    // sign-in's (openid) is unnamed, so it is no chip
+    let scope_names = serde_json::json!({ "mail.read": "Mail (read)", "files.read": "Files (read)", "mail.send": "Mail (send)" });
     let mut rows: Vec<serde_json::Value> = oauth
         .map(|oauth| {
             serde_json::json!({
                 "name": DEV_CONNECTION, "kind": "connection", "hosts": ["sample.test"], "placements": bearer, "env": ["SAMPLE_TOKEN"],
-                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.",
+                "connection_oauth": oauth, "note": "A stand-in: nothing real is connected.", "scope_names": scope_names,
             })
         })
         .into_iter()
@@ -973,6 +992,17 @@ mod tests {
         }
     }
 
+    /// A plain dev stack's models are the cell's defaults, and it
+    /// transcribes on the fake's Whisper, named by its own config.
+    #[test]
+    fn a_plain_dev_stack_transcribes_on_the_fake() {
+        let text = super::dev_models().unwrap();
+        let m = fragment_core::models::Models::parse(Some(&text), &fragment_core::price::PriceBook::defaults(), true).unwrap();
+        let t = m.transcription.clone().expect("a slot");
+        assert_eq!((t.upstream.model(), t.price), (fragment_fakes::workers_ai::TRANSCRIBE_MODEL, fragment_core::transcribe::Price::Neurons { milli_a_minute: 46_630 }));
+        assert_eq!(fragment_core::models::Models { transcription: None, ..m }, fragment_core::models::Models::defaults(), "the cell's defaults otherwise");
+    }
+
     /// Dev's connection is one a deployment's catalog takes as it is.
     #[test]
     fn dev_providers_is_a_valid_catalog() {
@@ -981,6 +1011,12 @@ mod tests {
         let rows: Vec<fragment_core::catalog::Provider> = serde_json::from_str(&super::dev_providers(Some(oauth))).expect("rows");
         let catalog = fragment_core::catalog::Catalog::of(rows).expect("dev's catalog");
         assert!(catalog.get(super::DEV_CONNECTION).is_some_and(|p| p.connection_oauth.is_some()));
+        // its scopes are named as a real row's are, but for its sign-in's
+        // (openid), so settings shows its chips locally (FIN-509)
+        let named: Vec<&str> = catalog.get(super::DEV_CONNECTION).map(|p| p.scope_names.keys().map(String::as_str).collect()).unwrap_or_default();
+        let shown: Vec<&str> = fragment_fakes::workos::CONNECTION_WRITE_SCOPES.into_iter().filter(|s| *s != "openid").collect();
+        assert_eq!(named.len(), shown.len(), "{named:?}");
+        assert!(shown.iter().all(|s| named.contains(s)), "{named:?}");
         for (name, micros, _) in super::DEV_OPERATOR_KEYS {
             assert!(catalog.get(name).is_some_and(|p| p.kind == fragment_core::catalog::Kind::Operator && p.price.is_some_and(|pr| pr.micros == micros)), "{name}");
         }

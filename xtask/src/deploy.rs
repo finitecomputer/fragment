@@ -299,19 +299,30 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
 /// name in the store.
 pub(crate) type SlotKeys = Vec<(String, String)>;
 
-/// The deployment's models (`models`, `models_cell`), when it names them.
+/// The deployment's models (`models`, `models_cell`): a config naming
+/// none is read as `{}` (the cell's defaults), so it gets the transcription
+/// slot it had (`TRANSCRIPTION_UNTIL_NAMED`) too.
 fn models_of(d: &Deployment) -> Result<(Option<Value>, SlotKeys)> {
-    let Some(models) = &d.models else { return Ok((None, vec![])) };
-    let (cell, keys) = models_cell(models, false)?;
+    let (cell, keys) = models_cell(d.models.as_ref().unwrap_or(&json!({})), false)?;
     Ok((Some(cell), keys))
 }
+
+/// The transcription slot a deployment's `models` is given when it names
+/// none (`models_cell`): Workers AI's Whisper large v3 turbo, at its 46.63
+/// neurons a minute (developers.cloudflare.com/workers-ai/platform/pricing,
+/// read 2026-10-07), where every deployment transcribed before its slot was
+/// its config's. Debt (docs/technical-debt-ledger.md): gone once
+/// fragment-deploy's configs name `models.transcription`.
+pub(crate) const TRANSCRIPTION_UNTIL_NAMED: &str = r#"{"provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": {"neurons_a_minute": 46.63}}"#;
 
 /// A deployment config's `models`: the cell's (`FRAGMENT_MODELS`, its
 /// routes over its slots, each slot's upstream less its key) and the store
 /// secret each slot on an OpenAI-compatible API names for its key. Such a
 /// slot names one; a Workers AI slot names none. A config naming the four
 /// slots of before 2026-11-17 is read as the routes it meant
-/// (`fragment_core::models::legacy`: debt, docs/technical-debt-ledger.md).
+/// (`fragment_core::models::legacy`: debt, docs/technical-debt-ledger.md),
+/// and one naming no `transcription` slot is given
+/// `TRANSCRIPTION_UNTIL_NAMED` (debt too).
 /// Checked as the cell checks them (`fragment_core::models::Models::parse`),
 /// on no local address unless `local` (a local fleet's models file, whose
 /// egress reaches this machine). `cargo xtask dev --real-agent` reads one
@@ -320,9 +331,13 @@ pub(crate) fn models_cell(models: &Value, local: bool) -> Result<(Value, SlotKey
     let mut cell = fragment_core::models::legacy(models).map_err(|e| anyhow::anyhow!("{e}"))?;
     let mut keys = vec![];
     let Some(top) = cell.as_object_mut() else { bail!("models is an object: its default, routes and slots") };
+    let transcription = fragment_core::transcribe::TRANSCRIPTION;
+    if !top.contains_key(transcription) {
+        top.insert(transcription.into(), serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).expect("the slot is JSON"));
+    }
     let mut rows: Vec<(String, String, &mut Value)> = vec![];
     for (key, value) in top.iter_mut() {
-        if key == fragment_core::embed::EMBEDDINGS {
+        if key == fragment_core::embed::EMBEDDINGS || key == transcription {
             rows.push((key.clone(), key.clone(), value));
         } else if let Some(slots) = value.as_object_mut().filter(|_| key == "slots") {
             rows.extend(slots.iter_mut().map(|(name, row)| (format!("slots.{name}"), name.clone(), row)));
@@ -713,11 +728,18 @@ fn read_test_secret(file: &Path) -> Result<String> {
 }
 
 fn load(config: &Path) -> Result<Deployment> {
-    let v = read_json(config)?;
+    let mut v = read_json(config)?;
     for (field, now) in FIELDS_GONE {
         if v.get(field).is_some() {
             bail!("{}: {field} is gone; name it as {now}", config.display());
         }
+    }
+    // a connection named by its row (`{"row": …}`) is that row, read from
+    // this checkout: the release's own, never a deployment's copy
+    // (devstack::rows)
+    if let Some(named) = v.get("providers").and_then(Value::as_array) {
+        let rows = devstack::rows::resolved(named, &devstack::repo_root()).with_context(|| format!("check {}", config.display()))?;
+        v["providers"] = Value::Array(rows);
     }
     let d: Deployment = serde_json::from_value(v).with_context(|| format!("parse {}", config.display()))?;
     checked(d).with_context(|| format!("check {}", config.display()))
@@ -811,40 +833,63 @@ struct Args {
     branch: Option<String>,
     /// A deploy's `--pinned-only` (`pinned_only`).
     pinned_only: bool,
-    /// CI's preview-only, input-resolved image; never applied to production.
-    preview_image_digest: Option<String>,
+    /// CI's preview-only, input-resolved images, by name (image.rs,
+    /// `IMAGES`), each at most once; never applied to production.
+    preview_images: Vec<(String, String)>,
 }
 
 fn args(rest: &[String]) -> Result<Args> {
-    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] [--preview-image-digest <sha256:…>] | teardown --config <file> --branch <name>");
-    let (mut config, mut branch, mut pinned_only, mut preview_image_digest) = (None, None, false, None);
+    let usage = || anyhow::anyhow!("usage: cargo xtask deploy --config <file> [--branch <name>] [--pinned-only] [--preview-image <image>=<sha256:…>]… | teardown --config <file> --branch <name>");
+    let (mut config, mut branch, mut pinned_only, mut preview_images) = (None, None, false, Vec::<(String, String)>::new());
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--config" => config = Some(PathBuf::from(it.next().ok_or_else(usage)?)),
             "--branch" => branch = Some(it.next().ok_or_else(usage)?.clone()),
             "--pinned-only" => pinned_only = true,
-            "--preview-image-digest" => preview_image_digest = Some(it.next().ok_or_else(usage)?.clone()),
+            "--preview-image" => {
+                let (name, digest) = it.next().ok_or_else(usage)?.split_once('=').ok_or_else(usage)?;
+                anyhow::ensure!(crate::image::by_name(name).is_some(), "--preview-image {name:?}: preview follows {}", crate::image::IMAGES.map(|i| i.name).join(", "));
+                anyhow::ensure!(!preview_images.iter().any(|(n, _)| n == name), "--preview-image {name:?} is named twice");
+                preview_images.push((name.to_string(), digest.to_string()));
+            }
             _ => return Err(usage()),
         }
     }
-    anyhow::ensure!(preview_image_digest.is_none() || (branch.as_deref() == Some("preview") && pinned_only), "--preview-image-digest requires --branch preview --pinned-only; production uses its config's pins");
-    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only, preview_image_digest })
+    anyhow::ensure!(preview_images.is_empty() || (branch.as_deref() == Some("preview") && pinned_only), "--preview-image requires --branch preview --pinned-only; production uses its config's pins");
+    Ok(Args { config: config.ok_or_else(usage)?, branch, pinned_only, preview_images })
 }
 
-/// Override only the preview's in-memory `hermes`, its default, with
-/// master's image. Any other image its config names (an upgrade check's
-/// starting image: `--upgrade-from`, docs/computers.md "Preview and
-/// production") stays at the digest the config pins it to. Other config
-/// (including production's file) is neither rewritten nor published. The
-/// resulting pins pass the normal preflight and rollout.
-fn preview_image(d: &mut Deployment, digest: &str) -> Result<()> {
-    let reference = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
+/// Override, in memory, the preview's pin of image `name` with master's
+/// (its preview repository at `digest`), where the config pins it
+/// (image.rs, `Runs`): `hermes` as the computers' default; the door as the
+/// doors' image, when the config runs doors (one that names none runs
+/// none, and deploys as it would without). Any other image its config
+/// names (an upgrade check's starting image: `--upgrade-from`,
+/// docs/computers.md "Preview and production") stays at the digest the
+/// config pins it to. Other config (including production's file) is
+/// neither rewritten nor published. The resulting pins pass the normal
+/// preflight and rollout.
+fn preview_image(d: &mut Deployment, name: &str, digest: &str) -> Result<()> {
+    let image = crate::image::by_name(name).with_context(|| format!("preview follows no image {name:?}"))?;
+    let reference = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, image.preview);
     anyhow::ensure!(pinned_ok(&reference, &d.account_id), "preview image must be sha256:<64 lowercase hex digits>");
-    let computers = d.computers.as_mut().context("preview config has no computers")?;
-    computers.default_image = "hermes".into();
-    computers.images.insert("hermes".into(), Image::Pinned(Pinned { image: reference.clone() }));
-    println!("preview follows master's image: {reference} (hermes)");
+    let pinned = Image::Pinned(Pinned { image: reference.clone() });
+    match image.runs {
+        crate::image::Runs::Computers => {
+            let computers = d.computers.as_mut().context("preview config has no computers")?;
+            computers.default_image = name.into();
+            computers.images.insert(name.into(), pinned);
+        }
+        crate::image::Runs::Doors => match d.doors.as_mut() {
+            Some(doors) => doors.image = pinned,
+            None => {
+                println!("preview runs no doors (its config names none): master's door image {reference} is not deployed");
+                return Ok(());
+            }
+        },
+    }
+    println!("preview follows master's image: {reference} ({name})");
     Ok(())
 }
 
@@ -1257,10 +1302,10 @@ pub fn stripe(rest: &[String]) -> Result<()> {
 }
 
 pub fn deploy(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only: pinned, preview_image_digest } = args(rest)?;
+    let Args { config, branch, pinned_only: pinned, preview_images } = args(rest)?;
     let mut d = load(&config)?;
-    if let Some(digest) = &preview_image_digest {
-        preview_image(&mut d, digest)?;
+    for (name, digest) in &preview_images {
+        preview_image(&mut d, name, digest)?;
     }
     if pinned {
         pinned_only(&d)?;
@@ -1748,9 +1793,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
 /// the deployment's own blob grace and left: R2 refuses to delete a bucket
 /// with objects in it. Irreversible: ask before running it.
 pub fn teardown(rest: &[String]) -> Result<()> {
-    let Args { config, branch, pinned_only, preview_image_digest } = args(rest)?;
+    let Args { config, branch, pinned_only, preview_images } = args(rest)?;
     anyhow::ensure!(!pinned_only, "--pinned-only is a deploy's: a teardown builds nothing");
-    anyhow::ensure!(preview_image_digest.is_none(), "--preview-image-digest is a deploy's");
+    anyhow::ensure!(preview_images.is_empty(), "--preview-image is a deploy's");
     let d = load(&config)?;
     anyhow::ensure!(branch.is_some(), "teardown removes a branch deployment: name its --branch");
     let n = names(&d, branch.as_deref())?;
@@ -2304,17 +2349,21 @@ mod tests {
     /// (`store::Bound::conventional`), so the three never drift apart.
     #[test]
     fn the_example_and_e2e_configs_parse() {
+        let mut offered = vec![];
         for file in ["deploy/example.jsonc", "deploy/e2e.jsonc"] {
             let path = devstack::repo_root().join(file);
             let d = load(&path).unwrap();
             assert!(names(&d, Some("dev")).is_ok(), "{file}");
             assert_eq!(d.computers.as_ref().map(|c| c.default_image.as_str()), Some("hermes"), "{file}");
             let (catalog, keys) = catalog_of(&d).unwrap();
-            let names: Vec<&str> = catalog.providers().iter().map(|p| p.name.as_str()).collect();
-            assert_eq!(names, ["x", "firecrawl", "fal", "browser-use", "google", "perplexity", "google-places", "xai", "elevenlabs", "openrouter"], "{file}");
+            // no list of rows here: what the two files offer is held alike
+            // below, and each operator key is read from its row
+            offered.push(catalog.providers().iter().map(|p| p.name.clone()).collect::<Vec<_>>());
+            let operators: Vec<&str> = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator).map(|p| p.name.as_str()).collect();
+            assert!(catalog.get("google").is_some_and(|p| p.kind == fragment_core::catalog::Kind::Connection), "{file}: Google, a connection");
             let own = catalog.get("openrouter").unwrap();
             assert!(own.oauth.is_some() && own.models.as_ref().is_some_and(|m| m.offer.len() == 6), "{file}: OpenRouter is signed in to, and offers its models");
-            assert_eq!(keys.len(), 8, "{file}: each operator key's store secret");
+            assert_eq!(keys.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), operators, "{file}: each operator key's store secret, and no other's");
             let operator = catalog.providers().iter().filter(|p| p.kind == fragment_core::catalog::Kind::Operator);
             assert!(operator.into_iter().all(|p| p.price.is_none() && p.charges == fragment_core::catalog::default_charges(&p.name)), "{file}: each key charged as the book says");
             let mut book = fragment_core::price::PriceBook::defaults();
@@ -2322,8 +2371,89 @@ mod tests {
             assert_eq!(book.validate(), Ok(()), "{file}: a book the ledger takes");
             // the example's tiers through OpenRouter (decision 61); a preview's on Workers AI
             let slots: &[&str] = if file == "deploy/example.jsonc" { &["cheap", "medium"] } else { &[] };
-            let conventional = devstack::store::Bound::conventional(true, false, &["x", "firecrawl", "fal", "browser-use", "perplexity", "google-places", "xai", "elevenlabs"], slots);
+            let conventional = devstack::store::Bound::conventional(true, false, &operators, slots);
             assert_eq!(bound(&d).unwrap(), conventional, "{file}: the names dev and the e2e bind");
+        }
+        assert_eq!(offered[0], offered[1], "the example and the hosted e2e offer the same providers, in one order");
+    }
+
+    /// Every connection's row, by shape and never by name (FIN-509): each
+    /// file of deploy/providers is one row, named as its file, which a
+    /// deployment names (`{"row": …}`, `devstack::rows`) and so never
+    /// copies. It holds none of a deployment's facts. Named with them (its
+    /// client's id, and its secret's store name, which is bound) it loads
+    /// and connects through the browser; named alone it loads without that
+    /// connect. It says what people call it, and names for people every
+    /// scope it asks for but signing in, and no other. A skill of the
+    /// managed set is for it, and what that skill tells an agent of its
+    /// access (`references/*-access.json`) is the row's own. So a
+    /// connection is added as one row file and one skill folder, and no
+    /// list is edited. And each skill's connection has a row.
+    #[test]
+    fn each_connection_row_loads_names_its_scopes_and_has_a_skill() {
+        let root = devstack::repo_root();
+        let example = read_json(&root.join("deploy/example.jsonc")).unwrap();
+        // the managed set's skills: each connection's folders, by its name
+        // (a connection may have several: two services of one account)
+        let mut skills: std::collections::BTreeMap<String, Vec<PathBuf>> = Default::default();
+        let mut dirs = vec![root.join("templates/skills/skills")];
+        while let Some(dir) = dirs.pop() {
+            for entry in fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()) {
+                if entry.is_dir() {
+                    dirs.push(entry);
+                } else if entry.file_name().is_some_and(|n| n == "SKILL.md") {
+                    let text = fs::read_to_string(&entry).unwrap();
+                    if let Some(connection) = fragment_templates::blessed::skill_connection(&text) {
+                        skills.entry(connection.to_string()).or_default().push(dir.clone());
+                    }
+                }
+            }
+        }
+        let out = root.join("target/xtask-tests/connection-rows");
+        fs::create_dir_all(&out).unwrap();
+        let mut files: Vec<PathBuf> = fs::read_dir(root.join(devstack::rows::DIR)).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|e| e == "jsonc")).collect();
+        files.sort();
+        assert!(!files.is_empty(), "deploy/providers holds the connections' rows");
+        let mut rows = vec![];
+        for path in &files {
+            let said = path.display();
+            let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or_else(|| panic!("{said} is named for its row")).to_string();
+            let written = read_json(path).unwrap();
+            assert!(written.get("key").is_none() && written["connection_oauth"].get("client_id").is_none(), "{said}: a row holds no deployment's facts: its secret's store name and its client's id are given where a deployment names it");
+            // as a deployment names it: the example's providers, and this row
+            let deployed = |reference: Value| {
+                let mut config = example.clone();
+                let providers = config["providers"].as_array_mut().unwrap();
+                providers.retain(|p| p["row"] != name.as_str());
+                providers.push(reference);
+                let file = out.join(format!("{name}.jsonc"));
+                fs::write(&file, config.to_string()).unwrap();
+                load(&file).unwrap_or_else(|e| panic!("{said} loads in a deployment: {e:#}"))
+            };
+            let alone = deployed(json!({ "row": name }));
+            assert!(catalog_of(&alone).unwrap().0.get(&name).is_some_and(|p| p.connection_oauth.is_none()), "{said}: named alone, it is offered without its browser-bound connect");
+            let secret = format!("fragment-{name}-oauth-secret");
+            let d = deployed(json!({ "row": name, "key": secret, "client_id": format!("{name}-client") }));
+            let (catalog, _) = catalog_of(&d).unwrap();
+            let p = catalog.get(&name).unwrap();
+            let o = p.connection_oauth.as_ref().unwrap_or_else(|| panic!("{said}: a connection, connected through the browser"));
+            assert!(p.kind == fragment_core::catalog::Kind::Connection && p.title.is_some(), "{said}: a connection, with what people call it (title)");
+            assert!(bound(&d).unwrap().cell().iter().any(|(_, named)| *named == secret), "{said}: its client secret is bound from the store");
+            let asked: Vec<&String> = o.access.read.iter().flat_map(|g| &g.scopes).chain(&o.access.write.scopes).collect();
+            for scope in &asked {
+                assert!(fragment_core::connection_signin::IDENTITY_SCOPES.contains(&scope.as_str()) || p.scope_names.contains_key(*scope), "{said}: scope_names names {scope} for people");
+            }
+            for named in p.scope_names.keys() {
+                assert!(asked.contains(&named), "{said}: scope_names names {named}, which no access asks for");
+            }
+            let folders = skills.get(&name).unwrap_or_else(|| panic!("{said}: no skill of the managed set is for it (its SKILL.md's metadata: fragment: connection: {name})"));
+            for told in folders.iter().flat_map(|folder| fs::read_dir(folder.join("references")).into_iter().flatten()).map(|e| e.unwrap().path()).filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with("-access.json"))) {
+                assert_eq!(read_json(&told).unwrap(), written["connection_oauth"]["access"], "{}: the access {said} asks for", told.display());
+            }
+            rows.push(name);
+        }
+        for (connection, folders) in &skills {
+            assert!(rows.contains(connection), "{} is for {connection}, which has no row ({}/{connection}.jsonc)", folders[0].display(), devstack::rows::DIR);
         }
     }
 
@@ -2702,50 +2832,107 @@ mod tests {
         assert!(refused.contains("--pinned-only is a deploy's"), "{refused}");
     }
 
-    /// Only a pinned preview deploy may override its images. The normal
-    /// config stays unchanged on disk; `hermes`, the default, resolves to
-    /// master's account-local digest in the Worker's effective config, and
-    /// another image the config pins (an upgrade's starting one) is kept.
+    /// Only a pinned preview deploy may override its images, each named
+    /// once. The normal config stays unchanged on disk; `hermes`, the
+    /// default, and the doors' image resolve to master's account-local
+    /// digests in the Worker's effective config, and another image the
+    /// config pins (an upgrade's starting one) is kept.
     #[test]
-    fn preview_has_one_image_and_production_keeps_its_pins() {
+    fn preview_follows_each_image_and_production_keeps_its_pins() {
         let digest = format!("sha256:{}", "ab".repeat(32));
+        let door_digest = format!("sha256:{}", "ef".repeat(32));
+        let (hermes, door) = (format!("hermes={digest}"), format!("door={door_digest}"));
         let parse = |args: &[&str]| super::args(&args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         let mut d = deployment(None, None);
         let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
         let v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
         d.computers = Some(serde_json::from_value(v["computers"].clone()).unwrap());
+        // the door pinned by hand in the config, as preview's was before master's job owned it
+        let by_hand = format!("{REGISTRY}/{}/fragment-preview-door@sha256:{}", d.account_id, "01".repeat(32));
+        d.doors = Some(Doors { image: Image::Pinned(Pinned { image: by_hand }) });
         let old = serde_json::to_value(&d.computers.as_ref().unwrap().images).unwrap();
         let production = parse(&["--config", "production.jsonc", "--pinned-only"]).unwrap();
-        assert!(production.preview_image_digest.is_none());
+        assert!(production.preview_images.is_empty());
         assert_eq!(serde_json::to_value(&d.computers.as_ref().unwrap().images).unwrap(), old);
         for bad in [
-            vec!["--config", "production.jsonc", "--pinned-only", "--preview-image-digest", &digest],
-            vec!["--config", "production.jsonc", "--branch", "production", "--pinned-only", "--preview-image-digest", &digest],
-            vec!["--config", "preview.jsonc", "--branch", "preview", "--preview-image-digest", &digest],
-        ] { assert!(parse(&bad).is_err()); }
-        let good = parse(&["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image-digest", &digest]).unwrap();
-        assert_eq!(good.preview_image_digest.as_deref(), Some(digest.as_str()));
-        for bad in ["latest", "sha256:abc", "sha256:../../other"] { assert!(preview_image(&mut d, bad).is_err()); }
-        preview_image(&mut d, &digest).unwrap();
+            vec!["--config", "production.jsonc", "--pinned-only", "--preview-image", &hermes],
+            vec!["--config", "production.jsonc", "--branch", "production", "--pinned-only", "--preview-image", &door],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--preview-image", &hermes],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image", &digest],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image", "stub=sha256:00"],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image", &hermes, "--preview-image", &hermes],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image"],
+            vec!["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image-digest", &digest],
+        ] { assert!(parse(&bad).is_err(), "{bad:?}"); }
+        let good = parse(&["--config", "preview.jsonc", "--branch", "preview", "--pinned-only", "--preview-image", &hermes, "--preview-image", &door]).unwrap();
+        assert_eq!(good.preview_images, [("hermes".to_string(), digest.clone()), ("door".to_string(), door_digest.clone())]);
+        for bad in ["latest", "sha256:abc", "sha256:../../other"] {
+            assert!(preview_image(&mut d, "hermes", bad).is_err());
+            assert!(preview_image(&mut d, "door", bad).is_err());
+        }
+        assert!(preview_image(&mut d, "stub", &digest).is_err());
+        for (name, digest) in &good.preview_images {
+            preview_image(&mut d, name, digest).unwrap();
+        }
         pinned_only(&d).unwrap();
         let c = d.computers.as_ref().unwrap();
         assert_eq!(c.default_image, "hermes");
-        let expected = format!("{REGISTRY}/{}/{}@{digest}", d.account_id, crate::image::preview::REPOSITORY);
+        let expected = format!("{REGISTRY}/{}/fragment-preview-computer-hermes-canary@{digest}", d.account_id);
+        let expected_door = format!("{REGISTRY}/{}/fragment-preview-door@{door_digest}", d.account_id);
         assert_eq!(serde_json::to_value(&c.images["hermes"]).unwrap(), json!({"image": expected}));
+        assert_eq!(pinned_images(&d), [expected.as_str(), expected_door.as_str()], "each waited for before the deploy changes anything");
         let worker = worker_config(&d, &names(&d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
         assert_eq!(worker["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes");
+        assert_eq!(container_classes(&worker), ["Computer", DOOR_CLASS]);
         assert_eq!(worker["containers"][0]["images"]["hermes"], json!({"image": expected}));
+        assert_eq!(worker["containers"][1]["images"], json!({"door": {"image": expected_door}}));
         // Replaying the same resolution leaves the effective config alone.
         let before = pinned_images(&d).into_iter().map(str::to_string).collect::<Vec<_>>();
-        preview_image(&mut d, &digest).unwrap();
+        preview_image(&mut d, "hermes", &digest).unwrap();
+        preview_image(&mut d, "door", &door_digest).unwrap();
         assert_eq!(pinned_images(&d), before);
         // an upgrade's starting image, pinned by the config, stays as pinned
         let production = format!("{REGISTRY}/{}/fragment-computer-hermes@sha256:{}", d.account_id, "cd".repeat(32));
         d.computers.as_mut().unwrap().images.insert("production".into(), Image::Pinned(Pinned { image: production.clone() }));
-        preview_image(&mut d, &digest).unwrap();
+        preview_image(&mut d, "hermes", &digest).unwrap();
         let c = d.computers.as_ref().unwrap();
         assert_eq!(serde_json::to_value(&c.images["production"]).unwrap(), json!({"image": production}));
         assert_eq!(serde_json::to_value(&c.images["hermes"]).unwrap(), json!({"image": expected}));
+    }
+
+    /// Goal: a config that runs no doors (production's, today) deploys as
+    /// it did before preview followed the door. Valid: preview's two
+    /// overrides on a config without doors render the Worker's config the
+    /// override of `hermes` alone did, with no door's container, and wait
+    /// for Hermes's image alone; a door built from the tree is still
+    /// refused by `--pinned-only` until the override pins it.
+    #[test]
+    fn a_config_without_doors_deploys_as_before() {
+        let text = fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc")).unwrap();
+        let v: Value = serde_json::from_str(&devstack::strip_comments(&text)).unwrap();
+        let (digest, door_digest) = (format!("sha256:{}", "ab".repeat(32)), format!("sha256:{}", "ef".repeat(32)));
+        let rendered = |d: &Deployment| worker_config(d, &names(d, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let mut hermes_alone = load(&config_file("no-doors-hermes", &v)).unwrap();
+        preview_image(&mut hermes_alone, "hermes", &digest).unwrap();
+        let mut both = load(&config_file("no-doors-both", &v)).unwrap();
+        assert!(both.doors.is_none(), "deploy/e2e.jsonc runs no doors");
+        preview_image(&mut both, "hermes", &digest).unwrap();
+        preview_image(&mut both, "door", &door_digest).unwrap();
+        assert!(both.doors.is_none(), "the override runs no door the config does not");
+        pinned_only(&both).unwrap();
+        assert_eq!(rendered(&both), rendered(&hermes_alone));
+        assert_eq!(container_classes(&rendered(&both)), ["Computer"]);
+        assert_eq!(pinned_images(&both), pinned_images(&hermes_alone));
+        // a door the config builds from the tree: refused by CI's deploy
+        // until master's pin replaces it in memory
+        let mut built = v.clone();
+        built["doors"] = json!({ "image": { "dockerfile": "images/simplex-door/Dockerfile", "build_context": "." } });
+        let mut d = load(&config_file("door-built", &built)).unwrap();
+        preview_image(&mut d, "hermes", &digest).unwrap();
+        let why = pinned_only(&d).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(why.contains("builds the SimpleX door's from the tree"), "{why}");
+        preview_image(&mut d, "door", &door_digest).unwrap();
+        pinned_only(&d).unwrap();
     }
 
     /// The deployment's mail: its `mail_from` is the cell's
@@ -2795,8 +2982,10 @@ mod tests {
         let routing = json!({ "provider": { "zdr": true, "sort": "throughput", "require_parameters": true, "quantizations": ["fp8", "bf16"], "max_price": { "prompt": 0.15, "completion": 0.5 } } });
         let routed = json!({ "provider": "openai", "base_url": "https://openrouter.ai/api/v1", "model": "z-ai/glm-5.3-flash", "body": routing });
         let flash = json!({ "provider": "workers_ai", "model": "@cf/deepseek-ai/deepseek-v4.1-flash-1017" });
-        let listed = fragment_core::models::legacy(&json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash })).unwrap();
-        assert_eq!(models, listed, "no key in the cell's variable, the routing in it, as routes over slots");
+        let whisper = json!({ "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 } });
+        let listed = fragment_core::models::legacy(&json!({ "cheap": routed, "medium": routed, "fallback": flash, "vision": flash, "transcription": whisper })).unwrap();
+        assert_eq!(models, listed, "no key in the cell's variable, the routing in it, as routes over slots, its transcription slot as named");
+        assert_eq!(models["transcription"], whisper);
         assert_eq!(models["routes"].as_array().map(|r| r.iter().map(|r| r["name"].clone()).collect::<Vec<_>>()), Some(vec![json!("cheap"), json!("medium")]));
         let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
         assert_eq!(parsed.slots[parsed.routes[parsed.default].slot].upstream.model(), fragment_core::models::OPENROUTER_FLASH);
@@ -2819,9 +3008,15 @@ mod tests {
         let said = refusal(Path::new("/home/p/prod.jsonc"), Some(&devstack::store::AccountStore { name: "fragment".into(), id: "0f0e".into() }), &missing);
         assert!(said.contains("lacks 1 of the secrets") && said.contains("models.cheap.key, models.medium.key  cargo xtask secret set fragment-openrouter-key --config /home/p/prod.jsonc"), "{said}");
 
-        // the preview's: every tier on Workers AI, no key named or bound
+        // the preview's: every tier on Workers AI, no key named or bound,
+        // and the transcription slot every deployment had (debt)
         let (cell, b) = rendered("deploy/e2e.jsonc");
-        assert!(cell["vars"].get("FRAGMENT_MODELS").is_none(), "unnamed: the cell's defaults, every slot on Workers AI");
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        let until: Value = serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).unwrap();
+        assert_eq!(models, fragment_core::models::legacy(&json!({ "transcription": until })).unwrap(), "unnamed: the cell's defaults, every slot on Workers AI, transcribing on Whisper");
+        let parsed = fragment_core::models::Models::parse(Some(&models.to_string()), &fragment_core::price::PriceBook::defaults(), false).unwrap();
+        assert_eq!(parsed, fragment_core::models::Models { transcription: parsed.transcription.clone(), ..fragment_core::models::Models::defaults() }, "the cell's defaults");
+        assert_eq!(parsed.transcription.as_ref().map(|t| t.upstream.model()), Some("@cf/openai/whisper-large-v3-turbo"));
         assert!(b.model_keys.is_empty() && !cell.to_string().contains("MODEL_KEY_"));
     }
 
@@ -2896,8 +3091,9 @@ mod tests {
         let d = load(&config_file("models-fallback", &v)).unwrap();
         let n = names(&d, Some("p5")).unwrap();
         let vars = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap()["vars"].clone();
-        let alone = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" } });
-        assert_eq!(vars["FRAGMENT_MODELS"], fragment_core::models::legacy(&alone).unwrap().to_string());
+        let until: Value = serde_json::from_str(TRANSCRIPTION_UNTIL_NAMED).unwrap();
+        let alone = json!({ "fallback": { "provider": "workers_ai", "model": "@cf/zai-org/glm-5.3" }, "transcription": until });
+        assert_eq!(vars["FRAGMENT_MODELS"], fragment_core::models::legacy(&alone).unwrap().to_string(), "and the transcription slot it had");
         // Tinfoil's, its price in the cell's variable and its key bound for its slot alone
         v["models"] = tinfoil(listed.clone());
         let d = load(&config_file("models-tinfoil", &v)).unwrap();
@@ -2905,6 +3101,23 @@ mod tests {
         let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
         assert_eq!(models["slots"]["fallback"], json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "deepseek-v4-1-flash", "price": listed }), "no key in the cell's variable, the price in it");
         assert_eq!(bound(&d).unwrap().model_keys, [("fallback".to_string(), "fragment-tinfoil-api-key".to_string())]);
+        // a transcription slot on an OpenAI-compatible API (a box's own
+        // server): its price in the cell's variable, its key bound for it alone
+        let stt = json!({ "provider": "openai", "base_url": "https://stt.example.internal/v1", "model": "whisper-large-v3", "price": { "audio_minute": 0.006 } });
+        let mut keyed = stt.clone();
+        keyed["key"] = json!("fragment-transcription-key");
+        v["models"] = json!({ "transcription": keyed });
+        let d = load(&config_file("models-transcription", &v)).unwrap();
+        let cell = worker_config(&d, &n, "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        let models: Value = serde_json::from_str(cell["vars"]["FRAGMENT_MODELS"].as_str().unwrap()).unwrap();
+        assert_eq!(models["transcription"], stt, "no key in the cell's variable, the price in it");
+        assert_eq!(bound(&d).unwrap().model_keys, [("transcription".to_string(), "fragment-transcription-key".to_string())]);
+        refused(json!({ "transcription": stt }), "models.transcription: an OpenAI-compatible API names its key");
+        let mut plain = keyed.clone();
+        plain["base_url"] = json!("http://stt.example.internal/v1");
+        refused(json!({ "transcription": plain }), "models.transcription: base_url:");
+        refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo" } }), "models.transcription: price is {\"neurons_a_minute\"");
+        refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 }, "key": "k" } }), "models.transcription: only an OpenAI-compatible API (provider openai) names a key");
         // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();

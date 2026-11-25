@@ -184,6 +184,41 @@ pub fn push(s: &mut Suite, api: &Api) -> Result<()> {
     api.op(&owner, &name, "announce", "j3", json!({ "who": "doomed", "title": "never" }))?;
     let failed = s.eventually(Duration::from_secs(120), || events(api, &owner, &name).contains("delivery.failed"));
     s.ok("a delivery out of retries is reported in the event log", failed, "");
+
+    // a push subscription ends with its subscriber's standing: a member
+    // removed, then everyone who is no member once it is members only
+    let queued = |id: &str, who: &str| -> Result<Value> {
+        let r = api.op(&owner, &name, "announce", id, json!({ "who": who, "title": "standing" }))?;
+        Ok(settle(api, &owner, &name, started(&r), &["succeeded", "held"], wait)["output"]["queued"].clone())
+    };
+    let member = api.person()?;
+    api.share(&name, member.pubkey_hex(), "viewer")?;
+    let cookie = format!("fragment_site={}", super::signin::site_cookie(api, &api.sign_in(&Api::email_of(&member))?, &name)?);
+    let sub = s.push.subscribe(&s.name("push-member"), 15);
+    let r = api.call(Call {
+        method: "POST",
+        url: api.site_url(&name, "__push-sub"),
+        body: Some(json!({ "who": "member", "endpoint": sub.endpoint, "p256dh": sub.p256dh, "auth": sub.auth }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        cookie: Some(cookie),
+        ..Call::default()
+    })?;
+    let before = queued("m1", "member")?;
+    let gone = api.signed(&owner, "DELETE", &format!("/api/f/{name}/members/{}", fragment_core::npub::encode(member.pubkey_hex())), None)?;
+    let after = queued("m2", "member")?;
+    s.ok(
+        "a member's page subscribes to pushes; removed, their subscription goes with them: a push to their tag reaches no one",
+        r.status == 200 && before == 1 && gone.status == 200 && after == 0,
+        json!({ "sub": r.body, "before": before, "removed": gone.status, "after": after }),
+    );
+    let before = queued("r1", "race")?;
+    let private = api.signed(&owner, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    let after = queued("r2", "race")?;
+    s.ok(
+        "made members only, the link holders' push subscriptions go: a push to their tag reaches no one",
+        before == 2 && private.status == 200 && after == 0,
+        json!({ "before": before, "private": private.status, "after": after }),
+    );
     Ok(())
 }
 

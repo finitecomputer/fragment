@@ -106,15 +106,36 @@ pub const STANDARD_LABEL: &str = "Standard";
 
 /// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
 /// (`fragment_core::models::Models::defaults`), each route labelled, so its
-/// Settings offers two routes (Paul, 2026-10-24). Named as configs named
-/// them before routes were a list, and read as a deploy reads one
+/// Settings offers two routes (Paul, 2026-10-24), and its transcriptions on
+/// Workers AI's Whisper (`whisper_slot`), as preview's are. Named as configs
+/// named them before routes were a list, and read as a deploy reads one
 /// (`fragment_core::models::legacy`), so the e2e runs today's configs.
 pub fn plain_models() -> Value {
     listed(json!({
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
-        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
+        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL },
+        "transcription": whisper_slot()
     }))
 }
+
+/// A transcription slot on Workers AI's Whisper large v3 turbo at its 46.63
+/// neurons a minute (its pricing page, read 2026-10-07), as preview's
+/// config names it: the fake answers it as its catalog says.
+pub fn whisper_slot() -> Value {
+    json!({ "provider": "workers_ai", "model": fragment_fakes::workers_ai::TRANSCRIBE_MODEL, "price": { "neurons_a_minute": WHISPER_NEURONS_A_MINUTE } })
+}
+
+/// `whisper_slot`'s price, neurons a minute of audio.
+pub const WHISPER_NEURONS_A_MINUTE: f64 = 46.63;
+
+/// The transcription slot's key on a node shaped as the private tier
+/// (`Shape::PrivateTier`): a test value, which the model fake asks for of
+/// its transcription model alone.
+pub const TRANSCRIPTION_KEY: &str = "tk_transcribe_e2e";
+
+/// The price of the private tier's transcription slot, dollars a minute of
+/// audio: OpenAI's whisper-1 list (2026-11-24), a test value.
+pub const TRANSCRIPTION_AUDIO_MINUTE: f64 = 0.006;
 
 /// A config's `models` of the shape before routes were a list, as the cell
 /// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
@@ -157,7 +178,10 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
 /// (`private_deep`), falling back to Private's Fast; Standard's
 /// OpenRouter's (`standard_deep`, at its own ceiling,
-/// `openrouter_deep_routing`), falling back to Cloudflare.
+/// `openrouter_deep_routing`), falling back to Cloudflare. Its
+/// transcriptions on an OpenAI-compatible API, a self-hosted Whisper
+/// server (the fake's face), on a key of their own (`TRANSCRIPTION_KEY`),
+/// at `TRANSCRIPTION_AUDIO_MINUTE`.
 pub fn private_tier_models(fake: &str) -> Value {
     let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
@@ -168,7 +192,10 @@ pub fn private_tier_models(fake: &str) -> Value {
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep }))
+    // its transcriptions on a self-hosted Whisper server, the fake's
+    // OpenAI-compatible face, at the dollars a minute its slot names
+    let transcription = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": TRANSCRIPTION_AUDIO_MINUTE } });
+    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep, "transcription": transcription }))
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private
@@ -312,7 +339,9 @@ pub const SWAP_ROUTER_ENV: &str = "OPENROUTER_API_KEY";
 pub fn swap_providers(router_oauth: Option<Value>) -> Result<Value> {
     let text = std::fs::read_to_string(devstack::repo_root().join("deploy/e2e.jsonc"))?;
     let config: Value = serde_json::from_str(&devstack::strip_comments(&text))?;
-    let mut rows = config["providers"].as_array().cloned().context("deploy/e2e.jsonc names its providers")?;
+    let named = config["providers"].as_array().context("deploy/e2e.jsonc names its providers")?;
+    // a connection named by its row is that row (devstack::rows), as a deploy reads it
+    let mut rows = devstack::rows::resolved(named, &devstack::repo_root())?;
     for r in &mut rows {
         r.as_object_mut().context("a provider is an object")?.remove("key");
         if let (Some(o), true) = (&router_oauth, r["name"] == SWAP_ROUTER) {
@@ -421,6 +450,8 @@ pub struct Suite {
     skipped: Vec<String>,
     /// The sections that ran, in order: the last is the one running.
     ran: Vec<String>,
+    /// What the section running said it needs and uses (`section_using`).
+    declared: Vec<Need>,
     /// A lane stopped early: the next section to run gets the node back as
     /// the lanes expect it first.
     recovery_due: bool,
@@ -581,8 +612,28 @@ impl Suite {
 
     /// Whether the local node runs computers: wrangler's always, celld's on
     /// the krun engine alone (docs/self-host.md, seam 2).
+    /// The section asking has said it uses them, or its lone run's node
+    /// would have none (`node_classes`).
     pub fn runs_computers(&self) -> bool {
+        self.declares_computers("runs_computers");
+        self.runtime_runs_computers()
+    }
+
+    /// `runs_computers`, for the node's own boot, which is no section's.
+    fn runtime_runs_computers(&self) -> bool {
         self.celld.as_ref().is_none_or(|c| c.engine.computers())
+    }
+
+    /// The section running said it uses computers (in what it needs, or in
+    /// what it uses where the run has them): `asked` is how it asks for
+    /// one now. One that had not is planned as using none, so run alone
+    /// its node has none, while a whole run's node would let it pass.
+    fn declares_computers(&self, asked: &str) {
+        let section = self.ran.last().map(String::as_str).unwrap_or_default();
+        assert!(
+            uses_computers(&self.declared),
+            "{section} asks for a computer ({asked}) and never said it uses one: name Need::Computers in what it needs, or in what it uses (Suite::section_using)"
+        );
     }
 
     /// Whether the node runs its Worker and every object in one isolate
@@ -670,6 +721,10 @@ impl Suite {
     /// Whether the section `name`, needing `needs`, runs in this suite:
     /// selected, on a rung that has what it needs, and not a dry run.
     pub fn runs(&self, name: &str, needs: &[Need]) -> bool {
+        // the section running, asking whether it has a computer to check
+        if self.plan.is_none() && self.ran.last().is_some_and(|running| running == name) && uses_computers(needs) {
+            self.declares_computers("Suite::runs");
+        }
         self.selected(name) && self.plan.is_none() && needs::unmet(needs, self.rung).is_none()
     }
 
@@ -700,6 +755,8 @@ impl Suite {
         }
         println!("\n# {name}");
         self.ran.push(name.to_string());
+        self.declared = needs.iter().chain(uses).copied().collect();
+        self.shared.section_starts(name, uses_computers(&self.declared));
         // a section that stopped early leaves Stripe's events as it held
         // them: each starts with them going out (billing-page's early stop
         // once held trials' webhooks back, failing its checks besides)
@@ -921,6 +978,7 @@ impl Suite {
                         key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         key("private_deep", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("standard_deep", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
+                        key("transcription", "fragment-transcription-key", TRANSCRIPTION_KEY),
                     ],
                     _ => vec![],
                 }
@@ -968,7 +1026,7 @@ impl Suite {
             // on celld, computers only on the krun engine: they need the
             // runtime's egress intercepts and snapshots (docs/self-host.md,
             // seam 2)
-            computer_image: (self.runs_computers() && self.node_computers).then(|| "stub".into()),
+            computer_image: (self.runtime_runs_computers() && self.node_computers).then(|| "stub".into()),
             images: vec![],
             computer_snapshots: false,
             // each container class, and its images built at every boot, only
@@ -1100,6 +1158,12 @@ impl Suite {
     /// hosted run, which starts no node. Answers how many of each went.
     fn remove_containers(&mut self) -> Result<Option<(u32, u32)>> {
         if self.tools.is_none() || self.containers_removed {
+            return Ok(None);
+        }
+        // a wrangler node that ran no container class left none and built
+        // no image: its run asks Docker nothing, on a machine that may
+        // have none running (`node_classes`)
+        if self.celld.is_none() && !self.node_computers && !self.node_doors {
             return Ok(None);
         }
         assert!(self.node.is_none(), "the run's node is stopped before its containers go");
@@ -1545,6 +1609,7 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         failed: vec![],
         skipped: vec![],
         ran: vec![],
+        declared: vec![],
         recovery_due: false,
         lost: None,
         cron: None,
@@ -1634,13 +1699,19 @@ fn local_rung(celld: Option<&devstack::celld::CelldTools>, rehearse: Option<u64>
     }
 }
 
+/// Whether what a section names gives a local node its computers' class:
+/// computers, or this machine's Docker.
+fn uses_computers(needs: &[Need]) -> bool {
+    needs.iter().any(|n| matches!(n, Need::Computers | Need::LocalDocker))
+}
+
 /// The container classes a local node runs, by its run's plan: computers
 /// (`devstack::COMPUTER_CLASS`) when a section it runs needs or uses
 /// computers or this machine's Docker, and SimpleX doors (`DOOR_CLASS`)
 /// when one needs doors. With none, the node's config names no container,
 /// so its boot builds no image.
 fn node_classes(planned: &[Planned]) -> (bool, bool) {
-    let computers = Need::Computers.used_by(planned) || Need::LocalDocker.used_by(planned);
+    let computers = planned.iter().any(|p| p.skip.is_none() && (uses_computers(&p.needs) || uses_computers(&p.uses)));
     (computers, Need::Doors.used_by(planned))
 }
 
@@ -1747,10 +1818,12 @@ mod tests {
         assert_eq!(classes(Some(&["simplex-door"]), &[], None), (false, true));
         assert_eq!(classes(Some(&["computers", "simplex-door"]), &[], None), (true, true));
         assert_eq!(classes(Some(&["admin"]), &[], None), (true, false), "admin uses computers where the run makes them");
-        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer"), ("billing", "its wipes"), ("move", "its wipes"), ("governance", "its wipes")] {
+        for (section, uses) in [("migrations", "its people's computer's schema"), ("restart", "an own key's computer")] {
             assert_eq!(classes(Some(&[section]), &[], None), (true, false), "{section} uses computers: {uses}");
         }
         assert_eq!(classes(Some(&["auth", "create", "keys"]), &[], None), (false, false));
+        // a wipe finishes on a node with no computers' class (FIN-661)
+        assert_eq!(classes(Some(&["billing", "governance", "move"]), &[], None), (false, false), "their wipes need no computer");
         assert_eq!(classes(Some(&["chat"]), &[], None), (true, false), "this machine's Docker");
     }
 

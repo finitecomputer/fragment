@@ -1224,6 +1224,37 @@ fine, and they can use its keys.
 4. **One fragment, one problem.** A second job is a second fragment.
 5. **Plain files.** Markdown, JSON, CSV: things the next agent can diff.
 
+A service the agent's owner connected (Settings → Connections) is called
+with `fragment connection call`: it finds that connection's placeholder
+in the environment, sends it as a bearer token to the address named (one
+of the service's own hosts, where the computer swaps in a short-lived
+token), and prints the answer as it came, byte for byte. A variable
+holding the connection's placeholder (`fcx_`) is used before one holding
+a key's of the same name (`fck_`). Each connection's skill says its
+addresses and quirks; the command is the same for all of them:
+
+```
+fragment connection call linear POST https://api.linear.app/graphql --query 'query { viewer { name } }'
+fragment connection call google GET https://www.googleapis.com/drive/v3/files --param 'q=name contains "plan"' --param pageSize=10
+fragment connection call hubspot POST https://api.hubapi.com/crm/v3/objects/contacts --body '{"properties": {"email": "ada@example.com"}}'
+fragment connection call dropbox POST https://content.dropboxapi.com/2/files/download --header 'Dropbox-API-Arg: {"path": "/plan.pdf"}' --out plan.pdf
+```
+
+A refusal is one line of JSON on stderr, `{error, status, message, hint,
+body}`, and exit 1. `body` is what the service answered, as it came: read
+it for the service's own code and the field it names. `not_connected` (the
+owner has not connected it, or left this agent out) and `forbidden` (read
+only, or not this service's host) are the computer's own, and `hint` says
+what to tell the owner. A GraphQL answer that names `errors`
+is a refusal too (`graphql_errors`).
+
+A redirect is followed, and the token goes to no other host: a download
+that answers a signed address is fetched there without it. `--out <file>`
+saves an answer as it comes, whole or not at all (a file already there is
+kept unless the whole answer came), and an answer over 64 KiB with no
+`--out` is saved to a file and the file named. Never ask a person for a
+token, and never run a service's own sign-in.
+
 ## Command reference
 
 ```
@@ -1244,6 +1275,7 @@ fragment new <dir> [--template T]        fragment triggers <name>
 fragment new --list                      fragment pause|unpause <name> <op>
 fragment create <name> [--visibility V] [--template T [--title T]] [--show-tokens]
 fragment inbox <name> --payload JSON [--source S]   # the token from $FRAGMENT_INBOX_TOKEN, else stdin
+fragment connection call <connection> <METHOD> <url> [--param N=V]… [--body JSON|@file|-] [--content-type T] [--query GRAPHQL [--variables JSON]] [--header "N: V"]… [--out FILE] [--timeout S] [--env VAR]   # a connected service's API, as an agent
 fragment list                            fragment rotate <name> [--inbox] [--view]
 fragment status <name>                   fragment visibility <name> [V]
 fragment open <name>                     fragment members list|rm|leave ...

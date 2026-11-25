@@ -56,6 +56,11 @@ gets the 404 a missing route gets, word for word. On a branch the levers
 reach the e2e's own things alone: a fragment lever only an `e2e-…`
 fragment, a ledger or computer lever only an e2e person's (403
 otherwise); the registry's, the move's and the mail lever are no route.
+A fragment lever that acts as or for someone (`member`'s `who`,
+`records`' `principal`: `levers::acting_for`) also needs the fragment's
+owner and that one each an e2e person or one's agent (403 otherwise).
+An `e2e-` label is not reserved: the other fragment levers reach a real
+person's fragment so labelled.
 
 | Route | Body |
 |---|---|
@@ -66,7 +71,7 @@ otherwise); the registry's, the move's and the mail lever are no route.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?, files?, bytes?, type?, sha?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply` (`files` as its connector names them), `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `file` (`bytes`, base64, typed `type`, held as its runner gives a file → `{sha256, size}`; or `sha`: what it holds under that name, hashed again → `{sha256, size, type}`), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -533,7 +538,13 @@ Over https every session cookie with `Path=/` is named `__Host-…`
 (`__Host-fragment_session`, `__Host-fragment_login`,
 `__Host-fragment_switch`, `__Host-fragment_own_key`,
 `__Host-fragment_site`) and read under that name only, so no fragment's
-page can set one for another origin.
+page can set one for another origin. A fragment's origin's own cookies
+are too: the share link's (`__Host-fragview`) and an unsigned visitor's
+(`__Host-fragment_anon`, whose hash is its anonymous principal). A
+browser still holding one under its plain name from before is sent it,
+and the cell ignores it: the share link opens again from its URL, and the
+visitor gets a new anonymous principal. Plain http (the dev stack) can
+hold no `__Host-` cookie, so there each is its plain name.
 
 **On a fragment's origin**, `GET __signin?token=` redeems a redemption for
 that fragment only (another's is 401 and stays unspent; its wait, the
@@ -803,7 +814,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); with none of its own there, a blessed template's data file |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor; on a hosted door, also its bound agent acting as itself (its replies' files: An agent's doors; `fragment_core::permit` rule 5) | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges 206) |
 | `GET /api/f/{name}/card` | viewer | → the preview card: a 1280×800 JPEG, `ETag` its SHA-256, `private, no-cache`, `X-Fragment-Ref` the live it shows (an upload has none); `If-None-Match` 304; none yet 404 (Cards) |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again (Cards). A chat, agent or members-only fragment, or nothing deployed, 400; an owner who pays for nothing 402; within `card::AGAIN_EVERY_MS` of the last ask, 429 |
@@ -1368,6 +1379,10 @@ commits) and `job.push(who, payload)` in a job (a step answering
 `{queued}`) push `{title, body, tag, url, icon?}` (at most 3800 bytes) to
 the subscriptions tagged `who` (at most `PUSH_WHO_MAX_CHARS`), or `*`; a
 relative `url` is the fragment's own, and `icon` an `http(s)` picture.
+A subscription ends with its subscriber's standing: removing a member
+(or a member leaving) drops the subscriptions they stored, and their
+agents', and making the fragment members only drops every subscription
+stored by someone who is not a member then.
 
 Every delivery (a record to a subscription, a push, a computer's wake) is
 written to the fragment's outbox with what caused it, then sent; one not
@@ -1544,7 +1559,7 @@ one id at two places is refused. A job's step names a route, never an id.
 | --- | --- | --- |
 | `GET /api/models/v1/models` | an agent | → OpenAI's list, `{object: "list", data: [{id, object: "model", created: 0, owned_by: "fragment"}]}`: the ids its calls may name |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` its asker) | an OpenAI chat completion, `model` a name or an id → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
-| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper`, optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text |
+| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper` (the route's name, whatever model the slot runs), optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text; 404 on a deployment that names no transcription slot |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` its asker) | a decision, media inline (Decisions) → `{model, answers, usage}`. A blob 400 (the route reads no fragment's store). An answer that does not answer what was asked is charged and 502 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on its intercept |
 | `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` its asker) | OpenAI's `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings). `POST /v1/embeddings` on a computer's intercept |
 
@@ -1593,16 +1608,26 @@ slot's; `encoding_format` other than `float` or `base64`. A body past
 502, and charged. It is paid as a chat call, at its input tokens (the
 model's count, else estimated).
 
-**Transcription** (decision 9): `whisper` is Workers AI's Whisper, sent the
-audio as base64 with its voice-activity filter on; `language` and `prompt`
-pass on, OpenAI's other fields do not. A form that is none, another model
-or format is 400; audio past `transcribe::BODY_MAX_BYTES` 413. Its payer is
-the agent's owner, under no fragment's cap, charged by the audio's length
-(`fragment_core::transcribe`). A first try answering 429, 408 or 5xx, or
-nothing within 15 s, is made once more; a 429 passed on carries
-`retry-after: 5`. Every answer carries `x-fragment-answer-shape` (the
-model's own answer's top-level keys and small `usage`, never its words). An
-answer in another shape is 502, charged nothing.
+**Transcription** (decision 9) runs on the deployment's
+`models.transcription` slot (`fragment_core::transcribe`), no chat slot:
+a Workers AI model, sent Whisper's catalog input (the audio as base64, its
+voice-activity filter on), or a model on an OpenAI-compatible API, sent
+OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key and
+`response_format` `verbose_json` (a model that answers no `verbose_json`,
+OpenAI's token-billed gpt-4o transcription models, refuses each call; its
+refusal is passed on). Each names its price, a minute of audio
+(docs/ledger.md). A deployment that names none transcribes nothing (404).
+A call to an OpenAI-compatible API, chat, embeddings or transcription,
+follows no redirect: one is the call not answered.
+`language` and `prompt` pass on, OpenAI's other fields do not. A form that
+is none, another model or format is 400; audio past
+`transcribe::BODY_MAX_BYTES` 413. Its payer is the agent's owner, under no
+fragment's cap, charged by the audio's length its model reports. A first
+try answering 429, 408 or 5xx, or nothing within 15 s, is made once more; a
+429 passed on carries `retry-after: 5`. Every answer carries
+`x-fragment-answer-shape` (the model's own answer's top-level keys and
+small `usage`, never its words). An answer in another shape is 502,
+charged nothing.
 
 ### Ledger (docs/ledger.md)
 
@@ -1769,8 +1794,8 @@ steps:
 - `job.call(op, input)`: an operation of this fragment as the run's
   principal, its id `job:<run>:<step>`. Calling a job starts it (`{run,
   status}`), one hop deeper.
-- `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
-  text(), json()}`, the app's one way out. `{{NAME}}` in a header value,
+- `job.fetch(url, {method, headers, body, blob?, keep?})` → `{status, ok, headers,
+  text(), json(), blob}`, the app's one way out. `{{NAME}}` in a header value,
   or in the URL's path or query, is the secret `NAME`, filled at the
   egress toward its hosts only (Control API); a fetch elsewhere fails the
   step, naming both. A URL's is percent-encoded as it goes in, a value
@@ -1788,7 +1813,13 @@ steps:
   `FETCH_RESPONSE_MAX_BYTES`, `FETCH_TIMEOUT_MS`. Each carries
   `x-fragment-hops`, and one not GET or HEAD an `Idempotency-Key:
   <fragment>-<life>-r<run>-s<step>` (the same on every try) unless the job
-  set one.
+  set one. A SimpleX connector's fetch of its own door (An agent's doors),
+  and no other, may carry one of its blobs as its body (`blob: <sha256>`,
+  streamed with its length; none such fails the step) or keep the door's
+  answer as one of its blobs (`keep: true`: a 2xx's body, the file
+  `x-door-sha256` names, at most `BLOB_MAX_BYTES`, its bytes checked
+  against that name as they are stored, typed as the door said when that
+  is passive media), answered `blob: {sha256, size, type}` and no body.
 - `job.publish(channel, body, kind)`: a record.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
@@ -1837,7 +1868,12 @@ overdraft every trigger's run is `blocked`. A deploy dropping an operation
 drops its pause. A cron tick whose last run still goes is skipped. The
 inbox's pending records are its unfinished runs (`inbox.rejected` past
 `INBOX_PENDING_MAX`). Finished runs are kept `RUN_RETENTION_MS` (at most
-`RUNS_KEPT`).
+`RUNS_KEPT`), except that a run with a call id (a job's call, a record's
+trigger) that ran outlives the count for the retry window, so a retry never
+starts it twice: past the count a succeeded one keeps only its id, status
+and input hash (its input and output shed), and a held one is kept whole,
+replayable, at most `HELD_RUNS_GUARDED` of them. A blocked run never ran,
+so it goes with the count.
 
 ### Scheduled records
 
@@ -2076,7 +2112,7 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 
 | method & path | who | body → answer |
 | --- | --- | --- |
-| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, accounts?, accountsMax?, charged?}]}`, in catalog order. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
+| `GET /api/connections` | a person | → `Providers {providers: [{provider, name, kind, state, hosts, env, price?, signIn?, models?, account?, granted?, missing?, access?, note?, scopeNames?, accounts?, accountsMax?, charged?}]}`, in catalog order. `scopeNames` is a connection's scopes for people, as its row names them (`{scope: name}`): settings shows a granted scope by its name there and no other, and a missing one it leaves out by its last path segment. `name` what people call it (xAI, Google Places: the one source of every client's words for it). `state`: a connection's `connected`, `needs_reauthorization` or `not_connected`; an operator key's `offered`; an own key's `set` or `not_set`. `price` an operator key's `{micros, per}` at list; `charged` what its calls are charged, `{micros, per}`, its price in the answering release's book with the book's margin (what settings shows); `signIn` an own key's `{manage}`; `models` an own key's provider's `[{id, name}]`; `account` a connection's display email (shown, never trusted); `granted` its scopes; `missing` what its access asks for beyond them ([partial grants](pipes-browser-binding.md#partial-grants)); `access` what its grant lets agents do, `read` or `write`, and `accesses` what a connection offers to pick, `[read, write]`, or `[write]` where its provider has no read-only scope (then no `access`: the account's own permissions are its limit) ([access](pipes-browser-binding.md#access)); `note` the row's note; for a row taking several accounts, `accounts: [{id, account?, state, granted?, missing?, access?, disconnecting?}]` oldest first and `accountsMax` ([several accounts](pipes-browser-binding.md#several-accounts)). Reading it tells their computer the states |
 | `POST /api/connections/{provider}/authorize` | the shell's session (a signed key 403) | a connection's `{access: "read" \| "write"}`, the access the person picked of those its row offers (none, or `read` where it offers `write` alone, 400: never assumed), and beside it, on a row of several accounts, `{add: true}` (400 at `accounts_max`) or `{account: "<id>"}` (not theirs 404); an own key's `{}` → `{provider, url}` and a host-only state cookie. A connection's state, its session binding and S256 verifier are kept ten minutes; an own key's sign-in uses their Vault, `fragment_own_key` and PKCE. No `connection_oauth`: `not_connected`, no vendor call. Not offered 404; a provider with no sign-in 400 |
 | `GET /api/connections/{provider}/callback?code=&state=` | the browser that began it, on the platform host, with its state cookie and the **same live session** | → HTML with no credentials: the code exchanged once and the grant imported into the person's Pipes account with exactly the scopes it holds (an own key's sealed in their Vault); of several accounts, a grant of one already connected (its ID token's `sub`) reauthorizes it. A failure is 303 to `?refused=<word>`: `elsewhere`, `signed-out`, `declined`, `not-under-way`, `code-refused`, `no-scopes`, `one-account`, `account-limit`, `finishing`, `no-key`. Another host 404 |
 | `DELETE /api/connections/{provider}[?account=<id>]` | a person | → `{provider, account?, state, revoked}`: a connection disconnected (of several, the one named; none named with several 400; `account` on a row of one 400; an id not theirs 404). The account is fenced first, so no connect begun before lands after (while one is importing: 429, asked again); its grant revoked at the row's `revoke` endpoint (RFC 7009) when it names one, then deleted at Pipes; the computer told. `revoked`: the provider answered 200. Another kind 400 |
@@ -2274,7 +2310,9 @@ On a computer's origin `/__ticket?t=` redeemed by a top-level visit sets
 `fragment_computer_frame` (`HttpOnly; Secure; SameSite=None;
 Partitioned`); both `__Host-` over https, for 12 hours, naming its owner
 only. Every answer there but a socket's upgrade carries `frame-ancestors
-<platform>`. Its cookies count as on a fragment's origin (Which cookies
+<platform>` and no `Service-Worker-Allowed`. No service worker is served
+there: any `Service-Worker: script` request is 404 before `/__ticket` or a
+port sees it, so no port's page registers one. Its cookies count as on a fragment's origin (Which cookies
 count); a socket from any page but its own is 403.
 
 A guest's request to a provider's host has its placeholders swapped
@@ -2352,14 +2390,19 @@ nor speak through one (`fragment_core::door`):
   which records relaying its owner came through its door
   (docs/chat-records.md). The binding is the connector's, so several
   connectors may each be a door of one agent; an unlink leaves the agent
-  a viewer. Its rules are cell/src/doors.rs's.
+  a viewer. Its bound agent, acting as itself, uploads the files its
+  replies there carry (`PUT /api/f/{name}/blobs/{sha256}`: rule 5's one
+  exception, `fragment_core::permit`), which its door sends on where it
+  can (a SimpleX door's) and says are in the chat where it cannot
+  (Telegram's); it is a viewer there for all else. Its rules are
+  cell/src/doors.rs's.
 - **A SimpleX connector's door** (`simplex`) is the platform's SimpleX
   door of the connector's life (cell/door.mjs): named for its name and
   its npub's digits (`fragment_core::door::door_id`), as its repo is, so
   a name made again, by anyone, reaches a door of its own, never the
   earlier one's link. Its jobs reach it at
   `https://door.fragment.internal/<ask>` (`connect`, `state`, `link`,
-  `unlink`, `reply`), which the platform sends to that door alone, naming
+  `unlink`, `reply`, `file/<sha256>`, `kept`), which the platform sends to that door alone, naming
   it and the connector (`x-fragment-door`, `x-fragment-connector`) over
   whatever the job set; any other fragment's fetch of that host fails its
   step unsent (`fragment_core::door::door_route`). `connect` gives the
@@ -2372,6 +2415,27 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  **Files** go both ways. Its owner's (a voice message, a photo, a file
+  past what its runner carries: SimpleX's own bound) is received by its
+  core and held by the door; the delivery names it (`file: {sha256, name,
+  type, size}`) and the connector keeps it as one of its blobs (`GET
+  file/<sha256>`, `keep`) for the record's `attachments`. A reply's
+  (`reply {key, text, files}`, at most `FILES_PER_MESSAGE`) are each given
+  to the door first (`PUT file/<sha256>`, the blob as its body) and sent
+  after its text; a file the door does not hold is 409 `no_file`, and a
+  door whose runner carries no files (a container started before it did)
+  409 `no_files`, its connector then sending the text alone. The door
+  holds at most 64 files, 1 GiB between them, every one counted, each a
+  day since it was last given or used, but one a delivery its inbox has
+  yet to take names (cell/door-rules.mjs `FILES_KEPT`), under its prefix.
+  Each records who still uses it, each once: a delivery naming it until
+  its connector says `kept {id}` (sent once the blob is stored, so a read
+  cut off releases nothing), and a reply naming it (given with its key,
+  `x-door-for`) until it is done. Past the bounds, files nothing uses make
+  room, the oldest first; with none, a new one is 503 `files_full`, given
+  again later, and its runner delivers a message whose file its door
+  keeps refusing with a note once 3 minutes pass. Its core reaches SimpleX's
+  file servers through the platform's XFTP relay (docs/computers.md).
   While it invites, the door's `state` has the invitation's QR code
   (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
   its short link where there is one), for its owner's setup page to draw

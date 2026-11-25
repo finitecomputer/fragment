@@ -365,12 +365,13 @@ jobs:
           overwrite: true
           retention-days: 30
 
-  # Master follows one image, keyed by its inputs rather than its commit.
-  # A registry tag preserves the digest across cache eviction and re-runs;
-  # a changed cell or shell never builds a new image. Prepare it before
-  # deploy can start, beside the e2e, which takes about as long as a
-  # build. This job never changes the running Worker; it builds only when
-  # the input tag is not there.
+  # Master follows each image preview runs (xtask/src/image.rs, `IMAGES`:
+  # Hermes and the SimpleX door), each keyed by its own inputs rather than
+  # its commit. A registry tag preserves each digest across cache eviction
+  # and re-runs; a changed cell or shell never builds a new image. Prepare
+  # them before deploy can start, beside the e2e, which takes about as long
+  # as Hermes's build. This job never changes the running Worker; it builds
+  # an image only when its input tag is not there.
   preview-image:
     if: github.event_name == 'push' && github.ref == 'refs/heads/master'
     runs-on: ubuntu-latest
@@ -385,10 +386,12 @@ jobs:
       group: image-preview
       cancel-in-progress: false
     outputs:
-      # A whole reference contains the secret account ID, so GitHub would
-      # suppress it as a secret output. Deploy uses its config's account.
-      digest: ${{ steps.ready.outputs.digest }}
-      key: ${{ steps.ready.outputs.key }}
+      # Each image's digest and input key, `<image>=<value>` pairs joined by
+      # spaces. A whole reference contains the secret account ID, so GitHub
+      # would suppress it as a secret output. Deploy uses its config's
+      # account.
+      images: ${{ steps.ready.outputs.images }}
+      keys: ${{ steps.ready.outputs.keys }}
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -411,18 +414,21 @@ jobs:
       - id: probe
         run: |
           cargo xtask image preview --output "$RUNNER_TEMP/preview-image.json"
-          echo "build=$(jq -r .build "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "build=$(jq -r 'any(.[]; .build)' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "hermes=$(jq -r .hermes.build "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
       # its disk freed before it builds (the action says why)
       - if: steps.probe.outputs.build == 'true'
         uses: ./.github/actions/free-disk
       - id: buildx
         if: steps.probe.outputs.build == 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # The CLI stage now copies only its inputs (build.rs's host test).
-      # This cache saves its unchanged stage, the bridge's, and the large
-      # base. One master-only scope (~3 GB), not one entry per commit.
-      # Registry input tags, not this evictable cache, preserve identity.
-      - if: steps.probe.outputs.build == 'true'
+      # Hermes's, when it builds: the CLI stage now copies only its inputs
+      # (build.rs's host test). This cache saves its unchanged stage, the
+      # bridge's, and the large base. One master-only scope (~3 GB), not
+      # one entry per commit. Registry input tags, not this evictable
+      # cache, preserve identity. The door's image is small, and builds in
+      # the next step without one.
+      - if: steps.probe.outputs.hermes == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           DOCKER_BUILD_SUMMARY: false
@@ -439,8 +445,8 @@ jobs:
           BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
         run: |
           cargo xtask image preview --build --output "$RUNNER_TEMP/preview-image.json" --summary "$GITHUB_STEP_SUMMARY"
-          echo "digest=$(jq -er .digest "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
-          echo "key=$(jq -er .key "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "images=$(jq -er '[to_entries[] | "\(.key)=\(.value.digest // error("no digest for \(.key)"))"] | join(" ")' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
+          echo "keys=$(jq -er '[to_entries[] | "\(.key)=\(.value.key)"] | join(" ")' "$RUNNER_TEMP/preview-image.json")" >> "$GITHUB_OUTPUT"
       - if: always() && steps.probe.outputs.build == 'true'
         name: disk, after
         run: |
@@ -584,25 +590,29 @@ jobs:
           printf '%s\n' "$CLOUDFLARE_API_TOKEN" > ~/.config/fragment/secrets/cloudflare-api-token
           if [ -n "$PREVIEW_TEST_SECRET" ]; then printf '%s\n' "$PREVIEW_TEST_SECRET" > ~/.config/fragment/secrets/preview-test-secret; fi
       # The private config remains the source for deployment settings.
-      # Preview's effective image is resolved by this checkout's inputs,
-      # and applied in memory; this summary is its auditable image trail.
+      # Preview's effective images are resolved by this checkout's inputs,
+      # and applied in memory; this summary is their auditable image trail.
       - if: github.ref_name == 'master'
         env:
-          DIGEST: ${{ needs.preview-image.outputs.digest }}
-          INPUT_KEY: ${{ needs.preview-image.outputs.key }}
+          IMAGES: ${{ needs.preview-image.outputs.images }}
+          INPUT_KEYS: ${{ needs.preview-image.outputs.keys }}
         run: |
-          test -n "$DIGEST" && test -n "$INPUT_KEY" || { echo "::error::preview image resolution is missing; no deploy"; exit 1; }
-          printf '### Resolved preview image\n\nInputs: `%s`\n\nDigest: `%s`\n\n`hermes` uses this digest.\n' "$INPUT_KEY" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          test -n "$IMAGES" && test -n "$INPUT_KEYS" || { echo "::error::preview image resolution is missing; no deploy"; exit 1; }
+          { printf '### Resolved preview images\n\n'; printf -- '- `%s`\n' $IMAGES; printf '\nInputs:\n\n'; printf -- '- `%s`\n' $INPUT_KEYS; } >> "$GITHUB_STEP_SUMMARY"
       # green only when every object class answers this commit's release
       # (`git rev-parse --short=12 HEAD`) at /healthz/objects; a deploy that
       # cannot be finished or verified rolls back, and fails (rollout.rs)
       - run: |
           args=()
-          if [ "$GITHUB_REF_NAME" = master ]; then args=(--branch preview --preview-image-digest "$PREVIEW_IMAGE_DIGEST"); fi
+          if [ "$GITHUB_REF_NAME" = master ]; then
+            args=(--branch preview)
+            for pin in $PREVIEW_IMAGES; do args+=(--preview-image "$pin"); done
+          fi
           cargo xtask deploy --config "deploy-config/$CONFIG_FILE" --pinned-only "${args[@]}"
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          PREVIEW_IMAGE_DIGEST: ${{ needs.preview-image.outputs.digest }}
+          # `<image>=sha256:…` pairs (preview-image, above)
+          PREVIEW_IMAGES: ${{ needs.preview-image.outputs.images }}
           # Empty after a failed lookup/build: deploy still proceeds, with
           # no update header. Only a verified published release is named.
           FRAGMENT_RELEASED_CLI_VERSION: ${{ needs.cli-release.result == 'success' && needs.cli-release.outputs.version || (needs.cli-version.result == 'success' && needs.cli-version.outputs.version) || '' }}
