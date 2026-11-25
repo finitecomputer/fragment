@@ -303,9 +303,10 @@ export class App extends DurableObject {
     const b = record?.body;
     // a question, only one that asks its owner (whom the door is theirs)
     if (record.channel === "work") {
-      if (b?.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
       const question = asked(b);
-      return question ? reply(job, `work:${record.seq}`, question) : { sent: 0, why: "not a question" };
+      if (!question) return { sent: 0, why: "not a question" };
+      if (b.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
+      return reply(job, `work:${record.seq}`, question);
     }
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";

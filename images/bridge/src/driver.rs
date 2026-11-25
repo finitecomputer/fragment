@@ -1270,6 +1270,14 @@ fn for_simplex(channel: &str, body: &Value, files: usize) -> Option<String> {
         records::CHAT if body["interim"] != true && body.get("relayed").is_none() => (!text.trim().is_empty() || files > 0).then(|| text.to_string()),
         records::WORK if body["kind"] == "turn.prompt" => {
             let options = body["options"].as_array()?;
+            // an option answered on the agent's computer (a sign-in's code)
+            // is never typed in their app, where it would be a message kept
+            // in the chat: the engine takes no message for it
+            // (`Prompt::words` leaves it out), and the card in the chat
+            // sends it to the computer alone
+            if options.iter().any(|o| o["computer"] == true) {
+                return Some(format!("{text}\n\n(Answer this one in our chat, not here: what you type there goes to your computer alone.)"));
+            }
             let words = options.iter().any(|o| o["words"] == true);
             let labels: Vec<&str> = options.iter().filter(|o| o["words"] != true).filter_map(|o| o["label"].as_str()).collect();
             // the owner's next message answers a card that takes words (engine.rs `told`)
@@ -2506,6 +2514,9 @@ mod tests {
         assert_eq!(for_simplex(records::WORK, &card, 0).as_deref(), Some("What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)"));
         let buttons = records::turn_prompt("t1", "p-1", "Run it?", &[option("once", "Allow once", false)], "npub1paul", 1);
         assert!(for_simplex(records::WORK, &buttons, 0).is_some_and(|t| t.ends_with("answer it in our chat.)")));
+        // Claude's sign-in: its code is answered on the computer, never here
+        let code = records::turn_prompt("t1", "s-1", &crate::runtime::claude::sign_in_ask("https://claude.example/sign-in", false), &[records::PromptOption { id: "code".into(), label: "Paste the code".into(), style: None, words: true, computer: true }], "npub1paul", 1);
+        assert!(for_simplex(records::WORK, &code, 0).is_some_and(|t| t.ends_with("(Answer this one in our chat, not here: what you type there goes to your computer alone.)")), "{:?}", for_simplex(records::WORK, &code, 0));
         assert_eq!(for_simplex(records::WORK, &json!({ "kind": "turn.start", "turn": "t1" }), 0), None, "a turn's work records stay");
     }
 

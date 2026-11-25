@@ -400,9 +400,9 @@ export class App extends DurableObject {
     let text;
     if (record.channel === "work") {
       // a question, only one that asks its owner (whom the door is theirs)
-      if (b?.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
       text = asked(b);
       if (!text) return { sent: 0, why: "not a question" };
+      if (b.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
     } else {
       if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
       const said = typeof b.text === "string" ? b.text.trim() : "";
