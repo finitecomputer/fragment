@@ -59,8 +59,13 @@ use crate::codestorage::{Author, Change, CsError, Held, Wants, MAIN};
 use crate::home::files::{commit, manifest, BATCH_BYTES, BATCH_FILES};
 use crate::home::survey::size;
 
-/// The note left in a moved file's or folder's place, after its name.
+/// The note left in a moved file's or folder's place, after its name
+/// (`note_name`).
 pub const NOTE_SUFFIX: &str = ".offloaded.md";
+/// A file's name, at most, in bytes: a file system's (Linux's, macOS's).
+pub(crate) const NAME_MAX: usize = 255;
+/// The hex digits of its sha256 a name too long for its note's names it by.
+const NOTE_HEX: usize = 16;
 /// The files one move takes, at most: a folder of more is moved a
 /// subfolder at a time (and one of dependencies or a cache, which its tools
 /// make again, is deleted instead).
@@ -151,6 +156,37 @@ impl Record {
     }
 }
 
+/// The name of `name`'s note, beside it: `<name>.offloaded.md`; or, that
+/// past a file name's most (`NAME_MAX`), as much of `name` as leaves room,
+/// then `~` and the first `NOTE_HEX` hex digits of its sha256. A note
+/// brings back only what its record names under the name it is the note
+/// of (`back`).
+pub(crate) fn note_name(name: &str) -> String {
+    if name.len() + NOTE_SUFFIX.len() <= NAME_MAX {
+        return format!("{name}{NOTE_SUFFIX}");
+    }
+    let room = NAME_MAX - NOTE_SUFFIX.len() - 1 - NOTE_HEX;
+    let cut = (0..=room).rev().find(|&i| name.is_char_boundary(i)).expect("a name's start is a boundary");
+    format!("{}~{}{NOTE_SUFFIX}", &name[..cut], &blob::sha256_hex(name.as_bytes())[..NOTE_HEX])
+}
+
+/// Whether a note named `file` is the note of `name`: `note_name`'s, or
+/// `<name>.offloaded.md` whole, as older CLIs named every note (macOS
+/// keeps a name of 255 letters, past 255 bytes).
+fn is_note_of(file: &str, name: &str) -> bool {
+    file == note_name(name) || file.strip_suffix(NOTE_SUFFIX) == Some(name)
+}
+
+/// Where the note of `name` in `dir` is: `<name>.offloaded.md` whole if
+/// an older CLI wrote it so (`is_note_of`), else `note_name`'s.
+fn note_at(dir: &Path, name: &str) -> PathBuf {
+    let whole = dir.join(format!("{name}{NOTE_SUFFIX}"));
+    if fs::symlink_metadata(&whole).is_ok() {
+        return whole;
+    }
+    dir.join(note_name(name))
+}
+
 /// A path quoted for a shell.
 fn quoted(p: &Path) -> String {
     format!("'{}'", p.to_string_lossy().replace('\'', r"'\''"))
@@ -201,6 +237,18 @@ pub(crate) fn note_text(r: &Record, note: &Path, name: &str, said: Said) -> Stri
     out.push_str("\n]}");
     out.push_str(RECORD_CLOSE);
     out
+}
+
+/// The note of `r` at `note`, its text, only if it reads back as `r` the
+/// way `--back` reads one (`record_of`): no move removes a file, and no
+/// store writes a note, that `--back` can't bring back.
+pub(crate) fn readable_note(r: &Record, note: &Path, name: &str, said: Said) -> Result<String> {
+    let text = note_text(r, note, name, said);
+    match record_of(&text) {
+        Ok(back) if back == *r => Ok(text),
+        Ok(_) => bail!("its note would not read back as written"),
+        Err(why) => bail!("its note would not read back ({why:#})"),
+    }
 }
 
 /// A note's record (`note_text`).
@@ -334,7 +382,7 @@ fn plan(path: &Path, keep: Option<&Path>) -> Result<Planned> {
     if let Some(keep) = keep.filter(|k| abs.starts_with(k) || k.starts_with(&abs)) {
         bail!(coded(Code::InvalidUsage, format!("{} is in your runtime's own home ({}), or holds it: what it keeps there (memory, skills, sessions, settings) is never moved", abs.display(), keep.display())));
     }
-    let note = dir.join(format!("{name}{NOTE_SUFFIX}"));
+    let note = note_at(&dir, &name);
     let m = match fs::symlink_metadata(&abs) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && note.exists() => bail!(coded(Code::InvalidUsage, format!("{} was moved already: its note is {}", abs.display(), note.display()))),
         m => m.with_context(|| format!("reading {}", abs.display()))?,
@@ -577,6 +625,11 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
             }
         }
     }
+    // its note reads back as `--back` reads one, before anything is written
+    // (a stand-in for each file's sum, which only its read makes)
+    let files = p.files.iter().map(|l| Moved { path: l.rel.clone(), size: l.size, sha256: Some("0".repeat(64)), crc32: None, mode: l.mode }).collect();
+    readable_note(&Record { files, ..r.clone() }, &p.note, &p.name, Said::offloaded(&when))
+        .map_err(|e| coded(Code::InvalidUsage, format!("{} cannot be moved: {e:#}. Nothing was written: move it from a folder nearer the top, or under a shorter name", r.from)))?;
 
     let mut held = Held::new(&into, Wants::Write);
     if !held.get(c)?.writes() {
@@ -624,7 +677,8 @@ pub fn offload(c: &Client, path: &Path, into: &str) -> Result<Offloaded> {
     if let Some(l) = p.files.iter().find(|l| !unchanged(l)) {
         bail!(coded(Code::Conflict, format!("{} changed while it was moved; nothing was removed (a copy of it as it was is in {into}, under {}/): move it once it is done changing", l.abs.display(), r.at)));
     }
-    publish(&p.note, &note_text(&r, &p.note, &p.name, Said::offloaded(&when)))?;
+    let text = readable_note(&r, &p.note, &p.name, Said::offloaded(&when)).with_context(|| format!("{} is in {into}, under {}/, but nothing was removed", r.from, r.at))?;
+    publish(&p.note, &text)?;
     let kept = remove(&p)?;
     Ok(Offloaded { fragment: into, at: r.at.clone(), note: p.note.display().to_string(), files: r.files.len(), bytes: r.bytes(), resumed: false, kept })
 }
@@ -668,18 +722,21 @@ pub struct Back {
     pub path: String,
 }
 
-/// A note's path, from it or from the path it is the note of.
-fn note_of(path: &Path) -> Result<PathBuf> {
+/// A note's path, from it or from the path it is the note of (that name,
+/// which only its own note brings back). A path named as a note is that
+/// note while it is there, else a file's of that name (FIN-757).
+fn note_of(path: &Path) -> Result<(PathBuf, Option<String>)> {
     let (dir, name) = place(path)?;
-    Ok(match name.ends_with(NOTE_SUFFIX) {
-        true => dir.join(name),
-        false => dir.join(format!("{name}{NOTE_SUFFIX}")),
-    })
+    let given = dir.join(&name);
+    if name.ends_with(NOTE_SUFFIX) && fs::symlink_metadata(&given).is_ok() {
+        return Ok((given, None));
+    }
+    Ok((note_at(&dir, &name), Some(name)))
 }
 
 /// Brings back what the note at (or for) `path` moved, beside the note.
 pub fn back(c: &Client, path: &Path) -> Result<Back> {
-    let note = note_of(path)?;
+    let (note, asked) = note_of(path)?;
     let dir = note.parent().expect("a note has a folder").to_path_buf();
     let _held = lock(&dir)?;
     let text = match fs::read_to_string(&note) {
@@ -688,7 +745,17 @@ pub fn back(c: &Client, path: &Path) -> Result<Back> {
         Err(e) => return Err(anyhow::Error::new(e).context(format!("reading {}", note.display()))),
     };
     let r = record_of(&text).with_context(|| format!("reading {}", note.display()))?;
-    let name = name_of(&note)?.trim_end_matches(NOTE_SUFFIX).to_string();
+    // the name it brings back: its record's (each path's first part), whose
+    // note this is by name (`is_note_of`; FIN-757: a name may end as a
+    // note's does)
+    let first = &r.files[0].path;
+    let name = Path::new(first).components().next().and_then(|c| c.as_os_str().to_str()).expect("a record's paths are plain").to_string();
+    if !is_note_of(&name_of(&note)?, &name) {
+        bail!("{} names {first}, which is not under the name it is the note of", note.display());
+    }
+    if let Some(asked) = asked.filter(|a| *a != name) {
+        bail!(coded(Code::Conflict, format!("{} is the note of {name}, not of {asked}: nothing was changed", note.display())));
+    }
     // each path under the name the note is for; each file's folders, the
     // note's own, or ones it names
     let named: std::collections::BTreeSet<&str> = r.dirs.iter().map(|d| d.path.as_str()).collect();
@@ -1099,7 +1166,10 @@ mod tests {
         let note = root.join("a.offloaded.md");
         let folder = |path: &str| Folder { path: path.into(), mode: 0o755 };
         for (dirs, files, says) in [
-            (vec![folder("a")], vec![file("b")], "not under a"),
+            (vec![folder("a")], vec![file("b")], "not under the name it is the note of"),
+            (vec![folder("b")], vec![file("a")], "not under a"),
+            // its own note's name (`a`'s is a.offloaded.md.offloaded.md)
+            (vec![], vec![file("a.offloaded.md")], "not under the name it is the note of"),
             (vec![folder("a")], vec![file("a/x/y")], "does not name"),
             // a folder whose own folder it leaves out (a link, there)
             (vec![folder("a"), folder("a/link/new")], vec![file("a/f")], "does not name"),
@@ -1110,6 +1180,62 @@ mod tests {
             assert!(format!("{e:#}").contains(says), "{e:#}");
         }
         assert_eq!(fs::read_dir(&root).unwrap().count(), 1, "nothing made");
+        // asked for by where a long name was, a note there of another name
+        // (one named as the long name's note is) brings back nothing
+        let long = "n".repeat(250);
+        let other = note_name(&long).strip_suffix(NOTE_SUFFIX).expect("a note's name").to_string();
+        let theirs = root.join(note_name(&long));
+        let r = Record { fragment: NAME.into(), at: "x".into(), from: "/x".into(), part_bytes: 4, dirs: vec![], files: vec![file(&other)] };
+        fs::write(&theirs, note_text(&r, &theirs, &other, Said::offloaded("now"))).unwrap();
+        let e = back(&c, &root.join(&long)).unwrap_err();
+        assert!(format!("{e:#}").contains(&format!("not of {long}: nothing was changed")), "{e:#}");
+        assert!(theirs.exists() && fs::read_dir(&root).unwrap().count() == 2, "nothing made, its note kept");
+    }
+
+    /// Goal (FIN-755): a note's name is one a file system keeps, whatever
+    /// the name it is the note of: as before while that fits, else named
+    /// short, by as much of the name as fits (never half a letter) and its
+    /// hash, the same each time and another for another name.
+    #[test]
+    fn a_notes_name_fits_a_file_system() {
+        assert_eq!(note_name("talk.mp4"), "talk.mp4.offloaded.md");
+        assert_eq!(note_name("log.offloaded.md"), "log.offloaded.md.offloaded.md");
+        let fits = "n".repeat(NAME_MAX - NOTE_SUFFIX.len());
+        assert_eq!(note_name(&fits), format!("{fits}{NOTE_SUFFIX}"), "the longest kept as before");
+        let wide = format!("{}x", "é".repeat(127));
+        for long in [format!("{fits}n"), "n".repeat(NAME_MAX), wide.clone()] {
+            let short = note_name(&long);
+            let (start, hex) = short.strip_suffix(NOTE_SUFFIX).and_then(|s| s.rsplit_once('~')).expect("named short");
+            assert!(short.len() <= NAME_MAX && long.starts_with(start) && start.len() + 3 > NAME_MAX - NOTE_SUFFIX.len() - 1 - NOTE_HEX, "{short}");
+            assert_eq!(hex, &blob::sha256_hex(long.as_bytes())[..NOTE_HEX]);
+            assert_eq!(note_name(&long), short, "the same each time");
+        }
+        assert_ne!(note_name(&format!("{fits}a")), note_name(&format!("{fits}b")), "another for another name");
+        // a note is its name's by either name: `note_name`'s, or whole, as
+        // older CLIs wrote one where a file system keeps it (macOS: 255 letters)
+        let cjk = "長い題名".repeat(21);
+        assert!(cjk.len() == 252 && is_note_of(&format!("{cjk}{NOTE_SUFFIX}"), &cjk) && is_note_of(&note_name(&cjk), &cjk));
+        assert!(is_note_of("log.offloaded.md.offloaded.md", "log.offloaded.md") && !is_note_of("log.offloaded.md", "log.offloaded.md"));
+        assert!(!is_note_of(&note_name(&cjk), "長い題名") && !is_note_of("a.offloaded.md", "b"));
+    }
+
+    /// Goal (Codex on #1561): a move removes nothing unless its note reads
+    /// back as `--back` reads one (`record_of`). A file whose one part fits
+    /// in the fragment, but whose note would not read back (a long name,
+    /// folders deep), is refused before anything is written, and stays.
+    #[test]
+    fn a_move_whose_note_would_not_read_back_is_refused_before_anything_is_written() {
+        let (mock, c) = host();
+        let root = tempdir("unread");
+        // its one part, `<when>/<folder>/<name>`, ten bytes within a repo
+        // path; a part's longest name (`.part-…-of-…`) past it
+        let (at, _) = at_now(&root);
+        let name = "n".repeat(fragment_proto::limits::PATH_MAX_BYTES - at.len() - 1 - 10);
+        let file = root.join(&name);
+        fs::write(&file, b"kept here").unwrap();
+        let e = offload(&c, &file, NAME).unwrap_err();
+        assert!(format!("{e:#}").contains("its note would not read back"), "{e:#}");
+        assert!(file.exists() && mock.paths(NAME, "main").is_empty() && fs::read_dir(&root).unwrap().count() == 1, "nothing written, nothing removed");
     }
 
     /// Goal: a folder replaced by a link before its back is refused, and

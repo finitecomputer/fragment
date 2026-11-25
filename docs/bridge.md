@@ -565,7 +565,8 @@ never reaches another agent's core.
   sends is posted there as relayed records (docs/chat-records.md, "A
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
-  card's question with its choices. An unlink stops the mirror and keeps
+  card's question with its choices, worded as every connector words one
+  (src/questions.json holds both to the same cases). An unlink stops the mirror and keeps
   the chat; a link again is that chat. The bridge's state holds nothing
   of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX
