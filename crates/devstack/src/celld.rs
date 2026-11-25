@@ -17,6 +17,12 @@
 //! container is there, not running, and a start throws (docs/self-host.md,
 //! seam 2).
 //!
+//! The operators' admin Worker runs beside the cell, as on Cloudflare and
+//! wrangler: `celld dev --with` co-hosts it under its own name, the cell's
+//! `ADMIN` service binding reaches it, and its object bindings reach the
+//! cell's objects by `script_name` (the fork's `durable-object-script-name-v1`,
+//! its selfhost line from finitecomputer/celld#35).
+//!
 //! The node's port is its front door's (front.rs), as on wrangler: celld
 //! listens on a port of its own, which the front door learns from its
 //! `ready` line and passes each connection to.
@@ -31,29 +37,31 @@ use anyhow::{bail, Context, Result};
 
 use crate::{boot_log, front, spawn_node, Node, NodeOptions, READY_TIMEOUT};
 
-/// What the celld render leaves out of the local config, and why.
-pub const DROPPED: [(&str, &str); 2] = [
-    ("build", "worker-build has run (cargo xtask build)"),
-    // the cell then answers the admin's routes with a host failure saying
-    // so (cell/src/admin.rs `forward`; docs/technical-debt-ledger.md)
-    ("services", "celld runs one Worker, the cell: not the admin Worker beside it"),
-];
+/// What the celld render leaves out of a local config, and why.
+pub const DROPPED: [(&str, &str); 1] = [("build", "worker-build has run (cargo xtask build)")];
 
-/// The config celld runs: `wrangler.celld.jsonc`, beside the project's own
-/// (so its paths and `.dev.vars` resolve the same), the local config a node
-/// runs (`crate::local_config`, its secrets bound by name as on wrangler)
-/// less `DROPPED`. `Fleet::configure` writes the local config first.
-pub fn celld_config(project: &Path) -> Result<PathBuf> {
-    let local = crate::local_config(project);
-    let text = fs::read_to_string(&local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
+/// The configs celld runs: the cell's (`wrangler.celld.jsonc`) and its admin
+/// Worker's (`wrangler.admin.celld.jsonc`), beside the project's own (so
+/// their paths and `.dev.vars` resolve the same), each the local config a
+/// node runs (`crate::local_config`, `crate::admin_local_config`, secrets
+/// bound by name as on wrangler) less `DROPPED`. `Fleet::configure` writes
+/// the local configs first.
+pub fn celld_config(project: &Path) -> Result<(PathBuf, PathBuf)> {
+    let cell = render(&crate::local_config(project), &project.join("wrangler.celld.jsonc"))?;
+    let admin = render(&crate::admin_local_config(project), &project.join("wrangler.admin.celld.jsonc"))?;
+    Ok((cell, admin))
+}
+
+/// The local config at `local`, less `DROPPED`, written to `to`.
+fn render(local: &Path, to: &Path) -> Result<PathBuf> {
+    let text = fs::read_to_string(local).with_context(|| format!("read {} (Fleet::configure writes it)", local.display()))?;
     let mut config: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parse {}", local.display()))?;
     let obj = config.as_object_mut().context("a wrangler config is an object")?;
     for (key, _) in DROPPED {
         obj.remove(key);
     }
-    let path = project.join("wrangler.celld.jsonc");
-    fs::write(&path, serde_json::to_string_pretty(&config)?)?;
-    Ok(path)
+    fs::write(to, serde_json::to_string_pretty(&config)?)?;
+    Ok(to.to_path_buf())
 }
 
 /// The celld node's secrets file (its `CELLD_SECRETS_FILE`), beside the
@@ -262,7 +270,7 @@ impl CelldTools {
         engine.check()?;
         let celld = std::env::var_os("CELLD_BIN")
             .map(PathBuf::from)
-            .context("set CELLD_BIN to a celld built from github.com/finitecomputer/celld's selfhost line (cargo build --release -p celld)")?;
+            .context("set CELLD_BIN to a celld built from github.com/finitecomputer/celld's selfhost line, with object bindings across scripts (finitecomputer/celld#35): cargo build --release -p celld")?;
         if !celld.is_file() {
             bail!("no celld at {} (CELLD_BIN)", celld.display());
         }
@@ -318,7 +326,7 @@ fn ready_line(port: u16) -> String {
 /// it says so. It stops on SIGINT, as Ctrl-C stops it; `Node`'s stop and
 /// crash serve it as they serve wrangler's.
 pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)> {
-    let config = celld_config(&opts.project)?;
+    let (config, admin) = celld_config(&opts.project)?;
     let secrets = secrets_file(&opts.project);
     anyhow::ensure!(secrets.is_file(), "no secrets file for the celld node at {} (Fleet::configure writes it, with Secrets::Vars or Secrets::OpenBao)", secrets.display());
     let port = opts.port();
@@ -332,7 +340,7 @@ pub fn start(tools: &CelldTools, opts: &NodeOptions) -> Result<(Node, Duration)>
     let esbuild_dir = tools.esbuild.parent().context("esbuild's directory")?;
     let path = std::env::join_paths(std::iter::once(esbuild_dir.to_path_buf()).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())))?;
     let mut cmd = Command::new(&tools.celld);
-    cmd.arg("dev").arg(&config).args(["--host", "127.0.0.1", "--port", &runtime.to_string(), "--logs", "--no-watch"]);
+    cmd.arg("dev").arg(&config).arg("--with").arg(&admin).args(["--host", "127.0.0.1", "--port", &runtime.to_string(), "--logs", "--no-watch"]);
     // the fork's hardening (its docs/hardening.md): a facet's database
     // capped past the cell's own, and loaded code locked down
     cmd.env("PATH", path)
@@ -445,10 +453,11 @@ mod tests {
         assert_eq!(policy.entries()[0], fragment_core::connectors::Policy::default().entries()[0], "SimpleX as the default names it");
     }
 
-    /// Goal: celld runs the local config a wrangler node runs, its secrets
-    /// bound by name, less `build` and the binding to the admin Worker
-    /// (`DROPPED`): the services it does not run and
-    /// the computers' containers stay in it, for celld binds them all. With
+    /// Goal: celld runs the local configs a wrangler node runs, its secrets
+    /// bound by name, less `build` (`DROPPED`): the cell's, its binding to
+    /// the admin Worker kept, the services it does not run and the
+    /// computers' containers in it, for celld binds them all; and the admin
+    /// Worker's, each of the cell's objects bound by the cell's script. With
     /// no local config written yet, it is refused, naming the file. Replay:
     /// rendered twice, the same. Method: cell/wrangler.jsonc, through
     /// `write_local_config` with a secret bound.
@@ -457,7 +466,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_the_local_config_less_build() {
+    fn renders_the_local_configs_less_build() {
         let dir = std::env::temp_dir().join(format!("celld-config-{}", crate::random_hex(6)));
         fs::create_dir_all(&dir).unwrap();
         // as a staged copy is: its images' Dockerfiles the source tree's
@@ -469,19 +478,29 @@ mod tests {
         assert!(e.contains("wrangler.local.jsonc"), "{e}");
         crate::write_local_config(&dir, &[("HOST_SECRET".to_string(), "fragment-host-secret")], &[], &[], true, false).unwrap();
         let local = json(&crate::local_config(&dir));
+        let admin_local = json(&crate::admin_local_config(&dir));
         for _ in 0..2 {
-            let v = json(&celld_config(&dir).unwrap());
-            assert!(v.get("build").is_none() && v.get("services").is_none(), "build and the admin's binding dropped");
-            assert!(local.get("services").is_some(), "which the local config has");
+            let (cell, admin) = celld_config(&dir).unwrap();
+            assert_eq!((cell.file_name().unwrap(), admin.file_name().unwrap()), (std::ffi::OsStr::new("wrangler.celld.jsonc"), std::ffi::OsStr::new("wrangler.admin.celld.jsonc")));
+            let v = json(&cell);
+            assert!(v.get("build").is_none(), "build dropped");
+            assert!(local.get("build").is_some(), "which the local config has");
             for (k, kept) in local.as_object().unwrap() {
                 if !DROPPED.iter().any(|(d, _)| d == k) {
                     assert_eq!(v.get(k), Some(kept), "{k} kept as it is");
                 }
             }
-            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets"] {
+            for k in ["assets", "worker_loaders", "workflows", "r2_buckets", "queues", "durable_objects", "migrations", "send_email", "images", "browser", "containers", "secrets_store_secrets", "services"] {
                 assert!(v.get(k).is_some(), "{k} kept");
             }
             assert_eq!(v["secrets_store_secrets"][0]["secret_name"], "fragment-host-secret");
+            let a = json(&admin);
+            assert_eq!(v["services"], serde_json::json!([{ "binding": crate::ADMIN_BINDING, "service": a["name"] }]), "the cell's ADMIN binding names the admin Worker");
+            assert_eq!(a, admin_local, "the admin's local config, which has no build to drop");
+            let classes: Vec<&serde_json::Value> = v["durable_objects"]["bindings"].as_array().unwrap().iter().map(|b| &b["class_name"]).collect();
+            let bound: Vec<&serde_json::Value> = a["durable_objects"]["bindings"].as_array().unwrap().iter().map(|b| &b["class_name"]).collect();
+            assert_eq!(bound, classes, "every one of the cell's classes");
+            assert!(a["durable_objects"]["bindings"].as_array().unwrap().iter().all(|b| b["script_name"] == v["name"]), "each by the cell's script: {a}");
         }
         fs::remove_dir_all(&dir).unwrap();
     }
