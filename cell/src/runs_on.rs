@@ -333,11 +333,12 @@ impl FragmentCell {
         let rows = self.turn_rows(now)?;
         let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
         let proof = mandate::proof(&npub::display(&owner), &turns);
-        // an invite waiting on its owner's email is theirs to answer: it
-        // takes `for` and no mandate (the registry's `invitee_by`), so its
-        // owner's own ask keeps `for` there, and no one else's goes
+        // an invite waiting on its owner's email is theirs to answer: the
+        // platform's route takes `for` and no mandate (the registry's
+        // `invitee_by`), so its owner's own ask keeps `for` there, and no
+        // one else's goes (a fragment's own route of that name is its app's)
         let path = url.path();
-        if path == "/api/invites" || path.starts_with("/api/invites/") {
+        if fragment.is_none() && (path == "/api/invites" || path.starts_with("/api/invites/")) {
             return match proof {
                 Proof::Bare | Proof::Owner(_) => Ok((at.to_string(), None)),
                 Proof::Asker { .. } | Proof::Itself(_) => Err(CellError::new(ErrorCode::Forbidden, "an agent answers its owner's invites for its owner alone, never on someone else's ask")),

@@ -146,9 +146,11 @@ mid-append leaves a torn last line, and the log is read up to it.
   ends unrun, saying to ask again). A turn the bridge gives up on (gone
   quiet, or its agent gone from its chat) is interrupted at its runtime as
   it is forgotten (`Forget`: Claude Code's session and Hermes' relay
-  alike), so it works on as no one's ask no more once it is told ended. A hand-off (another of the computer's agents' words in
-  a chat) is told as the ask of the turn it was said in, unproven; words
-  no known turn was said in are no one's ask.
+  alike, the relay's again at Hermes' next dial should it be lost), so it
+  works on as no one's ask no more once it is told ended. A hand-off (another of the computer's agents' words in
+  a chat) is told as the ask of the turn it was said in, unproven, even
+  read a moment after that turn was let go; words no known turn was said
+  in are no one's ask.
 - **In the journal's order.** A chat's turns are claimed in the order
   their causes were said (`Turn::said_at`, the platform's time, the same
   in every life), admission breaking ties. A new life that reads an

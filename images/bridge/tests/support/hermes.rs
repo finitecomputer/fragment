@@ -106,6 +106,8 @@ pub struct Seen {
     pub dials: u64,
     pub closes: Vec<u16>,
     pub interrupted: u64,
+    /// Every `interrupt_inbound` heard, a turn running for it or not.
+    pub interrupts_heard: u64,
     /// Ops it sent, in order.
     pub ops: Vec<String>,
     /// While away it does not dial.
@@ -344,6 +346,7 @@ async fn serve(seen: Arc<Mutex<Seen>>, ws: net::ClientWs, addr: std::net::Socket
                     }
                 }
                 Some("interrupt_inbound") => {
+                    seen.lock().unwrap().interrupts_heard += 1;
                     let chat = f["chat_id"].as_str().unwrap_or("").to_string();
                     if let Some(tx) = gw.turns.lock().unwrap().get(&chat) {
                         let _ = tx.send(Heard::Interrupt);

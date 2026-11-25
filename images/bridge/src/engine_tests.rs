@@ -5263,8 +5263,8 @@ fn a_turn_is_told_as_whose_ask_it_is() {
 /// agent of this computer's words are no ask of their own (being its
 /// owner's agent's words): Rowan's turn, from Juniper's reply in a turn
 /// Skyler asked, is told as Skyler's, unproven (Skyler's mandate names
-/// Juniper); from a turn Paul asked, as Paul's; from words no known turn
-/// was said in, as no one's. Its owner's own words to Rowan are still
+/// Juniper); from a turn Paul asked, as Paul's, even read after that turn
+/// was let go; from words no known turn was said in, as no one's. Its owner's own words to Rowan are still
 /// Paul's.
 #[test]
 fn a_hand_off_carries_on_the_ask_it_came_from() {
@@ -5294,6 +5294,13 @@ fn a_hand_off_carries_on_the_ask_it_came_from() {
     let pt = to_all(&mut e, &[&j], &v, talk, pauls, T0 + 3)[0].0.turn.clone();
     let on = handed(&mut e, 4, "npub1juniper", "rowan, and this", &pt);
     assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on");
-    let on = handed(&mut e, 5, "npub1juniper", "rowan, from nowhere", "no-such-turn");
+    // Paul's turn over and let go before Rowan reads Juniper's words in it
+    // (its end posted first): carried on still
+    let ended = e.step(heard(Event::End { turn: pt.clone(), outcome: Outcome::Idle }), T0 + 4);
+    answered(&mut e, ended, T0 + 4);
+    assert!(!e.state().turns.contains_key(&pt), "Paul's turn let go");
+    let on = handed(&mut e, 6, "npub1juniper", "rowan, after", &pt);
+    assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on after its turn was let go");
+    let on = handed(&mut e, 7, "npub1juniper", "rowan, from nowhere", "no-such-turn");
     assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "no known turn: no one's");
 }

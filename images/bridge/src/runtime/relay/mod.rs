@@ -709,18 +709,21 @@ impl Loop {
                     self.tell(&turn, seq, &by, "owner", &words, &[]);
                 }
             }
-            Command::Forget { turn } => {
+            Command::Forget { turn } => match self.inflight.get_mut(&turn).filter(|f| f.acked || f.sent) {
                 // let go by the bridge (gone quiet, its agent gone): one
-                // Hermes has is interrupted first, as Claude Code's is, so
-                // it goes on as no one's ask no more once its proof is gone
-                // (FIN-720)
-                if let Some(f) = self.inflight.get(&turn).filter(|f| f.acked || f.sent) {
+                // Hermes has is interrupted as a Stop is (now, and again at
+                // its ack or the next dial, should this one be lost), as
+                // Claude Code's is, so it goes on as no one's ask no more
+                // once its proof is gone (FIN-720); forgotten as it ends,
+                // its words no turn's (the bridge let it go)
+                Some(f) => {
+                    f.stopped = true;
                     let frame = wire::interrupt(&f.profile, &f.chat);
                     crate::ev!("relay.interrupt", { "turn": turn, "why": "let go" });
                     self.send(frame);
                 }
-                self.forget(&turn);
-            }
+                None => self.forget(&turn),
+            },
             Command::Tell { turn, seq, by, by_name, text, files, voice, .. } => self.tell(&turn, seq, &by, &by_name, &text, if voice { &files } else { &[] }),
             Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:

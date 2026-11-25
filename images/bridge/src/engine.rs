@@ -823,6 +823,9 @@ struct EndedTurn {
     fragment: String,
     hop: u32,
     at: u64,
+    /// Whose ask it was, as it was told (`Told::asker`): a hand-off read
+    /// after it is let go carries it on.
+    asked: Option<String>,
 }
 
 pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
@@ -1581,7 +1584,7 @@ impl Engine {
         // turn they were said in, carried on (FIN-720), never its owner's
         // by being theirs
         let handed_ask = (ask == Ask::Message && cause.channel == records::CHAT && self.agents.iter().any(|a| a.identity == asker))
-            .then(|| m.turn.as_deref().and_then(|said_in| self.state.turns.get(said_in)).and_then(|t| self.told_as(t).asker).unwrap_or_default());
+            .then(|| self.ask_said_in(asker, fragment, m.turn.as_deref()).unwrap_or_default());
         let turn = Turn {
             id: id.clone(),
             agent: agent.fragment.clone(),
@@ -1926,6 +1929,20 @@ impl Engine {
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
         self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body, told });
+    }
+
+    /// Whose ask the turn `named` was, that agent `poster` (an identity of
+    /// this computer's) said words in, in `fragment`: one running, or one
+    /// ended a moment ago (its replies read after it is let go, as `hop_of`
+    /// reads its hop); none known, no one's.
+    fn ask_said_in(&self, poster: &str, fragment: &str, named: Option<&str>) -> Option<String> {
+        let named = named?;
+        if let Some(t) = self.state.turns.get(named) {
+            return self.told_as(t).asker;
+        }
+        let poster = self.agents.iter().find(|a| a.identity == poster)?;
+        let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
+        self.ended.iter().rev().filter(fresh).find(|e| e.id == named && e.agent == poster.fragment && e.fragment == fragment).and_then(|e| e.asked.clone())
     }
 
     /// How a turn is told to its agent's fragment (`Told`): its owner's ask
@@ -2818,6 +2835,7 @@ impl Engine {
             open.held = false;
         }
         self.seal(id, false);
+        let asked = self.state.turns.get(id).and_then(|t| self.told_as(t).asker);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         // a live answer still held goes with it: the runtime never had it
@@ -2830,7 +2848,7 @@ impl Engine {
         let (agent, fragment, hop) = (t.agent.clone(), t.fragment.clone(), t.hop);
         self.dirty = true;
         // its replies may be read after it is let go: one hop past it
-        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
+        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now, asked });
         while self.ended.len() > limits::ENDED_HOPS_MAX {
             self.ended.pop_front();
         }

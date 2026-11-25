@@ -526,6 +526,37 @@ async fn a_let_go_turn_is_interrupted_at_hermes() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a let-go turn's interrupt survives Hermes' socket
+/// dropping: lost then, it is sent again at Hermes' next dial.
+#[tokio::test]
+async fn a_let_go_turns_interrupt_is_sent_again_at_the_next_dial() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-let-go-redial");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let quiet = fragment_bridge::engine::Settings { turn_idle_ms: 800, ..support::settings() };
+    let bridge = support::start(support::config(&fake.url(), &dir, quiet), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    hermes.with(|s| s.turn_ms = 20_000);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(WAIT, "its first draft", |w| w.drafts.iter().any(|d| d.2 == turn)).await;
+    // away: its socket closes, so the let-go turn's interrupt is lost
+    hermes.with(|s| s.away = true);
+    fake.until(WAIT, "the quiet turn let go", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["error"] == "the agent stopped answering")).await;
+    assert_eq!(hermes.with(|s| s.interrupts_heard), 0, "Hermes was away");
+    hermes.with(|s| s.away = false);
+    let interrupted = async {
+        while hermes.with(|s| s.interrupts_heard) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(WAIT), interrupted).await.expect("Hermes heard the interrupt once it dialed again");
+    bridge.stop().await;
+}
+
 /// Goal: Stop while a turn waits on an approval closes its card as
 /// stopped and interrupts Hermes, which ends the turn with no reply.
 #[tokio::test]
