@@ -682,7 +682,8 @@ unfinished design, not debt.
   (cell/door.mjs, its rules cell/door-rules.mjs) live in the cell's own
   Worker, as JavaScript, so the Wasm every fragment loads carries none of
   it (Paul, 2026-11-20: "pay for what you use"); the cell's Rust holds only
-  its lever and its probe. Its schema's steps are locked by its own test
+  its lever, its probe and its relay's target check (`DoorRelay`, which
+  reuses `fragment_core::relay`). Its schema's steps are locked by its own test
   (door-rules.test.mjs), not `schema.lock`.
 - **Risk:** every isolate of the cell still loads the module, and the
   door deploys only with the cell.
@@ -700,7 +701,10 @@ unfinished design, not debt.
   makes the connector for every seat (D3) but where an always-on
   computer that does SimpleX keeps an agent's own: its links there, and
   a chat moved from finite.computer to keep (FIN-463).
-- **Risk:** two paths to keep proven for one messenger.
+- **Risk:** two paths to keep proven for one messenger. Files too: the
+  door's runner shares the bridge's file rules (its bounds, notes and
+  kinds, `simplex::run`) but keeps its own receiving and sending state
+  (images/simplex-door/src/files.rs, main.rs), as its link is its own.
 - **Delete when:** existing links move to doors (D4), and the bridge's
   SimpleX module, its door key and the signed-record route are deleted
   (D5).
@@ -1321,6 +1325,26 @@ unfinished design, not debt.
 - **Delete when:** fragment-deploy's `preview.jsonc` and
   `production.jsonc`, deploy/example.jsonc, docs/self-host.md and the
   e2e's configs name routes; then `legacy` goes and its tests read lists.
+
+## A config naming no transcription slot is given Workers AI's Whisper
+
+- **Shortcut:** xtask gives a deployment's `models` that names no
+  `transcription` slot Workers AI's Whisper large v3 turbo at its 46.63
+  neurons a minute (deploy.rs `TRANSCRIPTION_UNTIL_NAMED`, in
+  `models_cell`; a config naming no `models` is read as `{}`), where every
+  deployment transcribed before the slot was its config's (FIN-742). The
+  cell names no transcription model: without the slot it transcribes
+  nothing.
+- **Why:** preview's and production's configs name no slot yet, and a
+  config naming one is refused by a release from before it, so the code
+  lands first and the configs follow.
+- **Risk:** a model named in tooling, not config, until the configs
+  name it; a box's models file without the slot is given a model its node
+  cannot run.
+- **Delete when:** fragment-deploy's `preview.jsonc` and
+  `production.jsonc` name `models.transcription`, and production runs a
+  release that reads it (no rollback past it). Then `models_cell` adds
+  nothing, and a config without the slot transcribes nothing.
 
 ## An older bridge reads the state's snapshot, not its log
 

@@ -106,15 +106,36 @@ pub const STANDARD_LABEL: &str = "Standard";
 
 /// `FRAGMENT_MODELS` on a plain node: every slot on Workers AI as unnamed
 /// (`fragment_core::models::Models::defaults`), each route labelled, so its
-/// Settings offers two routes (Paul, 2026-10-24). Named as configs named
-/// them before routes were a list, and read as a deploy reads one
+/// Settings offers two routes (Paul, 2026-10-24), and its transcriptions on
+/// Workers AI's Whisper (`whisper_slot`), as preview's are. Named as configs
+/// named them before routes were a list, and read as a deploy reads one
 /// (`fragment_core::models::legacy`), so the e2e runs today's configs.
 pub fn plain_models() -> Value {
     listed(json!({
         "cheap": { "provider": "workers_ai", "model": fragment_core::models::CHEAP_MODEL, "label": RECOMMENDED_LABEL },
-        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL }
+        "medium": { "provider": "workers_ai", "model": fragment_core::models::MEDIUM_MODEL, "label": STANDARD_LABEL },
+        "transcription": whisper_slot()
     }))
 }
+
+/// A transcription slot on Workers AI's Whisper large v3 turbo at its 46.63
+/// neurons a minute (its pricing page, read 2026-10-07), as preview's
+/// config names it: the fake answers it as its catalog says.
+pub fn whisper_slot() -> Value {
+    json!({ "provider": "workers_ai", "model": fragment_fakes::workers_ai::TRANSCRIBE_MODEL, "price": { "neurons_a_minute": WHISPER_NEURONS_A_MINUTE } })
+}
+
+/// `whisper_slot`'s price, neurons a minute of audio.
+pub const WHISPER_NEURONS_A_MINUTE: f64 = 46.63;
+
+/// The transcription slot's key on a node shaped as the private tier
+/// (`Shape::PrivateTier`): a test value, which the model fake asks for of
+/// its transcription model alone.
+pub const TRANSCRIPTION_KEY: &str = "tk_transcribe_e2e";
+
+/// The price of the private tier's transcription slot, dollars a minute of
+/// audio: OpenAI's whisper-1 list (2026-11-24), a test value.
+pub const TRANSCRIPTION_AUDIO_MINUTE: f64 = 0.006;
 
 /// A config's `models` of the shape before routes were a list, as the cell
 /// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
@@ -157,7 +178,10 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// `DEEP_MAX_TOKENS` a call: Private's Tinfoil's DeepSeek V4.1 Flash
 /// (`private_deep`), falling back to Private's Fast; Standard's
 /// OpenRouter's (`standard_deep`, at its own ceiling,
-/// `openrouter_deep_routing`), falling back to Cloudflare.
+/// `openrouter_deep_routing`), falling back to Cloudflare. Its
+/// transcriptions on an OpenAI-compatible API, a self-hosted Whisper
+/// server (the fake's face), on a key of their own (`TRANSCRIPTION_KEY`),
+/// at `TRANSCRIPTION_AUDIO_MINUTE`.
 pub fn private_tier_models(fake: &str) -> Value {
     let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
@@ -168,7 +192,10 @@ pub fn private_tier_models(fake: &str) -> Value {
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep }))
+    // its transcriptions on a self-hosted Whisper server, the fake's
+    // OpenAI-compatible face, at the dollars a minute its slot names
+    let transcription = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": TRANSCRIPTION_AUDIO_MINUTE } });
+    listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep, "transcription": transcription }))
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private
@@ -951,6 +978,7 @@ impl Suite {
                         key("vision", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         key("private_deep", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("standard_deep", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
+                        key("transcription", "fragment-transcription-key", TRANSCRIPTION_KEY),
                     ],
                     _ => vec![],
                 }
