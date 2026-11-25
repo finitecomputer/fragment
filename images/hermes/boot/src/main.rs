@@ -890,8 +890,10 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     // a connection's skill is shown to an agent that holds the connection
     // (read again each time its config is, so it follows a connect, a
     // disconnect and a new skill within that cadence)
-    let providers = a.credentials.iter().map(|c| c.provider.clone()).collect();
-    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &providers, &dir.join("skills"));
+    // (read and written under `skills::VISIBLE`: an install hiding a skill
+    // it brings is never undone by a config read from the set before it)
+    let _visible = skills::VISIBLE.lock().unwrap_or_else(|e| e.into_inner());
+    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &skills::connected(&a.credentials), &dir.join("skills"));
     let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE), &withheld);
     let before = std::fs::read_to_string(&config).ok();
     if before.as_deref() != Some(text.as_str()) {
@@ -1226,17 +1228,22 @@ type SkillsFound = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
 /// One install of the managed skills, in the background (skills.rs), as the
 /// computer's first agent of its owner: none while it has no such agent,
 /// or while the platform holds the computer (`quiet`).
-fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, quiet: &std::sync::Arc<Quiet>) -> Option<tokio::task::JoinHandle<()>> {
+fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, quiet: &std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) -> Option<tokio::task::JoinHandle<()>> {
     if quiet.paused() {
         return None;
     }
     let reader = skills::reader(agents, owner)?.clone();
+    // each profile, with the connections its agent holds now: a connection
+    // skill the install brings is hidden from each that lacks it before
+    // its file is written (its config again on the models' cadence)
+    let profiles: Vec<(PathBuf, std::collections::BTreeSet<String>)> = agents.iter().map(|a| (hermes::profile_dir(&home(), &a.fragment), skills::connected(&a.credentials))).collect();
     let (api, owner, found, held) = (api.clone(), owner.to_string(), found.clone(), quiet.clone());
     let busy = Busy::new(quiet);
     Some(tokio::spawn(async move {
         let _busy = busy;
         let t = Instant::now();
-        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN)).await;
+        let hide = |brought: &[(String, String)]| profiles.iter().for_each(|(dir, held)| hide_brought(dir, held, brought, ids));
+        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN), &hide).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
         match done {
             Ok(d) => {
@@ -1253,6 +1260,21 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
     }))
+}
+
+/// A profile's config (`dir`'s) hiding each connection skill an install
+/// brings whose connection its agent does not hold (`held`), before the
+/// skill's file is written (`skills::install`): a turn in between lists
+/// none it may not use. Its own skill of the name is left (`hidden_for`);
+/// a profile with no config yet is written with them by `write_config`.
+fn hide_brought(dir: &Path, held: &std::collections::BTreeSet<String>, brought: &[(String, String)], ids: Option<(u32, u32)>) {
+    let config = dir.join("config.yaml");
+    let Ok(text) = std::fs::read_to_string(&config) else { return };
+    let names = skills::hidden_for(brought, held, &dir.join("skills"));
+    if let Some(next) = skills::with_hidden(&text, &names) {
+        write_whole(&config, &next, ids);
+        ev!("profile.skills_hidden", { "profile": dir.file_name().map(|n| n.to_string_lossy().into_owned()), "skills": names });
+    }
 }
 
 /// The open chats asked to rebuild their stored prompts on their next turn
@@ -1708,7 +1730,7 @@ async fn boot_main() {
     let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
     let owner = computer.owner.clone();
     let skills_found = SkillsFound::default();
-    let mut skills_task = spawn_skills(&api, &hermes_agents, &owner, &skills_found, &quiet);
+    let mut skills_task = spawn_skills(&api, &hermes_agents, &owner, &skills_found, &quiet, ids);
     let mut last_skills = Instant::now();
     // idle desktops: looked at on their cadence, never while held
     let mut last_idle_look = Instant::now();
@@ -1748,7 +1770,7 @@ async fn boot_main() {
             }
         };
         if skills_due {
-            skills_task = spawn_skills(&api, &agents::hermes(&agents), &owner, &skills_found, &quiet);
+            skills_task = spawn_skills(&api, &agents::hermes(&agents), &owner, &skills_found, &quiet, ids);
             last_skills = Instant::now();
         }
         // a desktop no one uses is stopped (desktop.rs); not while held, so

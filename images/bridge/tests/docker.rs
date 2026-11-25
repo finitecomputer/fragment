@@ -5027,9 +5027,20 @@ async fn an_open_chat_lists_a_connections_skill_once_connected() {
     fake.skills("skills", &[("skills/notes/garden-log/SKILL.md", GARDEN), ("skills/work/issue-desk/SKILL.md", ISSUES)]);
     let model = Model::start("0.0.0.0:0").await;
     let chat = fake.chat("talk", &["juniper"]);
-    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SKILLS_MS", "2000"), ("HERMES_BOOT_MODEL_MS", "1000")]);
-    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
+    // the models' cadence slow: the config hides Linear's skill from the
+    // install itself, never from a later models round (Codex on #1325)
+    let c = Container::run(&hermes_tag(), fake.addr.port(), model.addr.port(), &[("HERMES_BOOT_SKILLS_MS", "2000"), ("HERMES_BOOT_MODEL_MS", "20000")]);
     let config = || c.exec_out(&["cat", "/data/hermes/profiles/juniper--k3x9/config.yaml"]);
+    // the moment Linear's skill is on disk, juniper's config hides it: a
+    // turn between the install and the next models round lists no skill
+    // of a connection juniper lacks
+    let t = Instant::now();
+    while !c.exec(&["test", "-f", "/data/hermes/managed-skills/work/issue-desk/SKILL.md"]) {
+        assert!(t.elapsed() < Duration::from_secs(120), "Linear's skill is never installed: {}", c.logs());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(config().contains("disabled: [\"issue-desk\"]"), "installed, Linear's skill is already hidden from juniper: {}\n{}", config(), c.logs());
+    fake.until(120_000, "Hermes' bridge to follow its chat", |w| w.live_sockets() >= 2).await;
     let t = Instant::now();
     while !config().contains("disabled: [\"issue-desk\"]") {
         assert!(t.elapsed() < Duration::from_secs(60), "Linear's skill is never hidden from juniper: {}\n{}", config(), c.logs());
@@ -5056,7 +5067,7 @@ async fn an_open_chat_lists_a_connections_skill_once_connected() {
     fake.with(|w| w.computer["agents"][0]["credentials"] = json!([{ "provider": "linear", "kind": "connection", "env": ["LINEAR_OAUTH_ACCESS_TOKEN"], "placeholder": "fcx_linear_0123456789abcdef0123456789abcdef", "hosts": ["api.linear.app"] }]));
     let t = Instant::now();
     while !(!config().contains("issue-desk") && refreshed(&c) > base) {
-        assert!(t.elapsed() < Duration::from_secs(60), "the connect never asked a refresh: {}\n{}", config(), c.logs().lines().filter(|l| l.contains("prompts.") || l.contains("profile.")).collect::<Vec<_>>().join("\n"));
+        assert!(t.elapsed() < Duration::from_secs(90), "the connect never asked a refresh: {}\n{}", config(), c.logs().lines().filter(|l| l.contains("prompts.") || l.contains("profile.")).collect::<Vec<_>>().join("\n"));
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     turn("what gate was it").await;
@@ -5068,7 +5079,7 @@ async fn an_open_chat_lists_a_connections_skill_once_connected() {
     fake.with(|w| w.computer["agents"][0]["credentials"] = json!([]));
     let t = Instant::now();
     while !(config().contains("disabled: [\"issue-desk\"]") && refreshed(&c) > base) {
-        assert!(t.elapsed() < Duration::from_secs(60), "the disconnect never asked a refresh: {}", config());
+        assert!(t.elapsed() < Duration::from_secs(90), "the disconnect never asked a refresh: {}", config());
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
     turn("and the fence").await;

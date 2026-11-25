@@ -696,8 +696,7 @@ pub fn profile_config(agent: &Agent, name: &str, role: Option<&str>, home: Home,
     // each other one (`skills::withheld`) is disabled for this profile by
     // name, as Hermes' `skills.disabled` takes them. None: as it was.
     if !withheld_skills.is_empty() {
-        let names: Vec<String> = withheld_skills.iter().map(|s| q(s)).collect();
-        y.push_str(&format!("  disabled: [{}]\n", names.join(", ")));
+        y.push_str(&crate::skills::disabled_line(withheld_skills));
     }
     // Capable models see pixels directly. The managed image plugin treats
     // this backend as a fallback for text-only/unknown models, retaining
