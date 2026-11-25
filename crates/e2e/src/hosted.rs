@@ -362,6 +362,7 @@ fn nodeless(only: Option<Vec<String>>, except: Vec<String>, rung: Rung, shared: 
         cli,
         scratch,
         project: PathBuf::new(),
+        ram: None,
         shape: Shape::Plain,
         door_url: None,
         secrets: devstack::Secrets::Store,
