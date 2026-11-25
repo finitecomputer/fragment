@@ -968,6 +968,19 @@ test("a door a link moves into starts only from that link: its connect, or a sta
   assert.deepEqual([late.status, (await late.json()).error], [409, "has_saves"]);
 });
 
+test("a save kept before its SHA-256 was (the door's step 9) is handed back with one, read through as a stream first, and keeps it (Codex's fix-check of #1541)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "a save from before");
+  d.st.sql.exec("UPDATE saves SET sha = NULL");
+  d.c.signal = async () => void (d.c.running = false);
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("a save from before")))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assert.deepEqual([r.status, r.headers.get("x-door-sha256"), await r.text()], [200, sha, "a save from before"]);
+  assert.equal(d.st.sql.exec("SELECT sha FROM saves").one().sha, sha, "kept");
+});
+
 test("an ended door has no way back: refused (410), never a save of nothing that would run its computer's old copy, now or after a restart (Codex's round on #1541)", async () => {
   const { d } = await saved();
   await d.end();

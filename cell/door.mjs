@@ -420,16 +420,27 @@ export class SimplexDoor extends DurableObject {
       const r = restoreOf(this.#saves(), d.saved);
       if (r.kind === "none") return new Response(null, { status: 204 });
       if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
-      const obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
+      let obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
       if (obj) {
         // streamed (a save may be 64 MiB), with the SHA-256 taken as it
         // came (`x-door-sha256`), as an import carries one the other way:
         // the computer that places it checks it, so a copy damaged on its
         // way (seen once on Cloudflare, between here and its computer's
         // container) is refused, and asked for again
-        const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", "content-type": "application/octet-stream" };
-        if (r.save.sha) headers[FILE_SHA_HEADER] = r.save.sha;
-        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: r.save.bytes, sha: r.save.sha ?? null });
+        // a save from before its SHA-256 was kept (the door's step 9) is
+        // hashed first, read through once as a stream, and kept: every way
+        // back carries one
+        let sha = r.save.sha;
+        if (!sha) {
+          const hashed = hashing();
+          await obj.body.pipeThrough(hashed.stream).pipeTo(new WritableStream());
+          sha = await hashed.digest;
+          this.ctx.storage.sql.exec("UPDATE saves SET sha = ? WHERE generation = ? AND seq = ?", sha, r.save.generation, r.save.seq);
+          obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
+          if (!obj) continue;
+        }
+        const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" };
+        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: r.save.bytes, sha });
         return new Response(obj.body, { status: 200, headers });
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
