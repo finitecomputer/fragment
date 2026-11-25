@@ -107,7 +107,7 @@ folded once; and a count names its fragment's life, so a deleted
 fragment's never reaches the name made again. A crash can lose at most
 the open minute's unconfirmed counts, in the owner's favour.
 A self-hosted node's celld honors `allowUnconfirmed` the same way from
-futurepaul/celld#33 (no gate waits on such a write); one without it holds
+finitecomputer/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
