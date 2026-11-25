@@ -208,16 +208,18 @@ own versions, and only in the folders the real one shares. It brings in:
   lacks them.
 
 It leaves the rest as it is, for a person, and lists it:
-- **both:** pages changed here and in the old brain since, another page
-  the old brain moved onto a page's path, or a page whose asset differs
-  here;
+- **both:** pages changed or deleted here and changed in the old brain
+  since, another page the old brain moved onto a page's path, or a page
+  whose asset differs here;
 - **gone:** pages the old brain deleted since. It deletes nothing;
 - **unsynced:** pages your old agent edited and never synced: the old
   brain never had that text;
 - **missing:** pages your copy should hold and doesn't;
+- **extra:** files your copy holds that the old brain didn't list (a
+  page made and never synced, say): only the copy has them;
 - **unshared:** folders the real one doesn't share: left out when it
-  was made, for only some to read, or made since in the old brain. Never
-  bring one in yourself;
+  was made, for only some to read, or made since in the old brain (even
+  at a shared folder's path). Never bring one in yourself;
 - **refused:** a page's path that climbs out of the brain or through a
   link.
 

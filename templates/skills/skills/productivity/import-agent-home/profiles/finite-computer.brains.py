@@ -73,9 +73,11 @@ def assets(root, path):
     # path in the brain (under the note's wiki, its top folder).
     full = inside(root, path)
     try:
+        if full is None or not stat.S_ISREG(os.lstat(full).st_mode):
+            return []
         with open(full, errors="replace") as f:
             lines = f.read(1 << 20).split("\n")
-    except (OSError, TypeError):
+    except OSError:
         return []
     if not lines or lines[0].strip() != "---":
         return []
@@ -91,21 +93,46 @@ def assets(root, path):
     return found
 
 
-def load(path, what):
+MISSING = object()
+
+
+def read_json(path, what):
+    # A plain file's JSON, never one through a link; MISSING when absent.
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return MISSING
+    except OSError:
+        stop(f"{what} can't be read: {path}")
+    if not stat.S_ISREG(mode):
+        stop(f"{what} isn't a plain file: {path}")
     try:
         with open(path) as f:
             return json.load(f)
-    except FileNotFoundError:
-        return None
     except (OSError, ValueError):
         stop(f"{what} can't be read as JSON: {path}")
+
+
+def write_json(path, value):
+    # Written whole beside it under a dot name (which never syncs), then
+    # moved over it: a link there is replaced, never followed.
+    folder, base = os.path.split(path)
+    partial = os.path.join(folder, "." + base + ".partial")
+    try:
+        os.unlink(partial)
+    except FileNotFoundError:
+        pass
+    fd = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w") as f:
+        json.dump(value, f, indent=1, sort_keys=True)
+    os.replace(partial, path)
 
 
 usage = "usage: start|catch-up <old id> <name file> <brain folder> <folder> | copied <old id> <name file> <staged folder>"
 if len(sys.argv) < 2 or (sys.argv[1], len(sys.argv)) not in (("start", 6), ("catch-up", 6), ("copied", 5)):
     sys.exit(usage)
 mode, old, name_file = sys.argv[1:4]
-named = load(name_file, "the name file") or {}
+named = read_json(name_file, "the name file")
 versions = named.get("versions") if isinstance(named, dict) else None
 
 
@@ -115,11 +142,21 @@ def text(value):
     return value
 
 
+def ident(brain, id_):
+    # Who a page or folder is in the old brain: its brain (null for the
+    # tree's own) and its id there. A path can change hands; this can't.
+    if brain is not None:
+        text(brain)
+    return [brain, text(id_)]
+
+
 try:
     sequence = int(versions["sequence"])
-    folders = {text(f["path"]): bool(f["read"]) for f in versions["folders"]}
+    # path -> (identity, read)
+    folders = {text(f["path"]): (ident(f["brain"], f["id"]), bool(f["read"])) for f in versions["folders"]}
+    # path -> (identity, revision, sha256)
     listed = {
-        text(p["path"]): (text(p["object"]), int(p["revision"]), text(p["sha256"]))
+        text(p["path"]): (ident(p["brain"], p["object"]), int(p["revision"]), text(p["sha256"]))
         for p in versions["pages"]
     }
 except (TypeError, KeyError, ValueError):
@@ -128,10 +165,7 @@ except (TypeError, KeyError, ValueError):
 if mode == "copied":
     staged = sys.argv[4]
     named["exact"] = sorted(p for p, (_, _, h) in listed.items() if clean(p) and sha(staged, p) == h)
-    partial = name_file + ".partial"
-    with open(partial, "w") as f:
-        json.dump(named, f, indent=1)
-    os.replace(partial, name_file)
+    write_json(name_file, named)
     print(json.dumps({"pages": len(listed), "exact": len(named["exact"])}))
     sys.exit(0)
 work, other = sys.argv[4:6]
@@ -147,29 +181,22 @@ def folder_of(path, known):
 
 
 record_path = os.path.join(work, RECORD)
-record = load(record_path, RECORD)
-if record is not None:
+record = read_json(record_path, RECORD)
+if record is not MISSING:
     try:
-        assert record["from"] == "finite.computer"
+        assert isinstance(record, dict) and record["from"] == "finite.computer"
         text(record["old"])
         int(record["sequence"])
-        shared = set(record["folders"])
-        assert all(clean(f) for f in shared)
+        assert all(clean(f) and ident(*i) for f, i in record["folders"].items())
         for path, seen in record["pages"].items():
             assert clean(path)
-            str(seen["object"]), int(seen["revision"]), seen["written"]
+            ident(*seen["id"]), int(seen["revision"])
+            if seen["written"] is not None:
+                text(seen["written"])
     except (AssertionError, TypeError, KeyError, ValueError, AttributeError):
         stop(f"{RECORD} is not one this file wrote: change nothing")
     if record["old"] != old:
         stop(f"{RECORD} is another brain's ({record['old']}), not {old}")
-
-
-def save():
-    partial = os.path.join(work, "." + RECORD + ".partial")  # a dot name never syncs
-    with open(partial, "w") as f:
-        json.dump(record, f, indent=1, sort_keys=True)
-    os.replace(partial, record_path)
-
 
 if mode == "start":
     # The folders the brain shares: each the old agent could read with a
@@ -177,7 +204,7 @@ if mode == "start":
     # From a reference copy, `copied` checked its staged pages already.
     staged, exact = other, named.get("exact")
     pages = {}
-    for path, (obj, revision, old_sha) in listed.items():
+    for path, (id_, revision, old_sha) in listed.items():
         here = sha(work, path) if clean(path) else None
         if here is None:
             continue
@@ -185,50 +212,72 @@ if mode == "start":
         # brain never got: recorded with nothing written, so any later
         # change to it is for a person.
         exact_text = path in exact if isinstance(exact, list) else sha(staged, path) == old_sha
-        written = here if exact_text else None
-        pages[path] = {"object": obj, "revision": revision, "sha256": old_sha, "written": written}
+        pages[path] = {"id": id_, "revision": revision, "sha256": old_sha, "written": here if exact_text else None}
     with_pages = {folder_of(p, folders) for p in pages}
-    shared = sorted(
-        f for f, read in folders.items()
+    shared = {
+        f: id_ for f, (id_, read) in sorted(folders.items())
         if read and clean(f) and (f in with_pages or (
             not any(folder_of(p, folders) == f for p in listed)
             and inside(work, f) and os.path.isdir(inside(work, f))
         ))
-    )
-    if record is not None:
+    }
+    if record is not MISSING:
         same = record["folders"] == shared and all(
             sha(work, p) == seen["written"] or seen["written"] is None
             for p, seen in record["pages"].items()
         )
         if not same:
             stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
-        print(json.dumps({"recorded": len(record["pages"]), "shared folders": shared, "again": True}))
+        print(json.dumps({"recorded": len(record["pages"]), "shared folders": sorted(shared), "again": True}))
         sys.exit(0)
     record = {"from": "finite.computer", "old": old, "sequence": sequence, "folders": shared, "pages": pages}
-    save()
+    write_json(record_path, record)
     left = sorted(f for f in folders if f not in shared)
-    print(json.dumps({"recorded": len(pages), "shared folders": shared, "not shared": left}))
+    print(json.dumps({"recorded": len(pages), "shared folders": sorted(shared), "not shared": left}))
     sys.exit(0)
 
-if record is None:
+if record is MISSING:
     sys.exit(f"NO RECORD: no {RECORD} here; compare by hand")
 exact = named.get("exact")
 if not isinstance(exact, list):
     sys.exit("NO VERSIONS: this copy was kept without its pages checked (`copied`); compare by hand")
 exact = set(exact)
 copy_dir = other
-shared = set(record["folders"])
-known = set(folders) | shared
+shared = record["folders"]
+known = set(folders) | set(shared)
+
+
+def shared_here(folder):
+    # Shared, and the same folder in this copy, not another at its path.
+    return folder in shared and folder in folders and folders[folder][0] == shared[folder]
+
+
+def asset_plan(names):
+    # (fine, to copy): not fine when one is unreachable, in neither, or
+    # different here; never one written over.
+    plan = []
+    for asset in names:
+        there, here = sha(copy_dir, asset), sha(work, asset)
+        if inside(copy_dir, asset) is None or inside(work, asset) is None:
+            return False, []
+        if here is None and there is None:
+            return False, []
+        if here is not None and there is not None and here != there:
+            return False, []
+        if here is None:
+            plan.append(asset)
+    return True, plan
+
+
 older = sequence < int(record["sequence"])
-out = {k: [] for k in ("added", "updated", "assets", "both", "gone", "unsynced", "missing", "older", "refused")}
-unshared, healed = {}, 0
-taken = []
-for path, (obj, revision, old_sha) in sorted(listed.items()):
+out = {k: [] for k in ("added", "updated", "assets", "both", "gone", "unsynced", "missing", "older", "refused", "extra")}
+unshared, healed, taken = {}, 0, []
+for path, (id_, revision, old_sha) in sorted(listed.items()):
     if not clean(path) or inside(copy_dir, path) is None or inside(work, path) is None:
         out["refused"].append(path)  # climbs out, or through a link
         continue
     folder = folder_of(path, known) or ""
-    if folder not in shared:
+    if not shared_here(folder):
         unshared[folder] = unshared.get(folder, 0) + 1
         continue
     there = sha(copy_dir, path)
@@ -236,62 +285,80 @@ for path, (obj, revision, old_sha) in sorted(listed.items()):
         out["missing"].append(path)  # listed, but not in this copy
         continue
     seen, here = record["pages"].get(path), sha(work, path)
+    fine, plan = asset_plan(assets(copy_dir, path))
     if here == there:
-        # Already here, byte for byte: settled, and recorded if it wasn't.
+        # Already here, byte for byte: settled once its assets are, and
+        # recorded if it wasn't.
+        if not fine:
+            out["both"].append(path)
+            continue
+        taken.append(("same", path, id_, revision, old_sha, plan))
         if path in exact and (
             seen is None
-            or (seen["object"] == obj and seen["revision"] < revision)
-            or (seen["object"] != obj and not older)
+            or (seen["id"] == id_ and seen["revision"] < revision)
+            or (seen["id"] != id_ and not older)
         ):
-            record["pages"][path] = {"object": obj, "revision": revision, "sha256": old_sha, "written": here}
+            record["pages"][path] = {"id": id_, "revision": revision, "sha256": old_sha, "written": here}
             healed += 1
         continue
     if path not in exact:
         out["unsynced"].append(path)  # an edit the old brain never got
         continue
-    if seen is not None and seen["object"] == obj and revision <= seen["revision"]:
+    if seen is not None and seen["id"] == id_ and revision <= seen["revision"]:
         continue  # the brain has this version, or a newer one
     if older:
         out["older"].append(path)  # this copy is older than the brain's
         continue
     if seen is None and here is None:
         kind = "added"
-    elif seen is not None and seen["object"] == obj and here == seen["written"]:
+    elif seen is not None and seen["id"] == id_ and here is not None and here == seen["written"]:
         kind = "updated"  # newer there, unchanged here
     else:
-        out["both"].append(path)  # changed here too, made here, or another page
+        out["both"].append(path)  # changed or deleted here, made here, or another page
         continue
-    names = assets(copy_dir, path)
-    clash = [a for a in names if sha(work, a) not in (None, sha(copy_dir, a))]
-    if clash or any(sha(copy_dir, a) is None and sha(work, a) is None for a in names):
-        out["both"].append(path)  # its asset differs here, or isn't in the copy
+    if not fine:
+        out["both"].append(path)  # its asset differs here, or can't come
         continue
-    taken.append((kind, path, obj, revision, old_sha, names))
+    taken.append((kind, path, id_, revision, old_sha, plan))
 
-for kind, path, obj, revision, old_sha, names in taken:
-    for asset in names:
+for kind, path, id_, revision, old_sha, plan in taken:
+    for asset in plan:
         if sha(work, asset) is None and copy(copy_dir, work, asset):
             out["assets"].append(asset)
+    if kind == "same":
+        continue
     if copy(copy_dir, work, path):
-        record["pages"][path] = {"object": obj, "revision": revision, "sha256": old_sha, "written": sha(work, path)}
+        record["pages"][path] = {"id": id_, "revision": revision, "sha256": old_sha, "written": sha(work, path)}
         out[kind].append(path)
     else:
         out["refused"].append(path)
+
+# Files the copy holds that no listed page is: kept for a person, unless
+# an asset the brain holds the same.
+for top, dirs, files in os.walk(copy_dir):
+    for name in files:
+        rel = os.path.relpath(os.path.join(top, name), copy_dir).replace(os.sep, "/")
+        if rel in listed:
+            continue
+        if "/raw/assets/" in "/" + rel and sha(copy_dir, rel) is not None and sha(copy_dir, rel) == sha(work, rel):
+            continue
+        out["extra"].append(rel)
+out["extra"].sort()
 
 if not older:
     # Pages the old brain deleted since: listed, while they're here.
     out["gone"] = sorted(
         p for p in record["pages"]
-        if p not in listed and folders.get(folder_of(p, known)) and sha(work, p) is not None
+        if p not in listed and shared_here(folder_of(p, known) or "")
+        and folders[folder_of(p, known)][1] and sha(work, p) is not None
     )
 record["sequence"] = max(int(record["sequence"]), sequence)
-save()
-unread = sorted(f for f, read in folders.items() if not read)
+write_json(record_path, record)
+unread = sorted(f for f, (_, read) in folders.items() if not read)
 report = os.path.normpath(work) + ".catch-up.json"
-held = ("both", "gone", "unsynced", "missing", "older", "refused")
+held = ("both", "gone", "unsynced", "missing", "older", "refused", "extra")
 settled = not unshared and not any(out[k] for k in held)
-with open(report, "w") as f:
-    json.dump(dict(out, unshared=unshared, unread=unread, settled=settled), f, indent=1)
+write_json(report, dict(out, unshared=unshared, unread=unread, settled=settled))
 print(json.dumps(
     {k: len(v) for k, v in out.items()}
     | {"healed": healed, "recorded": len(record["pages"]), "not shared here": sorted(unshared),
