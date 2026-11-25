@@ -12,10 +12,11 @@
 //! it holds (`openbao::binary_from`'s bytes) pinned beside it. The cache's
 //! `bao` is checked against that before anything runs it.
 
-/// OpenBao 2.7.2 (2026-10-26): the static seal (2.4) and declarative
+/// OpenBao 2.7.3 (2026-11-19), a security release (GHSA-fgmw-h9wp-wc7g,
+/// GHSA-h8fh-pmch-cjww): the static seal (2.4) and declarative
 /// self-initialization (2.4) are in it; 2.7 removed the `file` storage
 /// backend, whose successor for one server is `pebbledb`.
-pub const OPENBAO_VERSION: &str = "2.7.2";
+pub const OPENBAO_VERSION: &str = "2.7.3";
 
 /// One platform's tarball: `openbao_<OPENBAO_VERSION>_<platform>.tar.gz` at
 /// https://github.com/openbao/openbao/releases/download/v<OPENBAO_VERSION>/.
@@ -30,31 +31,31 @@ pub struct Tarball {
     pub bao_sha256: &'static str,
 }
 
-/// From https://github.com/openbao/openbao/releases/download/v2.7.2/checksums.txt,
+/// From https://github.com/openbao/openbao/releases/download/v2.7.3/checksums.txt,
 /// whose signature (checksums.txt.gpgsig, by subkey E617 DCD4 065C 2AFC
 /// 0B2C F7A7 BA8B C08C 0F69 1F94 of the primary key above, fetched from
 /// openbao.org and identical to the release's copy) checked good on
-/// 2026-11-11, when 2.7.2 was the newest 2.x. Each `bao_sha256` from that
-/// tarball, fetched and checked against its line, on 2026-11-12.
+/// 2026-11-24, when 2.7.3 was the newest 2.x. Each `bao_sha256` from that
+/// tarball, fetched and checked against its line, the same day.
 pub const TARBALLS: [Tarball; 4] = [
     Tarball {
         platform: "darwin_amd64",
-        sha256: "ea62ce00b81a2170a5daa8589f8420434e72d4d4ebcd2a4cbfa9add507a2602d",
-        bao_sha256: "42b8ea5854b408abbfcd8c93de9dd4d3eb08c43fe1a90b65e3ae908634240ab7",
+        sha256: "fff61d45dd5ca7bbae8668fc07e9d6c7a6662e94e5cdf729b798a8cfcb3a8196",
+        bao_sha256: "785f501279c33968b1ee6b7237c2014ee0a015d95cd8ff98bbabbd7b36abfd17",
     },
     Tarball {
         platform: "darwin_arm64",
-        sha256: "2b4fc131910f4b075b2e1c9a9de67c461489491a8f03fbdc73387294d67d9547",
-        bao_sha256: "3e274a55364efb3f1f6af98f560b8b44e2b75a7d7c88527f564f827ae80c7e5a",
+        sha256: "1189f85499b36c0134e8e6bf0bffe71dfe1b085ab5d223324a5bccc2a59d62f7",
+        bao_sha256: "41af7f5962d454fc61d0967e6f2b77de46a579a3d07d71b6d657027b0e8d1745",
     },
     Tarball {
         platform: "linux_amd64",
-        sha256: "582b1f3c2fdc5afd443b2d57a225ef654de75adea609fdb66731fd582a9cbc96",
-        bao_sha256: "9c5f36287c673f386e1533e9c044169a248e4ee50dd54810fa766e95bd41b788",
+        sha256: "131df9a21cf3dd2dff47107110b369c9974cbdaa482bcbc723b81b3403c68ecd",
+        bao_sha256: "3bc86bbae4adaa1c79bb84670a09d4add3a4a4533d8f7eae95e23127a64a6ff8",
     },
     Tarball {
         platform: "linux_arm64",
-        sha256: "5b97bf816fa820e5e521abec1db19c6161fcca2f666cf4a84e335089c0e83edd",
-        bao_sha256: "23545b225354e2b4c8ef3994350989757ad29bd36aaeb5dc38f26894f63e5e68",
+        sha256: "b505b07af4206fdf0e81b747fcb7e9e63f2c2b05e26ead973cce62d0ed07d0e0",
+        bao_sha256: "9b57f890442e5703965585ab8eff2d5d42448af468a5fcc16510f464e3a51871",
     },
 ];
