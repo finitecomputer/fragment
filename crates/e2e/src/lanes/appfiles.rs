@@ -173,5 +173,24 @@ pub fn appfiles(s: &mut Suite, api: &crate::api::Api) -> Result<()> {
     s.ok("inside it the same call is a replay again", r.body["replayed"] == true && changes() == 2, &r);
     let r = window(Value::Null)?;
     s.ok("(the window is a week again)", r.status == 200 && r.body["ledgerMs"] == week, &r);
+
+    // the platform's own failure says a sentence and a reference, never
+    // its words: to the app's code through `Files` (which may pass it on to
+    // a visitor as `app_failed`), and past the edge however long it is
+    // (fragment_core::public_error::said)
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": other, "op": "forget-repo" })))?;
+    s.ok("(a test hook loses a fragment's repository from its facts)", r.status == 200, &r);
+    let r = api.op(&owner, &other, "stat", "s1", json!({ "path": "whoami.txt" }))?;
+    s.ok(
+        "a files read the platform fails reaches the app's code as a sentence and a reference, not its storage's words",
+        r.code() == Some(ErrorCode::AppFailed) && r.message().contains("(reference ") && !r.message().contains("has no repo"),
+        &r,
+    );
+    let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "host-failed", "bytes": 70_000 })))?;
+    s.ok(
+        "the platform's own failure over 64 KiB says a sentence and a reference, none of its diagnostic",
+        r.status == 500 && r.code() == Some(ErrorCode::HostFailed) && r.message().contains("(reference ") && !r.text.contains("D1_ERROR") && r.text.len() < 1024,
+        format!("{} bytes: {}", r.text.len(), r.text.chars().take(300).collect::<String>()),
+    );
     Ok(())
 }

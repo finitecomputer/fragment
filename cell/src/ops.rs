@@ -600,6 +600,22 @@ impl FragmentCell {
                 self.exec("UPDATE paid SET settled = 0 WHERE run = ?", vec![SqlStorageValue::Integer(run)])?;
                 json!({ "receipts": keys.len() })
             }
+            Some("forget-repo") => {
+                // a fragment whose facts lost its repository, as a storage
+                // fault might leave it: its files' reads fail as the
+                // platform's own (`fragment::missing`), which the app's
+                // `Files` must not hand its code word for word
+                self.del_meta(MetaKey::Repo)?;
+                json!({ "ok": true })
+            }
+            Some("host-failed") => {
+                // the platform's own failure with a diagnostic of `bytes`,
+                // past what the edge reads of a refusal (error.rs
+                // `public_answer`): it says a sentence all the same
+                let bytes = body["bytes"].as_u64().unwrap_or(0).min(1 << 20) as usize;
+                let diagnostic = format!("D1_ERROR: a test hook's failure {}", "at worker.js:1:2345 ".repeat(bytes / 20 + 1));
+                return Err(CellError::host(diagnostic));
+            }
             Some("forget-steps") => {
                 // the kept answers of every run in flight go
                 self.exec("DELETE FROM steps WHERE run IN (SELECT id FROM runs WHERE status IN ('queued', 'running'))", vec![])?;
