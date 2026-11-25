@@ -277,6 +277,28 @@ mod tests {
         remover.remove().unwrap();
     }
 
+    /// Goal: removing a run's directory takes a link in it (the repo's
+    /// node_modules, which the e2e links there), never what it links to.
+    #[test]
+    fn removing_a_run_leaves_what_it_links_to() {
+        let root = Root::new("links");
+        let outside = Root::new("links-outside");
+        fs::create_dir_all(outside.path().join("pkg")).unwrap();
+        fs::write(outside.path().join("pkg/index.js"), b"x").unwrap();
+        let run = RunDir::claim(root.path(), "linked", 0).unwrap();
+        std::os::unix::fs::symlink(outside.path(), run.path().join("node_modules")).unwrap();
+        run.remove().unwrap();
+        assert!(!root.path().join("linked").exists());
+        assert!(outside.path().join("pkg/index.js").is_file(), "the removal followed the link");
+
+        // and so does the sweep, for a killed run's directory
+        fs::create_dir(root.path().join("swept")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("swept/node_modules")).unwrap();
+        drop(RunDir::claim(root.path(), "next", 0).unwrap());
+        assert!(!root.path().join("swept").exists());
+        assert!(outside.path().join("pkg/index.js").is_file(), "the sweep followed the link");
+    }
+
     /// Goal: a run with no room for its state in RAM does not start, and
     /// says where and how much.
     #[test]

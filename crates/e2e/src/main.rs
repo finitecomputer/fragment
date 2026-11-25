@@ -1537,6 +1537,14 @@ fn local(only: Option<Vec<String>>, except: Vec<String>, settings: LocalRun) -> 
         Some(_) => Some(devstack::shm::RunDir::claim(&devstack::shm::root(), &run, devstack::shm::ROOM_BYTES)?),
         None => None,
     };
+    if let Some(ram) = &ram {
+        // celld bundles the project's bare imports (`@cloudflare/sandbox`)
+        // from the repo's node_modules, which esbuild looks for above the
+        // project: staged outside the repo, the run's directory links it
+        // (a link its removal takes, never what it links to)
+        let modules = root.join("node_modules");
+        std::os::unix::fs::symlink(&modules, ram.path().join("node_modules")).with_context(|| format!("link {} into {}", modules.display(), ram.path().display()))?;
+    }
     let project = devstack::stage_project(&ram.as_ref().map_or(scratch.as_path(), |r| r.path()).join("cell"))?;
     // Ctrl-C (or SIGTERM, SIGHUP) mid-run: the node runs in a process group
     // of its own, which the terminal's signal does not reach, so the run
