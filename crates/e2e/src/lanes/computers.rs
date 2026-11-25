@@ -1404,13 +1404,16 @@ struct Doors<'a> {
 /// (telegram_settings.rs): this connector, set up as its page did before,
 /// a release later; and, once it is no door, another its agent's Set up
 /// makes. Answers the replies its agent's pokes made in the lane's own chat.
+/// Telegram's delivery of an update to a connector's inbox, with or without its webhook's secret.
+type Deliver<'a> = &'a dyn Fn(Value, Option<&str>) -> Result<crate::api::Reply>;
+
 /// Its agent's questions (FIN-747): a card of choices goes to Telegram as
 /// the computer's own SimpleX words one (applib/question.mjs), and its
 /// owner's next message there answers it, once, the turn going on with
 /// their words and no turn of their message's own; a card that needs a
 /// button says so there, and pressed in the chat, the turn's answer goes
 /// to Telegram too.
-fn telegram_questions(s: &mut Suite, api: &Api, c: &Doors, tg: &fragment_fakes::telegram::Telegram, name: &str, (deliver, hook, paul): (&dyn Fn(Value, Option<&str>) -> Result<crate::api::Reply>, &str, i64), wake: Duration) -> Result<()> {
+fn telegram_questions(s: &mut Suite, api: &Api, c: &Doors, tg: &fragment_fakes::telegram::Telegram, name: &str, (deliver, hook, paul): (Deliver<'_>, &str, i64), wake: Duration) -> Result<()> {
     use fragment_fakes::telegram::Telegram;
     let said = |text: &str| tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"] == text);
     let card_of = |text: &str| records(api, c.owner, name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["text"] == text).unwrap_or_default();
@@ -1443,7 +1446,7 @@ fn telegram_questions(s: &mut Suite, api: &Api, c: &Doors, tg: &fragment_fakes::
     s.ok(
         "a question that needs a button says so in Telegram; pressed in the chat, its turn's answer goes to Telegram",
         told && r.status == 200 && approved,
-        json!({ "pressed": r, "card": card, "sent": tg.sent() }),
+        json!({ "pressed": { "status": r.status, "body": r.body }, "card": card, "sent": tg.sent() }),
     );
     Ok(())
 }
