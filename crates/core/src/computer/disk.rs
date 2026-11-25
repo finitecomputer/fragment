@@ -390,6 +390,12 @@ pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk
     (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
+/// What a disk's sleep runs in its container to read its owner's Storage
+/// (cell `measure_asleep`, which runs this and nothing else): one `df` of
+/// its `/data`, through `sh -c` as every exec of the DO's is; read by
+/// `disk_of_df_on_disk`.
+pub const DISK_SLEEP_ARGV: [&str; 3] = ["sh", "-c", DISK_READ_ON_DISK];
+
 /// A computer's disk on a disk (docs/computers.md, "A disk") from its
 /// `df` of `/data` (`DISK_READ_ON_DISK`, alone or a sizes read's first
 /// lines): its `/data` is a filesystem of its own, so what takes it is that
@@ -636,16 +642,15 @@ mod tests {
     }
 
     /// Goal: a disk's sleep runs one `df` of its `/data` (its filesystem's
-    /// own count), never a walk of its files, which grows with them: the
-    /// read it runs is `read_on_disk(DISK_READ)` (cell `read_disk`, no sizes).
+    /// own count), never a walk of its files, which grows with them, and
+    /// nothing beside it (cell `measure_asleep` runs this argv alone).
     #[test]
     fn a_disks_sleep_reads_one_df_and_walks_nothing() {
-        let read = read_on_disk(DISK_READ);
-        assert_eq!(read, DISK_READ_ON_DISK);
-        assert_eq!(read, "df -P -B1 /data");
-        for walk in ["du", "find", "ls", ";", "&&", "|"] {
-            assert!(!read.split_whitespace().any(|w| w == walk) && !read.contains(walk), "{walk:?} in {read:?}");
-        }
+        assert_eq!(DISK_SLEEP_ARGV, ["sh", "-c", "df -P -B1 /data"]);
+        assert_eq!(read_on_disk(DISK_READ), DISK_READ_ON_DISK);
+        // one command: nothing rides along in its shell
+        let script = DISK_SLEEP_ARGV[2];
+        assert!(!script.contains([';', '&', '|', '$', '`', '\n']) && !script.split_whitespace().any(|w| ["du", "find", "ls"].contains(&w)), "{script:?}");
     }
 
     /// Goal: a disk's breakdown is shown only as of its last read: the one

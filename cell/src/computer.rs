@@ -2273,6 +2273,29 @@ impl ComputerCell {
         disk
     }
 
+    /// A disk's Storage as it sleeps (docs/computers.md, "A disk"): one
+    /// `df` of its `/data` (`DISK_SLEEP_ARGV`, run as it is: core pins it to
+    /// that command alone, no walk beside it), its used bytes its data, kept
+    /// and told as any read's (`read_disk`'s line). Best effort, as a read is.
+    async fn measure_asleep(&self, generation: u64) {
+        let at = js::now_ms();
+        let argv = js::to_js(&fragment_core::computer::DISK_SLEEP_ARGV);
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64), JsValue::from_f64(4096.0)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let (out, exit, failed) = match read {
+            Ok(o) if o["exitCode"] == 0 => (o["output"].as_str().unwrap_or_default().to_string(), o["exitCode"].clone(), None),
+            Ok(o) => (String::new(), o["exitCode"].clone(), None),
+            Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
+        };
+        let disk = fragment_core::computer::disk_of_df_on_disk(&out, at, generation);
+        match disk.map(|d| (d, self.update_saves(|s| s.measured(d)))) {
+            Some((d, Ok(_))) => {
+                let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
+            }
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "exit": exit, "answerBytes": out.len(), "error": failed })),
+        }
+    }
+
     /// Waits, at most `bound_ms`, for the guest of the start made at
     /// `started_ms` to read its own view (`fragment_core::computer::alive`):
     /// a container Cloudflare restores from a snapshot can come up dead,
@@ -2463,10 +2486,10 @@ impl ComputerCell {
         let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
         let _ = self.call("closeTabs", &[why.into()]).await;
         // what takes its disk, its owner's Storage, as it sleeps: a disk is
-        // never saved, so this is its measure (`read_disk`; Codex on #1552):
-        // its filesystem's own count, one `df`, never a walk of its files,
-        // which grows with them (nothing in a sleep may)
-        self.read_disk(generation, false).await;
+        // never saved, so this is its measure (Codex on #1552): its
+        // filesystem's own count, one `df`, never a walk of its files, which
+        // grows with them (nothing in a sleep may)
+        self.measure_asleep(generation).await;
         let t0 = js::now_ms();
         let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
         let mut last = None;

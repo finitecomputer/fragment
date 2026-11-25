@@ -272,10 +272,13 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
         let (slept, _) = put_to_sleep(s, api, &owner, &id);
         let (killed, next) = (life["killed"].as_u64().unwrap_or(0), life["generation"].as_u64().unwrap_or(0));
         let clean = head_of(&row(&id)["head"]).is_some_and(|(e, c)| e == next && c);
-        // its next start the one after its kill (what shipped, mounted), or
-        // the one after that: its first found the device blank and fell back
-        // once, to a new disk
-        let (kept, fell) = (next == killed + 1, next == killed + 2);
+        // its next start the one after its kill, mounting what shipped (its
+        // open replayed it, and checkpointed in its own life); or the one
+        // after that, its first having found the device blank and fallen
+        // back once: a new disk, its head its own bare claim, none before it
+        let checkpoint = fragment_core::computer::fpac::Head::decode(life["head"].as_str().unwrap_or("")).map(|h| h.checkpoint.map(|c| c.epoch));
+        let kept = next == killed + 1 && checkpoint == Some(Some(next));
+        let fell = next == killed + 2 && checkpoint == Some(None) && life["back"].is_null();
         // the node's lines say which fell back, and why; a hosted run's are
         // the bucket's (what that life shipped) and the platform's, read after
         let told = !local || {
@@ -320,7 +323,9 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
     if local {
         life["fellBack"] = json!(unusable_of(s, &id));
     }
-    let kept = life["generation"].as_u64() == life["killed"].as_u64().map(|k| k + 1);
+    let next = life["generation"].as_u64().unwrap_or(0);
+    let replayed = fragment_core::computer::fpac::Head::decode(life["head"].as_str().unwrap_or("")).and_then(|h| h.checkpoint).is_some_and(|c| c.epoch == next);
+    let kept = life["killed"].as_u64().is_some_and(|k| next == k + 1) && replayed;
     life["ok"] = json!(wrote == "wrote disk/first-life.txt" && first_line(&read) == "read disk/first-life.txt: shipped" && life["sent"] == true && life["woke"] == true && life["own"] == true && kept && (!local || life["fellBack"].as_array().is_some_and(Vec::is_empty)) && slept && clean);
     println!("      FIRSTLIFE {life}");
     lives.push(life);
@@ -349,9 +354,10 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     let woke = s.eventually(WAKE * 3, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > generation) && phase(api, owner, id) == "awake");
     let up = view();
     let now = up["restored"]["generation"].as_u64().unwrap_or(0);
-    let head = row()["head"].clone();
+    let now_row = row();
+    let (head, back) = (now_row["head"].clone(), now_row["back"].clone());
     let own = head_of(&head).is_some_and(|(e, _)| e == now);
-    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "own": own })
+    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "own": own })
 }
 
 /// What a sleep takes as its disk grows (`FRAGMENT_E2E_DISK_GROWTH`: a
