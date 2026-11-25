@@ -340,7 +340,9 @@ export class SimplexDoor extends DurableObject {
   // restores, as a start would restore it, and whether it is behind its
   // newest effects (`x-door-behind`): the computer the link came from
   // places it. None (204) for a door that never held one; 410 for one none
-  // of whose saves restores. Asked again, the same. A runner not ended
+  // of whose saves restores, and for one ended (its storage gone with its
+  // link; after a restart it holds nothing, a 204 the move's own record
+  // answers: cell/src/simplex_move.rs). Asked again, the same. A runner not ended
   // within `HANDBACK_MS` is ended, its last save not taken (its newest is
   // then behind, and says so). Stopped, it never starts again (no connect
   // nor lever does: `HANDED_BACK`), so no core of it runs beside its
@@ -351,6 +353,11 @@ export class SimplexDoor extends DurableObject {
   // ran is the one it was given).
   async #handback(body) {
     if (!nameOk(body.door)) throw Object.assign(new Error("a way back names its door"), { status: 400 });
+    // ended (its connector unbound, or its life over): its link went with
+    // it, and no save of nothing is handed back, which would have its
+    // computer run its old copy
+    if (this.#over) return refusal(410, "over", "this door's connector is gone: its link went with it");
+    if (this.#ended) return refusal(410, "ended", "this door has ended: its link went with it");
     let d = this.#door();
     // one never begun is fenced too: no save given after, nor start
     if (!d) {

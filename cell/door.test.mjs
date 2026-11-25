@@ -926,6 +926,19 @@ test("the way back: a planned stop, its runner's last save, and that save handed
   assert.equal(d.c.starts.length, 1, "never started again");
 });
 
+test("an ended door has no way back: refused (410), never a save of nothing that would run its computer's old copy, now or after a restart (Codex's round on #1541)", async () => {
+  const { d } = await saved();
+  await d.end();
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, (await r.json()).error], [410, "ended"], "ended by its connector's unlink");
+  // started again over its storage, as an eviction does: it holds nothing
+  // of it, a 204 the move's own record answers (cell/src/simplex_move.rs:
+  // a door given the link that holds none has no way back)
+  const o = d.again();
+  const again = await o.fetch(new Request("http://door/door/handback", { method: "POST", headers: { "x-fragment-release": "dev" }, body: JSON.stringify({ door: DOOR }), duplex: "half" }));
+  assert.equal(again.status, 204);
+});
+
 test("the way back waits while its owner's messages still go to its connector, never a save past a message no one has", async () => {
   const d = door();
   await d.connect();

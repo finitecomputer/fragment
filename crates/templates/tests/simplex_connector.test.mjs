@@ -29,11 +29,11 @@ const BOUND = { relayed: { via: "simplex", for: "npub1paul", agent: "juniper--k3
 
 // an app on a fresh store, and its door as `answers` say: each ask's
 // (status, body) in turn by its name, else 200 {}
-function world(answers = {}) {
+function world(answers = {}, connected = true) {
   const db = new DatabaseSync(":memory:");
   const sql = { exec: (q, ...p) => { const st = db.prepare(q); const rows = /^\s*select\b|\breturning\b/i.test(q) ? st.all(...p) : (st.run(...p), []); return { toArray: () => rows }; } };
   const app = new App({ storage: { sql } }, {});
-  app.connected({ door: DOOR });
+  if (connected) app.connected({ door: DOOR });
   const w = { app, asked: [], published: [], slept: [], calls: [] };
   w.job = (via, door = BOUND) => ({
     via,
@@ -83,6 +83,19 @@ test("nothing is relayed but its inbox's own message, while bound, of text", asy
     throw new Error("this connector is bound as a simplex door that is shut");
   };
   assert.deepEqual(await shut.app.intake(shut.delivered(message("m4")), job), { ignored: "not linked" });
+});
+
+test("a message its door delivers before its connect recorded that door (a moved link's runs linked at once) is relayed, once, when the door its own fetch reaches is that one", async () => {
+  // its connect under way: the door has begun, linked, and delivers
+  const w = world({ state: [[200, { door: { door: DOOR } }]] }, false);
+  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "sent as it moved")), w.job("channel")), { relayed: true, file: false });
+  assert.deepEqual(w.published.map((p) => p.body.text), ["sent as it moved"]);
+  assert.deepEqual(w.app.state().connected, true, "its door recorded");
+  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "sent as it moved")), w.job("channel")), { ignored: "taken already" });
+  // one its own fetch does not reach (another life's), still no one's
+  const v = world({ state: [[200, { door: { door: DOOR } }]] }, false);
+  assert.deepEqual(await v.app.intake(v.delivered(message("m2", "from before", "text", "juniper-sx--k3x9--fedcba987654")), v.job("channel")), { ignored: "not its door's" });
+  assert.deepEqual([v.published, v.app.state().connected], [[], false]);
 });
 
 test("its bound agent's reply goes through the door by its record's key, asked again until sent", async () => {

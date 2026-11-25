@@ -311,6 +311,9 @@ export class App extends DurableObject {
   // again (an answer from the inbox lost; its runner restored from an
   // older save)
   seen({ id, door }) {
+    // none recorded yet: its connect under way (`unknown`, which `intake`
+    // settles by asking which door its own fetch reaches)
+    if (this.get("door") === null) return { fresh: false, unknown: true };
     if (door !== this.get("door")) return { fresh: false, other: true };
     const fresh = this.ctx.storage.sql.exec("INSERT INTO seen (id, n) VALUES (?, (SELECT coalesce(max(n), 0) + 1 FROM seen)) ON CONFLICT DO NOTHING RETURNING n", id).toArray().length === 1;
     this.ctx.storage.sql.exec("DELETE FROM seen WHERE n < (SELECT max(n) FROM seen) - ?", SEEN_MAX);
@@ -322,8 +325,18 @@ export class App extends DurableObject {
     if (job.via !== "channel") return { ignored: "only its inbox's trigger" };
     const m = record?.body?.payload;
     if (typeof m?.id !== "string" || !m.id || m.id.length > 64 || typeof m.text !== "string" || typeof m.door !== "string") return { ignored: "not a message" };
-    const seen = await job.call("seen", { id: m.id, door: m.door });
-    if (seen.other) return { ignored: "not its door's" };
+    let seen = await job.call("seen", { id: m.id, door: m.door });
+    // delivered before its connect recorded its door (a moved link's door
+    // runs linked at once, and delivers what came as it moved): its life's
+    // door, the one its own fetch reaches, recorded now, never a message
+    // let go as no door's
+    if (seen.unknown) {
+      const { said } = await door(job, "state");
+      if (said?.door?.door !== m.door) return { ignored: "not its door's" };
+      await job.call("connected", { door: m.door });
+      seen = await job.call("seen", { id: m.id, door: m.door });
+    }
+    if (seen.other || seen.unknown) return { ignored: "not its door's" };
     if (!seen.fresh) return { ignored: "taken already" };
     // its binding, as the platform tells it: no guess at which agent
     if (!job.door) {

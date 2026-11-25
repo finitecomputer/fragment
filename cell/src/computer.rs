@@ -4168,8 +4168,14 @@ impl ComputerCell {
     /// A request to one of its ports, from its owner (a session the router
     /// read from the cookie, or a signer it resolved).
     /// The operators' SimpleX moves, by agent (`MetaKey::SimplexMoves`).
+    /// The record this object wrote; one that does not decode is
+    /// corruption, said so, never read as no moves (which would let a
+    /// computer start a core for a link its door runs).
     fn simplex_moves(&self) -> CellResult<serde_json::Map<String, Value>> {
-        Ok(self.meta(MetaKey::SimplexMoves)?.and_then(|t| crate::json_text::<serde_json::Map<String, Value>>(&t).ok()).unwrap_or_default())
+        match self.meta(MetaKey::SimplexMoves)? {
+            None => Ok(serde_json::Map::new()),
+            Some(t) => crate::json_text::<serde_json::Map<String, Value>>(&t).map_err(|e| CellError::host(format!("its SimpleX move record does not decode: {e}"))),
+        }
     }
 
     fn set_simplex_moves(&self, moves: &serde_json::Map<String, Value>) -> CellResult<()> {
@@ -4191,7 +4197,10 @@ impl ComputerCell {
     /// computer is awake, and its bridge's word on its link then), `set`
     /// (its connector, door, step and chat, as its move goes on; never its
     /// mark, which only its handover and way back set), or `forget` (done
-    /// or gone back; never one still marked moved).
+    /// or gone back; never one still marked moved). A `set` names the step
+    /// it moves on from (`from`, "" for none: a `go` claiming it), and is
+    /// refused when the record stands elsewhere: two `go`s at once never
+    /// both act on one step (two connectors made, two cores of one link).
     async fn simplex_record(&self, b: &Value) -> CellResult<Value> {
         let agent = b["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name its agent"))?;
         if self.rows("SELECT 1 FROM agents WHERE fragment = ?", vec![agent.into()])?.is_empty() {
@@ -4213,6 +4222,11 @@ impl ComputerCell {
                 Ok(json!({ "record": moves.get(agent), "awake": awake, "link": link }))
             }
             "set" => {
+                let from = b["from"].as_str().ok_or_else(|| CellError::invalid("a set names the step it moves on from (from)"))?;
+                let at = moves.get(agent).map(|r| r["step"].as_str().unwrap_or("").to_string());
+                if at.as_deref().unwrap_or("") != from || (at.is_some() && from.is_empty()) {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is at {:?}, not {from:?}: another `go` moved it on; ask again", at.unwrap_or_default())));
+                }
                 let rec = moves.entry(agent.to_string()).or_insert_with(|| json!({ "moved": false }));
                 for k in ["connector", "door", "step", "chat", "staged"] {
                     if let Some(v) = b["record"].get(k).filter(|v| v.is_string() || v.is_boolean()) {
@@ -4296,8 +4310,20 @@ impl ComputerCell {
             r["moved"] = json!(false);
             r["ticket"] = Value::Null;
         };
-        if !handover && status == 200 {
+        // its bridge's link not moved: placed by a way back whose answer
+        // was lost before this one, or never handed over; either way its
+        // computer runs it, so the mark goes (a retry is never stuck)
+        let not_moved = !handover && status == 409 && {
+            let said: Value = answer.read_json().await.unwrap_or(Value::Null);
+            let not = said["error"] == "not_moved";
+            answer = json_response(&said)?.with_status(status);
+            not
+        };
+        if !handover && (status == 200 || not_moved) {
             self.simplex_move_update(&agent, unmark)?;
+            if not_moved {
+                return json_response(&json!({ "back": "already" }));
+            }
         } else if handover && status == 200 {
             if let Some(chat) = answer.headers().get("x-simplex-chat")?.filter(|c| fragment_proto::valid_fragment_name(c)) {
                 self.simplex_move_update(&agent, |r| r["chat"] = json!(chat))?;
