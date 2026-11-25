@@ -1771,9 +1771,16 @@ impl PrincipalCell {
                 let waited_from = *run.job.computer_waited_from.get_or_insert(js::now_ms());
                 let open = js::now_ms() - waited_from < limits::COMPUTER_WAIT_MAX_MS;
                 let v = crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at, "wake": open })).await?;
-                if v["pending"] == true && open && js::now_ms() - waited_from < limits::COMPUTER_WAIT_MAX_MS {
-                    run.job.wait_until = js::now_ms() + limits::COMPUTER_WAIT_MS;
-                    return Ok(());
+                match core::computer_look(v["pending"] == true, js::now_ms() - waited_from, open) {
+                    core::ComputerLook::Again => {
+                        run.job.wait_until = js::now_ms() + limits::COMPUTER_WAIT_MS;
+                        return Ok(());
+                    }
+                    // that look asked it a save: the ask goes, waking nothing
+                    core::ComputerLook::GiveUp { drop: true } => {
+                        crate::computer::ask(&self.env, &id, "computer/export", &json!({ "owner": person, "since": run.job.made_at, "wake": false })).await?;
+                    }
+                    core::ComputerLook::GiveUp { drop: false } | core::ComputerLook::Done => {}
                 }
                 run.job.computer_waited_from = None;
                 if v["pending"] == true {

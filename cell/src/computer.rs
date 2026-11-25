@@ -3701,8 +3701,11 @@ impl ComputerCell {
                     if matches!(life.phase, Phase::Failed { .. }) {
                         return json_response(&json!({ "save": null, "setAside": null, "unsaved": "it would not wake" }));
                     }
+                    // its events here make no start a request would make at once
+                    // (`drive_with`, as an alarm's): a start owed is its alarm's,
+                    // never the export's to wait for (Codex on #1552)
                     if !b.wake {
-                        self.drive(Event::ExportDropped).await?;
+                        self.drive_with(Some(Event::ExportDropped), false).await?;
                         return json_response(&json!({ "pending": true }));
                     }
                     // woken as its owner's wake is; one refused (no credit) or
@@ -3717,7 +3720,7 @@ impl ComputerCell {
                     }
                     // then due, its alarm takes it: this ask only looks; due for
                     // this life alone, the export asking again while it waits
-                    self.drive(Event::ExportAsked).await?;
+                    self.drive_with(Some(Event::ExportAsked), false).await?;
                     return json_response(&json!({ "pending": true }));
                 }
                 let save = saves.all().iter().find(|s| !s.unusable);

@@ -395,6 +395,29 @@ pub fn start(begun: &[Begun], now: i64) -> Start {
     Start::New
 }
 
+/// What an export does after a look at a disk's save (a computer on a disk
+/// keeps none of its own: `limits::COMPUTER_WAIT_MS`): look `Again` after a
+/// wait; it came (`Done`); or `GiveUp`, its wait from the first look run
+/// out, and `drop` the ask when this look woke the computer for it (an
+/// ask it would otherwise take later, for no one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComputerLook {
+    Again,
+    Done,
+    GiveUp { drop: bool },
+}
+
+/// `ComputerLook` for a look that answered `pending` (or not), `waited_ms`
+/// from the first look as it answered, made `woke` (within the wait, so it
+/// may have asked and woken).
+pub fn computer_look(pending: bool, waited_ms: i64, woke: bool) -> ComputerLook {
+    match (pending, waited_ms < limits::COMPUTER_WAIT_MAX_MS) {
+        (false, _) => ComputerLook::Done,
+        (true, true) => ComputerLook::Again,
+        (true, false) => ComputerLook::GiveUp { drop: woke },
+    }
+}
+
 /// The wait before a part's next try: 5 s, doubling, at most 5 minutes.
 pub fn retry_ms(attempt: u32) -> i64 {
     (5_000i64 << attempt.min(6)).min(300_000)
@@ -783,6 +806,20 @@ fn code(text: impl AsRef<str>) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// Goal: an export's look at a disk's save gives up at its bound, and a
+    /// give-up after a look that woke the computer drops that ask, so no
+    /// later moment takes a save for no one. Method: a look within the
+    /// wait, one past it that woke (sent within it, answered after), one
+    /// past it that woke nothing, and one that found the save.
+    #[test]
+    fn a_disk_saves_look_gives_up_at_its_bound_and_drops_the_ask_it_made() {
+        let max = limits::COMPUTER_WAIT_MAX_MS;
+        assert_eq!(computer_look(true, max - 1, true), ComputerLook::Again);
+        assert_eq!(computer_look(true, max, true), ComputerLook::GiveUp { drop: true }, "sent within the wait, answered past it: its ask goes");
+        assert_eq!(computer_look(true, max + 1, false), ComputerLook::GiveUp { drop: false }, "the last look asked nothing, and dropped it itself");
+        assert_eq!(computer_look(false, max + 1, true), ComputerLook::Done, "the save came, late or not");
+    }
     /// The README, as the release's file holds it.
     const README: &str = include_str!("export_readme.md");
     use super::*;
