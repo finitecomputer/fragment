@@ -84,6 +84,8 @@ fn replies(w: &World, chat: &str) -> Vec<Value> {
 #[tokio::test]
 async fn a_reply() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    // its computer's start, which each word on its turns names
+    fake.with(|w| w.computer["generation"] = json!(7));
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("a-reply");
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
@@ -104,8 +106,8 @@ async fn a_reply() {
     });
     fake.until(WAIT, "the keepalive held, then let go", |w| w.keepalive_log.first() == Some(&true) && w.keepalive_open == 0).await;
     // its agent's fragment was told the turn ran, whose ask it was, and that
-    // it ended, each as this one bridge life: its first word takes the
-    // agent's turns (FIN-720)
+    // it ended, each as this one bridge life of its computer's start: its
+    // first word takes the agent's turns (FIN-720)
     fake.until(WAIT, "the turn told ended", |w| w.turns.len() == 3).await;
     fake.with(|w| {
         let lives: BTreeSet<&str> = w.turns.iter().filter_map(|(_, _, v)| v["life"].as_str()).collect();
@@ -114,9 +116,9 @@ async fn a_reply() {
         assert_eq!(
             told,
             vec![
-                ("juniper--k3x9", "DELETE", json!({ "turn": null })),
-                ("juniper--k3x9", "PUT", json!({ "turn": turn, "place": chat, "asker": "npub1paul", "mandate": null })),
-                ("juniper--k3x9", "DELETE", json!({ "turn": turn })),
+                ("juniper--k3x9", "DELETE", json!({ "generation": 7, "turn": null })),
+                ("juniper--k3x9", "PUT", json!({ "generation": 7, "turn": turn, "place": chat, "asker": "npub1paul", "mandate": null })),
+                ("juniper--k3x9", "DELETE", json!({ "generation": 7, "turn": turn })),
             ]
         );
     });
@@ -141,7 +143,7 @@ async fn someone_elses_ask_is_told_with_its_proof() {
     fake.until(WAIT, "skyler's turn told", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == turn)).await;
     fake.with(|w| {
         let opened = w.turns.iter().find(|(_, m, v)| m == "PUT" && v["turn"] == turn).map(|(_, _, v)| without_life(v)).unwrap_or_default();
-        assert_eq!(opened, json!({ "turn": turn, "place": chat, "asker": "npub1skyler", "mandate": format!("fm1.npub1skyler.{}", seq(&said)) }));
+        assert_eq!(opened, json!({ "generation": 0, "turn": turn, "place": chat, "asker": "npub1skyler", "mandate": format!("fm1.npub1skyler.{}", seq(&said)) }));
     });
     let mine = fake.say(&chat, &person("paul"), json!({ "text": "and mine" }));
     let mine = turn_of("juniper", &chat, seq(&mine));
