@@ -45,7 +45,7 @@ const DISK_CHECKS: [&str; 11] = [
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
     "a wake mounts the disk as it slept: what it wrote is there, nothing restored, its line saying what its last sleep left unshipped",
-    "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships",
+    "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships (its daemon holding bytes unshipped as it is killed)",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
     "a head that will not open is fallen back past: that start fails as unusable, the next mounts the head before it, no strike",
     "awake or asleep, no save of a disk is taken for itself",
@@ -149,6 +149,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     // every write read after the wake that follows it, each sleep clean;
     // every `CRASH_EVERY`th a crash instead, while a fill still ships
     let (mut failed, mut crashes, t0) = (vec![], 0u32, std::time::Instant::now());
+    let mut unshipped_at_kill = vec![];
     for i in 0..cycles() {
         let token = format!("cycle-{i}");
         let wrote = talk.said(s, &format!("write disk/cycle.txt {token}"))?;
@@ -157,13 +158,21 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
             std::thread::sleep(SHIPPED_WITHIN);
             let before = view()["restored"]["generation"].as_u64().unwrap_or(0);
             let filled = talk.said(s, &format!("fill-data disk/fill.bin {FILL_MIB}"))?;
+            // killed while its daemon says the fill is shipping: bytes it
+            // holds unshipped, by its own count, as the kill goes
+            let mut shipping = 0u64;
+            let _ = s.eventually(SHIPPED_WITHIN * 2, || {
+                shipping = lever(api, &id, "fpac-status").ok().and_then(|r| r.body["unshipped"].as_u64()).unwrap_or(0);
+                shipping > 0
+            });
             let killed = lever(api, &id, "kill").is_ok_and(|r| r.status == 200);
             crashes += 1;
+            unshipped_at_kill.push(shipping);
             let back = s.eventually(WAKE + WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
-            if !(filled.starts_with("filled ") && killed && back) {
-                println!("      (crash {i}: filled {filled:?}, killed {killed}, back {back})");
+            if !(filled.starts_with("filled ") && shipping > 0 && killed && back) {
+                println!("      (crash {i}: filled {filled:?}, unshipped {shipping}, killed {killed}, back {back})");
             }
-            (filled.starts_with("filled ") && killed && back, None)
+            (filled.starts_with("filled ") && shipping > 0 && killed && back, None)
         } else {
             let (slept, _) = put_to_sleep(s, api, &owner, &id);
             let head = head_of(&row()["head"]);
@@ -180,7 +189,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
             println!("      ({} of {} cycles, {crashes} crashes, {} failed, {:.0?})", i + 1, cycles(), failed.len(), t0.elapsed());
         }
     }
-    s.ok(DISK_CHECKS[4], failed.is_empty(), json!({ "cycles": cycles(), "crashes": crashes, "failed": failed, "took": format!("{:.0?}", t0.elapsed()) }));
+    s.ok(DISK_CHECKS[4], failed.is_empty(), json!({ "cycles": cycles(), "crashes": crashes, "unshippedAtKill": unshipped_at_kill, "failed": failed, "took": format!("{:.0?}", t0.elapsed()) }));
 
     // a crash while it runs: what it acknowledged, shipped, is mounted again
     let wrote = talk.said(s, "write disk/crash.txt synced")?;
@@ -279,13 +288,25 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
         let checkpoint = fragment_core::computer::fpac::Head::decode(life["head"].as_str().unwrap_or("")).map(|h| h.checkpoint.map(|c| c.epoch));
         let kept = next == killed + 1 && checkpoint == Some(Some(next));
         let fell = next == killed + 2 && checkpoint == Some(None) && life["back"].is_null();
-        // the node's lines say which fell back, and why; a hosted run's are
-        // the bucket's (what that life shipped) and the platform's, read after
+        // which it should have been, by what the bucket and the DO said at
+        // its kill, apart from the rules that decided it: a life that fell
+        // back shipped nothing, or never came up (its format cut short); one
+        // kept had shipped (Codex on #1552)
+        let shipped = life["shipped"].as_array().map(Vec::len);
+        let never_up = life["cameUp"] == false;
+        let evidenced = match shipped {
+            Some(n) if fell => n == 0 || never_up,
+            Some(n) => n > 0,
+            None => false,
+        };
+        // the node's lines say why it fell back: its device blank (nothing
+        // shipped), or its filesystem unmountable (a format cut short)
         let told = !local || {
             let fallen = unusable_of(s, &id);
-            let blank = fallen.iter().all(|u| u["fellBackTo"] == "none (a new disk)" && u["why"].as_str().is_some_and(|w| w.contains("blank")));
+            let why = if shipped == Some(0) { "blank" } else { "would not mount" };
+            let said = fallen.iter().all(|u| u["fellBackTo"] == "none (a new disk)" && u["why"].as_str().is_some_and(|w| w.contains(why)));
             life["fellBack"] = json!(fallen);
-            blank && fallen.len() == usize::from(fell)
+            said && fallen.len() == usize::from(fell)
         };
         life["n"] = json!(n);
         life["afterMs"] = json!(after);
@@ -295,7 +316,7 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
         life["fell"] = json!(fell);
         life["slept"] = json!(slept);
         life["clean"] = json!(clean);
-        life["ok"] = json!(claimed && life["sent"] == true && life["woke"] == true && life["from"] == "disk" && life["own"] == true && (kept || fell) && told && slept && clean);
+        life["ok"] = json!(claimed && life["sent"] == true && life["woke"] == true && life["from"] == "disk" && life["own"] == true && (kept || fell) && evidenced && told && slept && clean);
         println!("      FIRSTLIFE {life}");
         lives.push(life);
     }
@@ -325,7 +346,7 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
     }
     let next = life["generation"].as_u64().unwrap_or(0);
     let replayed = fragment_core::computer::fpac::Head::decode(life["head"].as_str().unwrap_or("")).and_then(|h| h.checkpoint).is_some_and(|c| c.epoch == next);
-    let kept = life["killed"].as_u64().is_some_and(|k| next == k + 1) && replayed;
+    let kept = life["killed"].as_u64().is_some_and(|k| next == k + 1) && replayed && life["cameUp"] == true && life["shipped"].as_array().is_some_and(|o| !o.is_empty());
     life["ok"] = json!(wrote == "wrote disk/first-life.txt" && first_line(&read) == "read disk/first-life.txt: shipped" && life["sent"] == true && life["woke"] == true && life["own"] == true && kept && (!local || life["fellBack"].as_array().is_some_and(Vec::is_empty)) && slept && clean);
     println!("      FIRSTLIFE {life}");
     lives.push(life);
@@ -347,9 +368,12 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     });
     let kill_ms = t0.elapsed().as_millis() as u64;
     let generation = killed["killed"].as_u64().unwrap_or(0);
-    // its container gone, nothing more of that life ships
+    // its container gone, nothing more of that life ships: what it shipped
+    // is in the bucket, and whether it came up the DO's to say
     std::thread::sleep(SHIPPED_WITHIN);
-    let left = row()["head"].clone();
+    let at_kill = row();
+    let (left, came_up) = (at_kill["head"].clone(), at_kill["cameUp"].clone());
+    let shipped = lever_with(api, id, json!({ "op": "fpac-objects", "epoch": generation })).map(|r| r.body["objects"].clone()).unwrap_or(Value::Null);
     let _ = api.signed(owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
     let woke = s.eventually(WAKE * 3, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > generation) && phase(api, owner, id) == "awake");
     let up = view();
@@ -357,7 +381,7 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     let now_row = row();
     let (head, back) = (now_row["head"].clone(), now_row["back"].clone());
     let own = head_of(&head).is_some_and(|(e, _)| e == now);
-    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "own": own })
+    json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "cameUp": came_up, "shipped": shipped, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "own": own })
 }
 
 /// What a sleep takes as its disk grows (`FRAGMENT_E2E_DISK_GROWTH`: a

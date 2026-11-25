@@ -35,6 +35,8 @@ const STATE_BYTES: u64 = 16 << 20;
 const LOG: &str = "/run/fpac/log";
 const PID: &str = "/run/fpac/daemon.pid";
 const MOUNTED: &str = "/run/fpac/mounted.json";
+/// The daemon's own status, as its flusher writes it each pass.
+const STATUS: &str = "/run/fpac/status.json";
 /// What a read of its log takes at most: a mount says a few lines.
 const LOG_BYTES_MAX: usize = 1 << 20;
 /// A mount is waited for this long: inside the cell's wait for the guest's
@@ -51,6 +53,9 @@ pub const TOLD_WAIT_MS: u64 = 30_000;
 /// v0.1.0, `open_store`): a head that will never mount, told from a remote
 /// that did not answer.
 const UNUSABLE: &str = "the disk does not open";
+/// How a mount of the device's ext4 that failed begins its error (FPAC
+/// v0.1.0, `linux::mount_ext4`).
+const EXT4_MOUNT: &str = "mount ext4 at";
 
 /// Its start says it is on a disk.
 pub fn wanted() -> bool {
@@ -82,6 +87,12 @@ pub enum Unmounted {
     /// no retry mounts it and nothing of it was kept: its start goes again
     /// as a new disk.
     Blank(String),
+    /// Its device opened, what shipped replayed, but its filesystem would
+    /// not mount: a format cut short (FPAC ships each second from before
+    /// its `mke2fs`). A disk none of whose lives came up holds nothing of
+    /// anyone's, and starts again as a new disk; the platform decides
+    /// (`fragment_core::computer::fpac::fallback`).
+    Unmountable(String),
     /// Anything else: the remote, the device, the time.
     Failed(String),
 }
@@ -113,6 +124,12 @@ impl Mounting {
         loop {
             let events = log_events();
             if let Some(m) = events.iter().find(|e| e["fpac"] == "mounted") {
+                // a new disk's format is in the bucket before anything runs
+                // on it: a life that came up never leaves one cut short
+                // (Codex on #1552)
+                if events.iter().any(|e| e["fpac"] == "opened" && e["new"] == true) {
+                    self.wait_shipped()?;
+                }
                 let mounted = Mounted { ms: self.t0.elapsed().as_millis() as u64, misses: m["misses"].as_u64().unwrap_or(0) };
                 let _ = std::fs::write(MOUNTED, json!({ "mountMs": mounted.ms, "misses": mounted.misses }).to_string());
                 return Ok(mounted);
@@ -127,6 +144,32 @@ impl Mounting {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+
+    /// Waits, within `MOUNT_MS_MAX` of its daemon's start, until a segment
+    /// landed and nothing written is unshipped (`shipped`).
+    fn wait_shipped(&mut self) -> Result<(), Unmounted> {
+        // bounded by MOUNT_MS_MAX
+        loop {
+            let status: Value = std::fs::read_to_string(STATUS).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or(Value::Null);
+            if shipped(&status) {
+                return Ok(());
+            }
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Err(unmounted(&log_events(), &status.to_string()));
+            }
+            if self.t0.elapsed() > Duration::from_millis(MOUNT_MS_MAX) {
+                let _ = self.child.kill();
+                return Err(Unmounted::Failed(format!("its new disk's format did not ship within {} s", MOUNT_MS_MAX / 1000)));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+/// A daemon's status (`STATUS`) that says what it was written has landed:
+/// a segment shipped, nothing unshipped.
+fn shipped(status: &Value) -> bool {
+    status["segments"].as_u64().is_some_and(|n| n >= 1) && status["unshipped_extents"].as_u64() == Some(0)
 }
 
 /// Why a daemon that exited (`status`) did not mount, from its log's
@@ -137,9 +180,11 @@ impl Mounting {
 fn unmounted(events: &[Value], status: &str) -> Unmounted {
     let why = events.iter().rev().find(|e| e["fpac"] == "error").and_then(|e| e["why"].as_str().map(str::to_string));
     let blank = events.iter().rev().find(|e| e["fpac"] == "opened").is_some_and(|o| o["new"] == false && o["extents_mapped"] == 0 && o["replayed"] == 0);
+    let opened = events.iter().rev().find(|e| e["fpac"] == "opened").is_some_and(|o| o["new"] == false);
     match why {
         Some(why) if why.starts_with(UNUSABLE) => Unmounted::Unusable(why),
         Some(why) if blank => Unmounted::Blank(format!("a blank disk (nothing of it shipped): {why}")),
+        Some(why) if opened && why.starts_with(EXT4_MOUNT) => Unmounted::Unmountable(format!("its filesystem would not mount: {why}")),
         Some(why) => Unmounted::Failed(why),
         None => Unmounted::Failed(format!("fpac exited ({status}) saying nothing")),
     }
@@ -255,6 +300,19 @@ mod tests {
         assert!(!"the remote is unavailable: connection refused".starts_with(UNUSABLE));
     }
 
+    /// Goal: a new disk's format counts as shipped only once a segment
+    /// landed and nothing written is unshipped: a status from before its
+    /// first flush (none landed), one still shipping, or none, is not.
+    #[test]
+    fn a_new_disks_format_is_shipped_once_a_segment_landed_and_nothing_is_left() {
+        assert!(shipped(&json!({ "segments": 1, "unshipped_extents": 0 })));
+        assert!(shipped(&json!({ "segments": 3, "unshipped_extents": 0, "dirty_extents": 0 })));
+        assert!(!shipped(&json!({ "segments": 0, "unshipped_extents": 0 })), "before its first flush landed");
+        assert!(!shipped(&json!({ "segments": 1, "unshipped_extents": 7 })), "still shipping");
+        assert!(!shipped(&Value::Null), "no status yet");
+        assert!(!shipped(&json!({ "segments": "1", "unshipped_extents": 0 })), "another release's");
+    }
+
     #[test]
     fn a_disk_whose_first_life_ended_before_its_filesystem_shipped_is_unusable() {
         let error = |why: &str| json!({ "fpac": "error", "why": why });
@@ -268,8 +326,11 @@ mod tests {
         assert!(matches!(unmounted(&[error("the disk does not open: a segment's header is corrupt")], "exit status: 1"), Unmounted::Unusable(_)));
         // anything mapped or replayed: its files are there, and a mount that
         // fails may pass (a failed start, retried)
-        assert_eq!(unmounted(&[opened(false, 12, 0), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
-        assert_eq!(unmounted(&[opened(false, 0, 3), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
+        // what shipped replayed, its filesystem would not mount: a format cut short
+        assert!(matches!(unmounted(&[opened(false, 12, 0), error(mount)], "exit status: 1"), Unmounted::Unmountable(why) if why.contains(mount)));
+        assert!(matches!(unmounted(&[opened(false, 0, 3), error(mount)], "exit status: 1"), Unmounted::Unmountable(why) if why.contains(mount)));
+        // any other failure after it opened is no word of its device
+        assert_eq!(unmounted(&[opened(false, 12, 0), error("the remote: timed out")], "exit status: 1"), Unmounted::Failed("the remote: timed out".into()));
         // a new disk it made itself, failing: a failed start too
         assert_eq!(unmounted(&[opened(true, 0, 0), error(mount)], "exit status: 1"), Unmounted::Failed(mount.into()));
         // an open that refused its head, as before; and one that said nothing

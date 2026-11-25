@@ -8,7 +8,10 @@
 -- slept cleanly; `back_*`, the head before the newest life posted its
 -- first, what a start falls back to past a head that will not mount (null
 -- before its second life); `slept_unshipped`, the bytes its last sleep
--- had not shipped as its stop began. A wipe drops it with the rest.
+-- had not shipped as its stop began; `came_up`, 1 once a life of it came up
+-- (its guest ran: what it holds is someone's from then, never started over;
+-- 0 again when a disk none of whose lives came up begins anew). A wipe drops
+-- it with the rest.
 CREATE TABLE disk (
   id INTEGER PRIMARY KEY CHECK (id = 0),
   volume_bytes INTEGER NOT NULL,
@@ -22,5 +25,6 @@ CREATE TABLE disk (
   back_ck_seq INTEGER,
   back_ck_sum TEXT,
   back_clean INTEGER NOT NULL DEFAULT 0,
-  slept_unshipped INTEGER
+  slept_unshipped INTEGER,
+  came_up INTEGER NOT NULL DEFAULT 0
 );

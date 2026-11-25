@@ -1268,10 +1268,10 @@ fn an_export_saves_a_disk_once_awake() {
     let mut l = Lifecycle::new();
     l.set_disk();
     let g = started(&mut l, T);
-    let s = l.apply(Event::ExportAsked, T + 5_000);
+    let s = l.apply(Event::ExportAsked { since_ms: T }, T + 5_000);
     assert!(s.actions.is_empty() && s.alarm_ms == Some(T + 5_000), "the ask only marks it due, its alarm at once: {s:?}");
     assert_eq!(l.apply(Event::Alarm, T + 5_000).actions.iter().filter(|a| matches!(a, Action::Hold { .. })).count(), 1, "held by its alarm");
-    assert!(l.apply(Event::ExportAsked, T + 5_100).actions.is_empty(), "asked again under way: the one save");
+    assert!(l.apply(Event::ExportAsked { since_ms: T }, T + 5_100).actions.is_empty(), "asked again under way: the one save");
     let (_, held, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 5_500));
     assert!(held);
     // its save fails: due again after its pause, not before
@@ -1282,7 +1282,7 @@ fn an_export_saves_a_disk_once_awake() {
     assert!(l.next_alarm().is_some_and(|at| at > failed && at <= again), "an alarm by its retry");
     let holds = |s: &Step| s.actions.iter().filter(|a| matches!(a, Action::Hold { .. })).count();
     assert_eq!(holds(&l.apply(Event::Alarm, again - 1)), 0, "not before its pause");
-    assert_eq!(holds(&l.apply(Event::ExportAsked, again - 1)), 0, "an ask meanwhile waits its pause too");
+    assert_eq!(holds(&l.apply(Event::ExportAsked { since_ms: T }, again - 1)), 0, "an ask meanwhile waits its pause too");
     assert_eq!(holds(&l.apply(Event::Alarm, again)), 1, "held again after it");
     let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, again + 100));
     assert_eq!(l.apply(Event::Saved { generation: g, seq }, again + 200).actions, vec![Action::Unhold { generation: g }]);
@@ -1293,11 +1293,11 @@ fn an_export_saves_a_disk_once_awake() {
     // starts: kept across a restart of the object, taken once it runs
     let mut asleep = Lifecycle::new();
     asleep.set_disk();
-    asleep.apply(Event::ExportAsked, T);
+    asleep.apply(Event::ExportAsked { since_ms: T }, T);
     assert!(serde_json::to_value(&asleep).unwrap().get("export_due_ms").is_none(), "no ask kept for a computer that does not run");
     let s = asleep.apply(Event::Wake { why: Wake::Owner }, T + 1_000);
     let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
-    asleep.apply(Event::ExportAsked, T + 1_100);
+    asleep.apply(Event::ExportAsked { since_ms: T }, T + 1_100);
     let mut asleep: Lifecycle = serde_json::from_value(serde_json::to_value(&asleep).unwrap()).unwrap();
     asleep.apply(Event::Ready { generation: g }, T + 4_000);
     assert!(asleep.apply(Event::Alarm, T + 4_100).actions.contains(&Action::Hold { generation: g }), "taken once it runs");
@@ -1305,7 +1305,7 @@ fn an_export_saves_a_disk_once_awake() {
     let mut gave_up = Lifecycle::new();
     gave_up.set_disk();
     let g = started(&mut gave_up, T);
-    gave_up.apply(Event::ExportAsked, T + 5_000);
+    gave_up.apply(Event::ExportAsked { since_ms: T }, T + 5_000);
     gave_up.apply(Event::ExportDropped, T + 5_001);
     let (saves, _) = run_alarms(&mut gave_up, T + 5_000 + IDLE_MS / 2);
     assert!(saves.is_empty(), "nothing taken for an export that gave up: {saves:?}");
@@ -1315,14 +1315,14 @@ fn an_export_saves_a_disk_once_awake() {
     failing.set_disk();
     let s = failing.apply(Event::Wake { why: Wake::Owner }, T);
     let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
-    failing.apply(Event::ExportAsked, T + 100);
+    failing.apply(Event::ExportAsked { since_ms: T }, T + 100);
     failing.apply(Event::StartFailed { generation: g, why: "the test".into() }, T + 200);
     assert!(serde_json::to_value(&failing).unwrap().get("export_due_ms").is_none(), "dropped with the start it was asked in");
     // a computer with saves of its own asks none
     let mut saves = Lifecycle::new();
     started(&mut saves, T);
     let before = serde_json::to_value(&saves).unwrap();
-    assert!(saves.apply(Event::ExportAsked, T + 5_000).actions.is_empty());
+    assert!(saves.apply(Event::ExportAsked { since_ms: T }, T + 5_000).actions.is_empty());
     assert_eq!(serde_json::to_value(&saves).unwrap(), before, "nothing changed");
 }
 
@@ -1336,7 +1336,7 @@ fn an_exports_ask_ends_with_its_life() {
     let mut l = Lifecycle::new();
     l.set_disk();
     let g = started(&mut l, T);
-    l.apply(Event::ExportAsked, T + 5_000);
+    l.apply(Event::ExportAsked { since_ms: T }, T + 5_000);
     let s = l.apply(Event::Sleep, T + 5_001);
     assert_eq!(s.actions, vec![Action::Sleep { generation: g }], "its owner's sleep first");
     assert_eq!(l.apply(Event::Held { generation: g, held: true }, T + 5_500).actions, vec![Action::Stop { generation: g, saved: true }]);
@@ -1345,7 +1345,7 @@ fn an_exports_ask_ends_with_its_life() {
     let (saves, _) = run_alarms(&mut l, T + 60_000 + IDLE_MS / 2);
     assert!(saves.is_empty(), "no save for an export that stopped asking: {saves:?}");
     // a crash forgets it as well
-    l.apply(Event::ExportAsked, T + 70_000);
+    l.apply(Event::ExportAsked { since_ms: T }, T + 70_000);
     l.apply(Event::Exited { generation: g }, T + 70_001);
     assert!(l.next_alarm().is_none_or(|at| at > T + 70_001 + 1_000) || !matches!(l.phase, Phase::Awake { .. }));
     let ended = serde_json::to_value(&l).unwrap();
@@ -1360,4 +1360,70 @@ fn a_disk_is_chosen_as_it_is_made() {
     let mut l = Lifecycle::new();
     started(&mut l, T);
     l.set_disk();
+}
+
+/// Goal (Codex on #1552): a disk's sleep never stops with writes still in
+/// it unshipped. A wait that ended with some left (or no word of them)
+/// keeps its container, awake again, and its next sleep waits again, as a
+/// sleep whose save failed does; past the unsaved bound it stops unsaved
+/// and says so. A wait that saw nothing left stops it, saved.
+#[test]
+fn a_disks_sleep_never_stops_with_writes_unshipped() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let (_, slept) = run_alarms(&mut l, T + 2 * IDLE_MS);
+    let slept = slept.expect("it sleeps once idle");
+    let s = l.apply(Event::Held { generation: g, held: false }, slept + 45_500);
+    assert!(!s.actions.iter().any(|a| matches!(a, Action::Stop { .. })), "no stop with writes unshipped: {s:?}");
+    assert!(matches!(l.phase, Phase::Awake { generation, .. } if generation == g), "awake again on its container: {:?}", l.phase);
+    // its next sleep waits again; one that saw nothing left stops it
+    let (_, again) = run_alarms(&mut l, slept + 45_500 + 2 * IDLE_MS);
+    let again = again.expect("it sleeps again");
+    let s = l.apply(Event::Held { generation: g, held: true }, again + 500);
+    assert_eq!(s.actions, vec![Action::Stop { generation: g, saved: true }]);
+    // past the unsaved bound, a wait still undrained stops it unsaved, saying so
+    let mut late = Lifecycle::new();
+    late.set_disk();
+    let g = started(&mut late, T);
+    let (_, slept) = run_alarms(&mut late, T + 2 * IDLE_MS);
+    let s = late.apply_with(Event::Held { generation: g, held: false }, slept.expect("it sleeps") + 45_500, &Rules { unsaved_max_ms: 0 });
+    assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: false, .. })).count(), 1, "{s:?}");
+    assert!(matches!(s.note, SaveNote::Says(_)), "it says so: {:?}", s.note);
+}
+
+/// Goal (Codex on #1552): an export's ask that comes once the save it waits
+/// for already landed (its look raced that save) takes no second save.
+#[test]
+fn an_exports_ask_after_its_save_landed_takes_no_second() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    l.apply(Event::ExportAsked { since_ms: T }, T + 5_000);
+    l.apply(Event::Alarm, T + 5_000);
+    let (_, _, seq) = save_asked(&l.apply(Event::Held { generation: g, held: true }, T + 5_500));
+    l.apply(Event::Saved { generation: g, seq }, T + 6_000);
+    // the export's look that raced it asks again, its export begun before
+    l.apply(Event::ExportAsked { since_ms: T }, T + 6_100);
+    let (saves, _) = run_alarms(&mut l, T + 6_100 + IDLE_MS / 2);
+    assert!(saves.is_empty(), "no second save: {saves:?}");
+}
+
+/// Goal: a disk's sleep is no save: an export begun before a sleep, its
+/// computer then woken for it, still takes its save.
+#[test]
+fn an_export_begun_before_a_disks_sleep_still_takes_its_save() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let (_, slept) = run_alarms(&mut l, T + 2 * IDLE_MS);
+    let slept = slept.expect("it sleeps once idle");
+    let began = slept - 1_000;
+    l.apply(Event::Held { generation: g, held: true }, slept + 500);
+    l.apply(Event::Asleep { generation: g }, slept + 2_000);
+    let s = l.apply(Event::Wake { why: Wake::Owner }, slept + 3_000);
+    let Some(Action::Start { generation: g }) = s.actions.first().cloned() else { panic!("{s:?}") };
+    l.apply(Event::Ready { generation: g }, slept + 6_000);
+    l.apply(Event::ExportAsked { since_ms: began }, slept + 6_100);
+    assert!(l.apply(Event::Alarm, slept + 6_100).actions.contains(&Action::Hold { generation: g }), "its save is taken");
 }

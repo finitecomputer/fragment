@@ -116,12 +116,29 @@ fn head_number(s: &str) -> Option<u64> {
     }
 }
 
+/// What a disk's boot found of the head it was handed and could not mount
+/// (its `POST /unusable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Unopened {
+    /// FPAC's own word: the head will not open (what it names gone or
+    /// corrupt).
+    #[default]
+    Unusable,
+    /// The device blank: its head a claim, nothing of it replayed or mapped
+    /// (nothing of it ever shipped, so nothing was kept).
+    Blank,
+    /// The device opened, what shipped replayed, but its filesystem would
+    /// not mount: a format cut short (FPAC ships from before `mke2fs`).
+    Unmountable,
+}
+
 /// Where a disk's start goes past a head its guest found would not open
-/// (`head`, the one it was handed, and `back`, the one before it): the
-/// one before it; or, when its guest found the device blank (`blank`:
-/// nothing of it ever shipped, so nothing was kept) and no head it had
-/// names a checkpoint, a new disk again; else nowhere, a failed start,
-/// whatever it kept left as it is for an operator.
+/// (`head`, the one it was handed, and `back`, the one before it). A disk
+/// none of whose lives came up (`came_up`: its guest ran, after a new
+/// disk's format had shipped) holds nothing of anyone's, so whatever its
+/// boot found, a new disk again; so too a blank device none of whose heads
+/// names a checkpoint. Else the one before it; else nowhere, a failed
+/// start, whatever it kept left as it is for an operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fallback {
     To(Head),
@@ -129,10 +146,11 @@ pub enum Fallback {
     Nowhere,
 }
 
-pub fn fallback(head: Option<&Head>, back: Option<&Head>, blank: bool) -> Fallback {
+pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_up: bool) -> Fallback {
     let checkpointless = |h: Option<&Head>| h.is_none_or(|h| h.checkpoint.is_none());
+    let fresh = !came_up || (found == Unopened::Blank && checkpointless(head) && checkpointless(back));
     match (head, back) {
-        (Some(_), _) if blank && checkpointless(head) && checkpointless(back) => Fallback::Fresh,
+        (Some(_), _) if fresh => Fallback::Fresh,
         (_, Some(b)) => Fallback::To(*b),
         _ => Fallback::Nowhere,
     }
@@ -360,14 +378,26 @@ mod tests {
         let older = Head { epoch: 3, checkpoint: ck(3, 9), clean: true };
         let newer = Head { epoch: 4, checkpoint: ck(4, 2), clean: false };
         let claim = Head { epoch: 1, checkpoint: None, clean: false };
-        assert_eq!(fallback(Some(&newer), Some(&older), false), Fallback::To(older), "the head before it");
-        assert_eq!(fallback(Some(&newer), None, false), Fallback::Nowhere, "a checkpointed head with none before: a failed start, its files kept");
-        assert_eq!(fallback(Some(&claim), None, true), Fallback::Fresh, "a first life's claim, its device blank: a new disk again");
-        assert_eq!(fallback(Some(&claim), Some(&Head { epoch: 0, checkpoint: None, clean: false }), true), Fallback::Fresh, "blank, and no head it had a checkpoint: new again at once");
-        assert_eq!(fallback(Some(&claim), None, false), Fallback::Nowhere, "a claim whose segments would not open (corrupt, not blank): never a new disk over what shipped");
-        assert_eq!(fallback(Some(&newer), None, true), Fallback::Nowhere, "a checkpointed head is never blank: its files kept");
-        assert_eq!(fallback(Some(&Head { epoch: 5, checkpoint: None, clean: false }), Some(&older), false), Fallback::To(older), "a claim with a head before it: that one");
-        assert_eq!(fallback(None, None, false), Fallback::Nowhere, "no head: a new disk that would not make, a failed start");
+        use Unopened::*;
+        // a disk a life came up on: what shipped is someone's
+        assert_eq!(fallback(Some(&newer), Some(&older), Unusable, true), Fallback::To(older), "the head before it");
+        assert_eq!(fallback(Some(&newer), None, Unusable, true), Fallback::Nowhere, "a checkpointed head with none before: a failed start, its files kept");
+        assert_eq!(fallback(Some(&claim), None, Blank, true), Fallback::Fresh, "a first life's claim, its device blank: a new disk again");
+        assert_eq!(fallback(Some(&claim), Some(&Head { epoch: 0, checkpoint: None, clean: false }), Blank, true), Fallback::Fresh, "blank, and no head it had a checkpoint: new again at once");
+        assert_eq!(fallback(Some(&claim), None, Unusable, true), Fallback::Nowhere, "a claim whose segments would not open (corrupt, not blank): never a new disk over what shipped");
+        assert_eq!(fallback(Some(&newer), None, Blank, true), Fallback::Nowhere, "a checkpointed head is never blank: its files kept");
+        assert_eq!(fallback(Some(&claim), None, Unmountable, true), Fallback::Nowhere, "a filesystem that would not mount on a disk that came up: its files kept");
+        assert_eq!(fallback(Some(&newer), Some(&older), Unmountable, true), Fallback::To(older), "or the head before it");
+        assert_eq!(fallback(Some(&Head { epoch: 5, checkpoint: None, clean: false }), Some(&older), Unusable, true), Fallback::To(older), "a claim with a head before it: that one");
+        assert_eq!(fallback(None, None, Unusable, true), Fallback::Nowhere, "no head: a new disk that would not make, a failed start");
+        // a disk no life came up on holds nothing of anyone's: a format
+        // cut short (Codex on #1552), or any head of it that will not open,
+        // is a new disk again, its open's own checkpoint whatever it names
+        assert_eq!(fallback(Some(&claim), None, Unmountable, false), Fallback::Fresh, "a format cut short: a new disk");
+        assert_eq!(fallback(Some(&Head { epoch: 2, checkpoint: ck(2, 1), clean: false }), Some(&claim), Unmountable, false), Fallback::Fresh, "its replay's checkpoint, still nothing of anyone's");
+        assert_eq!(fallback(Some(&claim), None, Unusable, false), Fallback::Fresh);
+        assert_eq!(fallback(Some(&claim), None, Blank, false), Fallback::Fresh);
+        assert_eq!(fallback(None, None, Unmountable, false), Fallback::Nowhere, "no head: nothing to start over from");
     }
 
     #[test]

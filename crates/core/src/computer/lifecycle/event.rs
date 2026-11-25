@@ -142,11 +142,12 @@ pub enum Event {
     /// starts it. Nothing else: no start is made, and one begun since (a
     /// wake as it was chosen) restores the save chosen already.
     SaveChosen,
-    /// Its owner's export asks for a save of its disk (which keeps none of
-    /// its own: docs/computers.md, "A disk"), taken awake under the hold as
-    /// any awake save; the export wakes it. Nothing for a computer with
-    /// saves of its own.
-    ExportAsked,
+    /// Its owner's export, begun at `since_ms`, asks for a save of its disk
+    /// (which keeps none of its own: docs/computers.md, "A disk"), taken
+    /// awake under the hold as any awake save; the export wakes it. Nothing
+    /// for a computer with saves of its own, nor once a save landed since
+    /// (the export's look raced it: Codex on #1552).
+    ExportAsked { since_ms: i64 },
     /// Its owner's export stopped waiting for that save (its wait ran out):
     /// the ask goes, so no later moment takes a save nobody waits for.
     ExportDropped,

@@ -550,11 +550,14 @@ put on disks.
   /open` names the disk, that life's epoch (its generation), its volume
   (20,000 MiB) and its head; `GET` and `PUT /o/<name>` read and put
   objects (bodies streamed, a put checked against its SHA-256 and refused
-  over an existing name, only under its own epoch); `POST /head` goes to
-  the DO's rules. Beside the contract, the platform's own `POST /unusable
-  {why, blank}`: its boot's word that the head it was handed will not open,
-  which the route sends on with that life's epoch and that head. The
-  guest names no disk and holds no credential.
+  over an existing name, only under its own epoch, and kept only if that
+  life still runs as it lands: one landing as its life ends, a sleep's
+  stop or a wipe, is taken back); `POST /head` goes to the DO's rules.
+  Beside the contract, the platform's own `POST /unusable {why, blank,
+  unmountable}`: its boot's word that the head it was handed will not
+  open, which the route sends on with that life's epoch and that head.
+  A post's body is read within its bound as it comes. The guest names no
+  disk and holds no credential.
 - **Its start.** No restore, no gate, no snapshot: `FRAGMENT_DISK=fpac`,
   and the image's boot mounts `/data` before anything reads it, its
   daemon's log and status on a tmpfs at `/run/fpac` (never on the disk
@@ -566,11 +569,14 @@ put on disks.
   stored is still the one that start was handed, the head falls back to
   the one before it, and it starts again at once, no strike (that life's
   writes since lost, and logged). With none before it, a strike as any
-  failed start. A new disk's first life that ended before anything of it
-  shipped (its head a claim, nothing to replay: its boot finds the device
-  blank, `blank` in its word) starts again as a new disk; a head that will
-  not open for any other reason keeps what shipped, for an operator, never
-  started over.
+  failed start. A disk none of whose lives came up (its guest never ran:
+  a new disk's first boot ships its format before its first read, so one
+  that came up was whole) holds nothing of anyone's: whatever its boot
+  found (its device blank, `blank`; its filesystem unmountable, a format
+  cut short, `unmountable`), it starts again as a new disk. So does a
+  blank device none of whose heads names a checkpoint. A head that will
+  not open on a disk that came up keeps what shipped, for an operator,
+  never started over.
 - **Its sleep is a signal and a wait.** Its port tabs close; the DO
   reads its owner's Storage from its `/data`'s own filesystem (one `df`,
   its used bytes its data: nothing in a sleep grows with its files, and a
@@ -578,7 +584,11 @@ put on disks.
   export's save or a file's delete makes; it reads its
   daemon's status (`fpac status`) until nothing is unshipped, at most
   `DISK_DRAIN_MS` (45 s), and a wake meanwhile cancels the sleep
-  as a hold's wake does; then SIGTERM, its image's boot stops its own
+  as a hold's wake does. It never stops with writes in it unshipped: a
+  wait that ends with some left, or no word of them, keeps its container,
+  awake again, as a sleep whose save failed does, and its next sleep waits
+  again; past the unsaved bound it stops anyway, saying what was lost.
+  Drained, SIGTERM; its image's boot stops its own
   programs and its daemon's final flush ships what is left and posts a
   clean head; the DO waits for the container to exit
   (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A crash
@@ -592,13 +602,16 @@ put on disks.
   again every 20 s for at most 20 minutes from its first look, then goes on
   without it, saying so. The ask is for a computer that runs (one whose
   start or life ended has none) and the export's last look drops it; the
-  export asks again while it waits. On a disk, Hermes' boot never puts a hold's
+  export asks again while it waits, and one that asks once a save landed
+  since its export began takes no second. On a disk, Hermes' boot never puts a hold's
   copies back: the live databases are newer. Its view lists those
   saves; no start restores one; `restored.from` is `disk`.
 - **What an image does.** It carries `/usr/local/bin/fpac` and `mke2fs`
   1.47 or later (a new disk's ext4), and on `FRAGMENT_DISK=fpac` mounts
-  `/data` with it, waits for the mount, says what it did with its first
-  read of its view, and on SIGTERM waits for its daemon's final flush
+  `/data` with it, waits for the mount (on a new disk, until its format
+  has shipped), says what it did with its first read of its view, tells
+  a head that will not open, a blank device or an unmountable filesystem
+  apart in its word, and on SIGTERM waits for its daemon's final flush
   before it exits (`fragment_bridge::disk`: our Hermes image's boot, and
   the stub's bridge as its PID 1). The runtime gives its container FUSE
   and a loop device: Cloudflare's does, and krun's on a self-hosted box;

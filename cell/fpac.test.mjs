@@ -51,6 +51,9 @@ function bucket() {
       objects.set(key, bytes);
       return { key };
     },
+    async delete(key) {
+      objects.delete(key);
+    },
   };
 }
 
@@ -65,7 +68,7 @@ const RULES = {
 };
 const DISK = { prefix: "disks/17c33cdf88c6d1d8f58b7a0f/", name: "17c33cdf88c6d1d8f58b7a0f", epoch: 7, volume: 20_971_520_000, head: "6 6 2 " + "ab".repeat(32) + " clean" };
 const call = (b, method, path, { body, headers = {} } = {}, posted = async () => ({ answer: "taken" })) =>
-  fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, body, headers, duplex: "half" }), b, DISK, RULES, posted);
+  fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, body, headers, duplex: "half" }), b, DISK, RULES, posted, async () => ({}), async () => true, () => {});
 const putOf = (b, path, bytes, sum = sha(bytes).toString("hex")) => call(b, "PUT", path, { body: bytes, headers: { "x-fpac-sha256": sum, "content-length": String(bytes.length) } });
 
 test("open names the disk, this life's epoch, its volume and its head, from the props", async () => {
@@ -145,8 +148,8 @@ test("a name outside the grammar, another life's epoch, a body past its limit or
 
 test("a boot's word that its head will not open goes on with this life's epoch and that head alone", async () => {
   const seen = [];
-  const told = async (epoch, head, why, blank) => {
-    seen.push([epoch, head, why, blank]);
+  const told = async (epoch, head, why, blank, unmountable) => {
+    seen.push([epoch, head, why, blank, unmountable]);
     return { taken: true };
   };
   const post = (body, disk = DISK) => {
@@ -157,14 +160,20 @@ test("a boot's word that its head will not open goes on with this life's epoch a
   assert.deepEqual([r.status, await r.json()], [200, { taken: true }]);
   assert.equal((await post({ why: "a blank disk", blank: true }, { ...DISK, head: null })).status, 200);
   assert.equal((await post({ why: "said loosely", blank: "yes" })).status, 200);
+  assert.equal((await post({ why: "its filesystem would not mount", unmountable: true })).status, 200);
   assert.deepEqual(
     seen,
-    [[7, DISK.head, "the disk does not open: no such checkpoint", false], [7, null, "a blank disk", true], [7, DISK.head, "said loosely", false]],
-    "its props' life and head, never the guest's say; blank only when said exactly",
+    [
+      [7, DISK.head, "the disk does not open: no such checkpoint", false, false],
+      [7, null, "a blank disk", true, false],
+      [7, DISK.head, "said loosely", false, false],
+      [7, DISK.head, "its filesystem would not mount", false, true],
+    ],
+    "its props' life and head, never the guest's say; blank and unmountable only when said exactly",
   );
   assert.equal((await post({ nope: 1 })).status, 400, "it says why");
   assert.equal((await post({ why: "x".repeat(5000) })).status, 413, "within its bound");
-  assert.equal(seen.length, 3, "neither refused one reached the DO");
+  assert.equal(seen.length, 4, "neither refused one reached the DO");
 });
 
 test("a head post goes to the DO's rules with this life's epoch, its answer passed back", async () => {
@@ -181,4 +190,44 @@ test("a head post goes to the DO's rules with this life's epoch, its answer pass
   const long = "9".repeat(RULES.headLineMax + 1);
   assert.equal((await call(bucket(), "POST", "/head", { body: long, headers: { "content-length": String(long.length) } }, posted)).status, 413);
   assert.deepEqual(seen.map(([e]) => e), [7, 7], "this life's epoch, from the props; the long one never reached it");
+});
+
+// a body that names no length, a KiB a pull, counting what was pulled
+function counted(kib) {
+  const seen = { pulled: 0 };
+  const stream = new ReadableStream({
+    pull(c) {
+      if (seen.pulled >= kib) return c.close();
+      seen.pulled += 1;
+      c.enqueue(new Uint8Array(1024).fill(0x61));
+    },
+  });
+  return { stream, seen };
+}
+
+test("a small post's body is read within its bound as it comes: one that names no length is refused once it passes", async () => {
+  for (const [path, bound] of [["/unusable", 4096], ["/head", RULES.headLineMax]]) {
+    const { stream, seen } = counted(1024);
+    const r = await fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method: "POST", body: stream, duplex: "half" }), bucket(), DISK, RULES, async () => ({ answer: "taken" }), async () => ({ taken: true }));
+    assert.equal(r.status, 413, `${path} refused past its bound`);
+    assert.ok(seen.pulled <= Math.ceil(bound / 1024) + 2, `${path} read ${seen.pulled} KiB of a 1 MiB body, not past its ${bound} bytes`);
+  }
+});
+
+test("a put that lands as its life ends is taken back: only a life that still runs keeps what it put", async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const kept = [];
+  const put = (b, runs) =>
+    fpacRoute(new Request("http://fpac.fragment.internal/o/e7/s9", { method: "PUT", body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": "3" }, duplex: "half" }), b, DISK, RULES, async () => ({}), async () => ({}), runs, (p) => kept.push(p));
+  const running = bucket();
+  assert.equal((await put(running, async () => true)).status, 201);
+  assert.ok(running.objects.has(`${DISK.prefix}e7/s9`), "its life runs: kept");
+  const ended = bucket();
+  const r = await put(ended, async () => false);
+  assert.equal(r.status, 410, "its life ended as it landed");
+  assert.ok(!ended.objects.has(`${DISK.prefix}e7/s9`), "taken back");
+  const unknown = bucket();
+  assert.equal((await put(unknown, async () => { throw new Error("the DO did not answer"); })).status, 503, "unknown: tried again");
+  assert.ok(!unknown.objects.has(`${DISK.prefix}e7/s9`), "taken back: a retry puts it again");
+  assert.equal(kept.length, 3, "each put and its check outlive the guest's connection (waitUntil)");
 });

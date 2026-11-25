@@ -10,11 +10,14 @@
 // R2's body handed on, a put the request's body into R2, never read here.
 // The head is the Computer DO's, moved only by the head's rules
 // (`fragment_core::computer::fpac::decide`): `postHead` carries a post to
-// it. Beside FPAC's contract, the platform's own `POST /unusable {why, blank}`:
+// it. Beside FPAC's contract, the platform's own `POST /unusable {why, blank, unmountable}`:
 // its boot's word that the head it was handed will not open, carried by
 // `postUnusable` with this life's epoch and that head, so the start it
 // fails is this one alone. `rules` are the Rust side's, one source of each: the name's grammar
-// (`nameEpoch`) and the bounds.
+// (`nameEpoch`) and the bounds. A put that lands is kept only while its life
+// still runs (`stillRuns`, the DO's word): one that lands as its life ends (a
+// sleep's stop, a wipe) is taken back, under `waitUntil` so the guest's
+// connection, gone with its container, cannot cut that short.
 
 const RANGE = /^bytes=(\d{1,15})-(\d{1,15})$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
@@ -27,9 +30,39 @@ function text(status, body, headers = {}) {
   return new Response(body, { status, headers: { "content-type": "text/plain", ...headers } });
 }
 
+// The body of a small post, at most `max` bytes, read as it comes: one that
+// passes it is refused before more is read, whatever it says of its length
+// (a stream need name none). Null past `max`.
+async function smallBody(request, max) {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && !(Number(declared) <= max)) return null;
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks = [];
+  let n = 0;
+  // bounded: it stops once `max` is passed
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value.byteLength;
+    if (n > max) {
+      reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const all = new Uint8Array(n);
+  let at = 0;
+  for (const c of chunks) {
+    all.set(c, at);
+    at += c.byteLength;
+  }
+  return new TextDecoder().decode(all);
+}
+
 // Answers the guest's call `request` for `disk` ({ prefix, name, epoch,
-// volume, head }) from `bucket` (R2: ranged get, put-if-absent, head).
-export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable) {
+// volume, head }) from `bucket` (R2: ranged get, put-if-absent, head, delete).
+export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable, stillRuns, waitUntil) {
   const url = new URL(request.url);
   const route = `${request.method} ${url.pathname}`;
   if (route === "GET /open") {
@@ -37,28 +70,27 @@ export async function fpacRoute(request, bucket, disk, rules, postHead, postUnus
     return text(200, "", { "x-fpac-disk": disk.name, "x-fpac-epoch": String(disk.epoch), "x-fpac-volume-bytes": String(disk.volume), "x-fpac-head": disk.head || "none" });
   }
   if (route === "POST /head") {
-    const declared = Number(request.headers.get("content-length"));
-    if (!(declared <= rules.headLineMax)) return text(413, "a head's line past its limit\n");
-    const line = await request.text();
-    if (line.length > rules.headLineMax) return text(413, "a head's line past its limit\n");
+    const line = await smallBody(request, rules.headLineMax);
+    if (line === null) return text(413, "a head's line past its limit\n");
     const a = await postHead(disk.epoch, line);
     if (a.answer) return text(200, "", { "x-fpac-head-answer": a.answer });
     return text(a.status || 409, `${a.refused || "refused"}\n`);
   }
   if (route === "POST /unusable") {
-    const declared = Number(request.headers.get("content-length"));
-    if (!(declared <= UNUSABLE_MAX_BYTES)) return text(413, "a report past its limit\n");
+    const body = await smallBody(request, UNUSABLE_MAX_BYTES);
+    if (body === null) return text(413, "a report past its limit\n");
     let said;
     try {
-      said = JSON.parse(await request.text());
+      said = JSON.parse(body);
     } catch {
       said = {};
     }
     const why = said && said.why;
     if (typeof why !== "string" || why.length > UNUSABLE_MAX_BYTES) return text(400, "say why ({why})\n");
-    // its device blank (nothing of it ever shipped): only then may the
-    // platform start it as a new disk (`fragment_core::computer::fpac::fallback`)
-    const a = await postUnusable(disk.epoch, disk.head || null, why, said.blank === true);
+    // what its boot found: its device blank (nothing of it ever shipped), or
+    // its filesystem unmountable (a format cut short); the platform decides
+    // whether it starts as a new disk (`fragment_core::computer::fpac::fallback`)
+    const a = await postUnusable(disk.epoch, disk.head || null, why, said.blank === true, said.unmountable === true);
     return new Response(JSON.stringify(a), { status: 200, headers: { "content-type": "application/json" } });
   }
   const name = url.pathname.startsWith("/o/") ? url.pathname.slice(3) : null;
@@ -70,7 +102,10 @@ export async function fpacRoute(request, bucket, disk, rules, postHead, postUnus
   if (request.method === "PUT") {
     // only this life writes, and only under its own epoch
     if (epoch !== disk.epoch) return text(403, "a put names another life's epoch\n");
-    return put(bucket, key, request, rules.objectBytesMax);
+    // the put and its check go on if the guest's connection goes
+    const putting = put(bucket, key, request, rules.objectBytesMax, stillRuns);
+    waitUntil(putting.catch(() => {}));
+    return putting;
   }
   return text(405, "GET or PUT\n");
 }
@@ -115,8 +150,10 @@ async function get(bucket, key, range) {
 // Put-if-absent. R2 checks the body against the SHA-256 the put names and
 // refuses the put when the name is taken; then the stored object's
 // checksum tells our own earlier put (200: its answer was lost) from
-// another writer's (409: the daemon is fenced).
-async function put(bucket, key, request, objectBytesMax) {
+// another writer's (409: the daemon is fenced). One it made is kept only if
+// its life still runs as it lands (410, taken back: its life ended; 503,
+// taken back: the DO did not say, and the daemon puts it again).
+async function put(bucket, key, request, objectBytesMax, stillRuns) {
   const claimed = request.headers.get("x-fpac-sha256") || "";
   if (!SHA256_HEX.test(claimed)) return text(400, "a put names its SHA-256\n");
   const length = Number(request.headers.get("content-length"));
@@ -133,7 +170,17 @@ async function put(bucket, key, request, objectBytesMax) {
     const why = String((e && e.message) || e);
     return text(/sha|checksum|digest/i.test(why) ? 400 : 503, `the put: ${why}\n`);
   }
-  if (stored !== null) return text(201, "", { "x-fpac-sha256": claimed });
+  if (stored !== null) {
+    let runs;
+    try {
+      runs = (await stillRuns()) === true;
+    } catch {
+      runs = null;
+    }
+    if (runs) return text(201, "", { "x-fpac-sha256": claimed });
+    await bucket.delete(key);
+    return runs === null ? text(503, "its life's word did not come: taken back\n") : text(410, "its life has ended: taken back\n");
+  }
   const there = await bucket.head(key);
   if (there === null || !there.checksums || !there.checksums.sha256) return text(503, "the name was taken, then gone\n");
   const sum = hex(there.checksums.sha256);
