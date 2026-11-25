@@ -884,8 +884,10 @@ fn hand_over(c: &Computer, ticket: &Value, into: &std::path::Path) -> (u16, Vec<
 /// door's newest save (`behind` its door's newest effects or not).
 fn hand_back(c: &Computer, ticket: &Value, save: &std::path::Path, behind: bool) -> (u16, Value) {
     let url = format!("http://127.0.0.1:{}/simplex/back?agent=juniper--k3x9", c.port);
+    // named by its SHA-256, as its door names it
+    let sha: String = sha2::Digest::finalize(sha2::Digest::chain_update(<sha2::Sha256 as sha2::Digest>::new(), std::fs::read(save).unwrap_or_default())).iter().map(|b| format!("{b:02x}")).collect();
     let out = Command::new("curl")
-        .args(["-s", "-X", "POST", "-w", "\n%{http_code}", "-H", &format!("x-door-ticket: {ticket}"), "-H", &format!("x-door-behind: {}", u8::from(behind)), "--data-binary"])
+        .args(["-s", "-X", "POST", "-w", "\n%{http_code}", "-H", &format!("x-door-ticket: {ticket}"), "-H", &format!("x-door-behind: {}", u8::from(behind)), "-H", &format!("x-door-sha256: {sha}"), "--data-binary"])
         .arg(format!("@{}", save.display()))
         .arg(&url)
         .output()

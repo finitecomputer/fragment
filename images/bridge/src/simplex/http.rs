@@ -23,7 +23,8 @@
 //!   `x-simplex-chat`, and `x-simplex-staged` for its owner's staged chat
 //!   with their old agent, never kept here);
 //! - `POST /simplex/back?agent=…`, the way back, its ticket in
-//!   `x-door-ticket` and its door's newest save the body (`x-door-behind`).
+//!   `x-door-ticket` and its door's newest save the body (`x-door-behind`),
+//!   named by its SHA-256 (`x-door-sha256`), checked before it is placed.
 //!
 //! The tickets come from the owner's Settings alone, signed by the
 //! platform (`door`): the agent's tools, which reach this port too, can
@@ -149,9 +150,9 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
             Err(_) => return refused(Refused { status: 413, why: "the way back's save is past a save's bound".into(), code: Some("too_large") }),
         };
         // the save its door handed back, as its door hashed it: a copy
-        // damaged on its way (seen once on Cloudflare) takes nothing here,
-        // its ticket not taken, and is asked for again
-        if let Some(refusal) = sha.and_then(|sha| super::run::damaged(&packed, &sha)) {
+        // damaged on its way (seen once on Cloudflare), or one that names
+        // no SHA-256, takes nothing here, its ticket not taken
+        if let Some(refusal) = super::run::damaged(&packed, sha.as_deref()) {
             return refused(refusal);
         }
         return match h.back(&agent, t, packed, behind).await {

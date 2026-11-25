@@ -390,8 +390,16 @@ fn save_refused(e: super::save::SaveError) -> Refused {
 
 /// A way back's save that is not the one its door hashed (`sha`): damaged
 /// on its way, refused before anything is taken (422 `damaged`), so it is
-/// asked for again.
-pub fn damaged(packed: &[u8], sha: &str) -> Option<Refused> {
+/// asked for again; or one that names no SHA-256 to be checked by (400,
+/// never placed unchecked). A way back that carries none (its computer's
+/// own copy the link still) has nothing to check.
+pub fn damaged(packed: &[u8], sha: Option<&str>) -> Option<Refused> {
+    if packed.is_empty() {
+        return None;
+    }
+    let Some(sha) = sha else {
+        return Some(Refused::new(400, "its door's save names no SHA-256 (x-door-sha256) to check it by").coded("unnamed"));
+    };
     let got = sha256_hex(packed);
     (got != sha).then(|| Refused::new(422, format!("its door's save came damaged on its way ({} bytes, SHA-256 {}…, its door's {}…): ask again", packed.len(), &got[..12], &sha[..sha.len().min(12)])).coded("damaged"))
 }
@@ -4584,12 +4592,16 @@ mod tests {
     fn a_save_damaged_on_its_way_back_is_told_so() {
         let save = b"its door's save, whole".to_vec();
         let sha = sha256_hex(&save);
-        assert!(damaged(&save, &sha).is_none(), "its own bytes");
+        assert!(damaged(&save, Some(&sha)).is_none(), "its own bytes");
         let mut hurt = save.clone();
         hurt[3] ^= 0x10;
-        let r = damaged(&hurt, &sha).expect("damaged");
+        let r = damaged(&hurt, Some(&sha)).expect("damaged");
         assert_eq!((r.status, r.code), (422, Some("damaged")));
-        assert!(damaged(&save[..save.len() - 1], &sha).is_some(), "cut short");
+        assert!(damaged(&save[..save.len() - 1], Some(&sha)).is_some(), "cut short");
+        // never placed unchecked (Codex's round on fa83432f9); none carried, nothing to check
+        let r = damaged(&save, None).expect("unnamed");
+        assert_eq!((r.status, r.code), (400, Some("unnamed")));
+        assert!(damaged(&[], None).is_none(), "its computer's own copy");
     }
 
     /// Goal (D4, Codex's fix-check of #1541): what a way back carried from its
