@@ -388,6 +388,14 @@ fn save_refused(e: super::save::SaveError) -> Refused {
     }
 }
 
+/// A way back's save that is not the one its door hashed (`sha`): damaged
+/// on its way, refused before anything is taken (422 `damaged`), so it is
+/// asked for again.
+pub fn damaged(packed: &[u8], sha: &str) -> Option<Refused> {
+    let got = sha256_hex(packed);
+    (got != sha).then(|| Refused::new(422, format!("its door's save came damaged on its way ({} bytes, SHA-256 {}…, its door's {}…): ask again", packed.len(), &got[..12], &sha[..sha.len().min(12)])).coded("damaged"))
+}
+
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
@@ -4566,6 +4574,22 @@ mod tests {
         assert_eq!(std::fs::read(link_dir.join("sx_chat.db")).ok(), before, "nothing placed");
         assert!(!link_dir.join("restoring").exists() && stage::ready(&link_dir).is_some(), "its staged copy as it was");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal (#1541's hosted check, 11-25): a way back's save damaged on its
+    /// way into its computer (seen once on Cloudflare: a streamed body,
+    /// its gzip's checksum wrong) is told apart before anything is taken,
+    /// so it is asked for again; the door's own bytes pass.
+    #[test]
+    fn a_save_damaged_on_its_way_back_is_told_so() {
+        let save = b"its door's save, whole".to_vec();
+        let sha = sha256_hex(&save);
+        assert!(damaged(&save, &sha).is_none(), "its own bytes");
+        let mut hurt = save.clone();
+        hurt[3] ^= 0x10;
+        let r = damaged(&hurt, &sha).expect("damaged");
+        assert_eq!((r.status, r.code), (422, Some("damaged")));
+        assert!(damaged(&save[..save.len() - 1], &sha).is_some(), "cut short");
     }
 
     /// Goal (D4, Codex's fix-check of #1541): what a way back carried from its

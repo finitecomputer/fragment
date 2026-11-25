@@ -71,7 +71,7 @@ function storage() {
 // The bucket: `uploading`, when set, is awaited in the middle of each put.
 function bucket() {
   const b = { files: new Map(), uploading: null };
-  b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream() } : null);
+  b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream(), arrayBuffer: () => new Blob([b.files.get(k)]).arrayBuffer() } : null);
   // R2's put: a SHA-256 asked of it is checked as it stores (else it throws)
   b.put = async (k, v, opts = {}) => {
     const bytes = typeof v === "string" ? v : await new Response(v).text();
@@ -909,6 +909,10 @@ test("the way back: a planned stop, its runner's last save, and that save handed
   assert.deepEqual([(await back("juniper-simplex--0000--0123456789ab")).status], [409], "another door's");
   const r = await back();
   assert.deepEqual([r.status, r.headers.get("x-door-save"), r.headers.get("x-door-behind"), await r.text()], [200, `${life1}-2`, "0", "its last"]);
+  // with its SHA-256, which its computer checks before it places it (a copy
+  // damaged on its way, seen once on Cloudflare, is refused and asked again)
+  const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("its last")))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  assert.equal(r.headers.get("x-door-sha256"), sha);
   assert.deepEqual(d.c.signals, [15], "a planned stop");
   assert.equal(d.row().stopped, "handed back", "and not started again");
   const again = await back();

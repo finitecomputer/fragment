@@ -422,8 +422,14 @@ export class SimplexDoor extends DurableObject {
       if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
       const obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
       if (obj) {
-        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks) });
-        return new Response(obj.body, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", "content-type": "application/octet-stream" } });
+        // whole, with its SHA-256 (`x-door-sha256`), as an import carries
+        // one the other way: the computer that places it checks it, so a
+        // copy damaged on its way (seen once on Cloudflare, between here
+        // and its computer's container) is refused, and asked for again
+        const bytes = new Uint8Array(await obj.arrayBuffer());
+        const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
+        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: bytes.length, sha });
+        return new Response(bytes, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" } });
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }

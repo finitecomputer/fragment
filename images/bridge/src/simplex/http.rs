@@ -47,7 +47,8 @@ use crate::net::{self, Body};
 const TICKET_MAX_BYTES: usize = 2_048;
 /// A handover's answer: its save's SHA-256 (hex), its length (the
 /// platform's own header for it: a stream's length may be dropped on its
-/// way), and its SimpleX chat.
+/// way), and its SimpleX chat. A way back's save carries its SHA-256 too,
+/// its door's, checked before it is placed.
 const SHA_HEADER: &str = "x-door-sha256";
 const LENGTH_HEADER: &str = "x-door-length";
 const CHAT_HEADER: &str = "x-simplex-chat";
@@ -142,10 +143,17 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
         let ticket = req.headers().get(TICKET_HEADER).and_then(|v| serde_json::from_slice::<Ticket>(v.as_bytes()).ok());
         let behind = req.headers().get(BEHIND_HEADER).is_some_and(|v| v == "1");
         let Some(t) = ticket else { return refused(Refused { status: 403, why: "the way back carries its ticket".into(), code: None }) };
+        let sha = req.headers().get(SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
         let packed = match Limited::new(req.into_body(), super::run::BACK_MAX_BYTES).collect().await {
             Ok(b) => b.to_bytes().to_vec(),
             Err(_) => return refused(Refused { status: 413, why: "the way back's save is past a save's bound".into(), code: Some("too_large") }),
         };
+        // the save its door handed back, as its door hashed it: a copy
+        // damaged on its way (seen once on Cloudflare) takes nothing here,
+        // its ticket not taken, and is asked for again
+        if let Some(refusal) = sha.and_then(|sha| super::run::damaged(&packed, &sha)) {
+            return refused(refusal);
+        }
         return match h.back(&agent, t, packed, behind).await {
             Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
             Err(r) => refused(r),

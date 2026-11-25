@@ -65,6 +65,9 @@ use crate::routed::{Routed, Signed};
 const TEMPLATE: &str = fragment_core::door::SIMPLEX;
 const SECRET: &str = "SIMPLEX_DOOR_SECRET";
 const DOOR_HOST: &str = "door.fragment.internal";
+/// A way back's asks of its door, a copy its computer found damaged on its
+/// way asked for again (`back`).
+const BACK_ASKS: u32 = 3;
 
 pub(crate) async fn simplex_move(env: &Env, cfg: &Config, url: &Url, by: &str, person: &str, bytes: &[u8]) -> CellResult<Value> {
     if !fragment_core::npub::is_identity(person) {
@@ -174,7 +177,7 @@ impl Move<'_> {
         if read["record"].is_null() {
             if read["awake"] != true {
                 // its handover's call wakes it: asked so, it says it is waking
-                let woke = self.hand("handover", None, false).await;
+                let woke = self.hand("handover", None, false, "").await;
                 return Err(woke.err().unwrap_or_else(|| CellError::new(ErrorCode::Conflict, "its computer was asleep: ask again")));
             }
             if let Some(why) = self.blocked(&read) {
@@ -279,7 +282,7 @@ impl Move<'_> {
     /// the agent's computer door closed: what its computer signs relays no
     /// one now.
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
-        let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false).await?.into();
+        let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false, "").await?.into();
         let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
         let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
         let body = save.body().map(Into::into);
@@ -295,8 +298,8 @@ impl Move<'_> {
 
     /// Its computer's half (`computer/simplex-hand`): a handover, or the
     /// way back with its door's save (`save`, `behind`).
-    async fn hand(&self, act: &str, save: Option<worker::wasm_bindgen::JsValue>, behind: bool) -> CellResult<Response> {
-        let headers = [("x-door-act", act), ("x-door-agent", self.agent.as_str()), ("x-door-behind", if behind { "1" } else { "0" })];
+    async fn hand(&self, act: &str, save: Option<worker::wasm_bindgen::JsValue>, behind: bool, sha: &str) -> CellResult<Response> {
+        let headers = [("x-door-act", act), ("x-door-agent", self.agent.as_str()), ("x-door-behind", if behind { "1" } else { "0" }), ("x-door-sha256", sha)];
         let mut r = crate::routed::send(self.env, "COMPUTER", &self.computer, crate::routed::internal_stream("computer/simplex-hand", Method::Post, &headers, save)?).await?;
         if r.status_code() != 200 {
             answer(&mut r, &format!("its computer's {act}")).await?;
@@ -314,32 +317,44 @@ impl Move<'_> {
         if rec.is_null() {
             return Err(CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {} to go back from", self.agent)));
         }
-        if rec["moved"] == true {
-            // its door stops, saving last, and hands its newest save back
+        // its door stops, saving last, and hands its newest save back, with
+        // its SHA-256; a copy its computer finds damaged on its way (seen
+        // once on Cloudflare) changed nothing there, and is asked for again
+        // (the door answers the same save), at most `BACK_ASKS` times
+        for asks in 1..=BACK_ASKS {
+            if rec["moved"] != true {
+                break;
+            }
             let door = text(&rec, "door");
             let mut held = crate::routed::send(self.env, "SIMPLEX_DOOR", door, crate::routed::internal_request("door/handback", &json!({ "door": door }).to_string())?).await?;
-            let (save, behind) = match held.status_code() {
+            let (save, behind, sha) = match held.status_code() {
                 // its save, whatever it is, the one it was given too (its
                 // computer may have gone back to an older save since): the
                 // bridge places a link's, and keeps a staged chat its door
                 // never kept staged as it was
                 200 => {
                     let raw: worker::worker_sys::web_sys::Response = held.into();
-                    let behind = raw.headers().get("x-door-behind").ok().flatten().as_deref() == Some("1");
-                    (raw.body().map(Into::into), behind)
+                    let head = |k: &str| raw.headers().get(k).ok().flatten().unwrap_or_default();
+                    let (behind, sha) = (head("x-door-behind") == "1", head("x-door-sha256"));
+                    (raw.body().map(Into::into), behind, sha)
                 }
                 // none: a door never given the link, its computer's copy
                 // the link still; one given it that holds nothing now ended
                 // with it (its person unlinked it): no way back, its
                 // computer's old copy never run again
-                204 if matches!(text(&rec, "step"), "making" | "made") => (None, false),
+                204 if matches!(text(&rec, "step"), "making" | "made") => (None, false, String::new()),
                 204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} holds {}'s SimpleX link no more (unlinked, so ended): no way back; its computer's copy stays stopped", self.agent))),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
             };
-            self.hand("back", save, behind).await?;
+            match self.hand("back", save, behind, &sha).await {
+                Err(e) if e.message.contains(" 422 damaged:") && asks < BACK_ASKS => continue,
+                Err(e) => return Err(e),
+                Ok(_) => {}
+            }
             if let Some(chat) = rec["chat"].as_str() {
                 crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: false }).await?;
             }
+            break;
         }
         // its connector kept, its chat's history with it: unbound (its door
         // ends) once it has taken what its door delivered, and archived

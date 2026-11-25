@@ -1778,7 +1778,7 @@ fn run(cli: Cli) -> Result<()> {
             if back {
                 let v = ask("back")?;
                 json_exit(j, &v);
-                println!("{agent}'s SimpleX is on its computer again; {} deleted", v["connector"].as_str().unwrap_or("no connector"));
+                println!("{agent}'s SimpleX is on its computer again; {} unbound and archived, its history kept", v["connector"].as_str().unwrap_or("no connector"));
                 return Ok(());
             }
             if dry_run || !yes {
