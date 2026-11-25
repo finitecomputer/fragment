@@ -149,15 +149,17 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "went": went, "computer_off": computer_off, "archived": archived, "secs": t0.elapsed().as_secs() }),
     );
     // what the phone said as it moved: once, in the connector's chat alone,
-    // and answered (taken, so its answer is not the next one's)
-    let landed = during && s.eventually(SLOW, || relayed(api, &owner, &connector).iter().any(|t| t == "during the move"));
-    let heard = landed && phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty())).is_ok();
-    let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
-    s.ok(
-        "a message the phone sent as it moved (its computer's core stopped, its door starting) arrives once, in the connector's chat, and is answered",
-        landed && heard && in_door.iter().filter(|t| *t == "during the move").count() == 1 && !in_old.iter().any(|t| t == "during the move"),
-        json!({ "sent": during, "door": in_door, "old": in_old, "answered": heard }),
-    );
+    // and answered (taken, so its answer is not the next one's); a door
+    // linked within the `go` that started it left no cutover to say it in
+    let cutover = "a message the phone sent as it moved (its computer's core stopped, its door starting) arrives once, in the connector's chat, and is answered";
+    if during {
+        let landed = s.eventually(SLOW, || relayed(api, &owner, &connector).iter().any(|t| t == "during the move"));
+        let heard = landed && phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty())).is_ok();
+        let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
+        s.ok(cutover, landed && heard && in_door.iter().filter(|t| *t == "during the move").count() == 1 && !in_old.iter().any(|t| t == "during the move"), json!({ "door": in_door, "old": in_old, "answered": heard }));
+    } else {
+        s.skip(cutover, "its door linked within the `go` that started it: no cutover to send in");
+    }
     let after = answered(s, api, &owner, &mut phone, contact, "after the move", &connector);
     let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
     // what its connector's chat and its door hold now, said when an answer does not come

@@ -31,6 +31,19 @@ globalThis.FixedLengthStream ??= class {
     this.writable = t.writable;
   }
 };
+// workerd's: a sink that hashes what it is given (`digest` once closed)
+if (!globalThis.crypto.DigestStream) {
+  const { createHash } = await import("node:crypto");
+  globalThis.crypto.DigestStream = class extends WritableStream {
+    constructor() {
+      const h = createHash("sha256");
+      let done;
+      const digest = new Promise((r) => (done = r));
+      super({ write: (c) => void h.update(c), close: () => done(h.digest().buffer) });
+      this.digest = digest;
+    }
+  };
+}
 const logged = [];
 console.log = (line) => logged.push(JSON.parse(line));
 const { SimplexDoor } = await import("./door.mjs");
@@ -71,7 +84,9 @@ function storage() {
 // The bucket: `uploading`, when set, is awaited in the middle of each put.
 function bucket() {
   const b = { files: new Map(), uploading: null };
-  b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream(), arrayBuffer: () => new Blob([b.files.get(k)]).arrayBuffer() } : null);
+  // its body a stream alone: a save handed back is streamed, never read
+  // whole (one may be 64 MiB: Codex's round on #1541)
+  b.get = async (k) => (b.files.has(k) ? { body: new Blob([b.files.get(k)]).stream() } : null);
   // R2's put: a SHA-256 asked of it is checked as it stores (else it throws)
   b.put = async (k, v, opts = {}) => {
     const bytes = typeof v === "string" ? v : await new Response(v).text();

@@ -69,6 +69,9 @@ export const STEPS = [
   // the save it was given to begin from (`/door/import`), by its SHA-256:
   // at most one, ever
   "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL, staged INTEGER NOT NULL DEFAULT 0)",
+  // each save's SHA-256, taken as it came, which its way back carries to
+  // the computer that places it (none for a save from before it)
+  "ALTER TABLE saves ADD COLUMN sha TEXT",
 ];
 
 // The steps a schema at `version` has yet to take, in order.
@@ -203,4 +206,23 @@ export const saveId = (s) => `${s.generation}-${s.seq}`;
 export function parseSaveId(id) {
   const m = typeof id === "string" ? /^([0-9]{1,15})-([0-9]{1,15})$/.exec(id) : null;
   return m ? { generation: Number(m[1]), seq: Number(m[2]) } : null;
+}
+
+// A stream passed through as it comes, its SHA-256 taken on the way (hex,
+// `digest` once it ends), one chunk at a time with its backpressure, never
+// the whole held at once (a save may be 64 MiB).
+export function hashing() {
+  const digest = new crypto.DigestStream("SHA-256");
+  const w = digest.getWriter();
+  const stream = new TransformStream({
+    async transform(chunk, c) {
+      await w.write(chunk.slice());
+      c.enqueue(chunk);
+    },
+    async flush() {
+      await w.close();
+    },
+  });
+  const hex = digest.digest.then((d) => [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join(""));
+  return { stream, digest: hex };
 }

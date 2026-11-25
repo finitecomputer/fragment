@@ -40,7 +40,7 @@
 // did not take at once.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, doorOf, doorPrefix, fenced, fileKey, fileRoom, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, hashing, doorOf, doorPrefix, fenced, fileKey, fileRoom, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -145,7 +145,7 @@ export class SimplexDoor extends DurableObject {
 
   #saves() {
     if (this.#ended || this.#over) return [];
-    return this.ctx.storage.sql.exec("SELECT generation, seq, mark, bytes, at, unreadable FROM saves").toArray();
+    return this.ctx.storage.sql.exec("SELECT generation, seq, mark, bytes, at, unreadable, sha FROM saves").toArray();
   }
 
   // An effect numbered: what the door asks of its runner, or takes from it.
@@ -333,7 +333,7 @@ export class SimplexDoor extends DurableObject {
         if (!this.#door()) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
         // the link it expected, given: its connect starts it now
         else this.ctx.storage.sql.exec("UPDATE door SET agent = ?, stopped = NULL WHERE id = 1 AND stopped = ?", agent, EXPECTING);
-        this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (0, 1, 0, ?, ?, 0)", put.size, Date.now());
+        this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable, sha) VALUES (0, 1, 0, ?, ?, 0, ?)", put.size, Date.now(), sha);
         this.ctx.storage.sql.exec("UPDATE door SET saved = 1 WHERE id = 1");
         this.ctx.storage.sql.exec("INSERT INTO imported (sha, at, staged) VALUES (?, ?, ?)", sha, Date.now(), staged);
       });
@@ -422,14 +422,15 @@ export class SimplexDoor extends DurableObject {
       if (r.kind === "exhausted") return refusal(410, "exhausted", "this door saved, and no save of it restores");
       const obj = await this.env.BLOBS.get(saveKey(d.door, r.save.generation, r.save.seq));
       if (obj) {
-        // whole, with its SHA-256 (`x-door-sha256`), as an import carries
-        // one the other way: the computer that places it checks it, so a
-        // copy damaged on its way (seen once on Cloudflare, between here
-        // and its computer's container) is refused, and asked for again
-        const bytes = new Uint8Array(await obj.arrayBuffer());
-        const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", bytes))].map((b) => b.toString(16).padStart(2, "0")).join("");
-        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: bytes.length, sha });
-        return new Response(bytes, { status: 200, headers: { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", [FILE_SHA_HEADER]: sha, "content-type": "application/octet-stream" } });
+        // streamed (a save may be 64 MiB), with the SHA-256 taken as it
+        // came (`x-door-sha256`), as an import carries one the other way:
+        // the computer that places it checks it, so a copy damaged on its
+        // way (seen once on Cloudflare, between here and its computer's
+        // container) is refused, and asked for again
+        const headers = { "x-door-behind": behind(r.save, d.marks) ? "1" : "0", "x-door-save": saveId(r.save), "x-door-started": d.started > 0 ? "1" : "0", "content-type": "application/octet-stream" };
+        if (r.save.sha) headers[FILE_SHA_HEADER] = r.save.sha;
+        this.#log("door.handed_back", { save: saveId(r.save), behind: behind(r.save, d.marks), bytes: r.save.bytes, sha: r.save.sha ?? null });
+        return new Response(obj.body, { status: 200, headers });
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }
@@ -876,7 +877,10 @@ export class SimplexDoor extends DurableObject {
     const ends = this.#ends;
     try {
       const { readable, writable } = new FixedLengthStream(length);
-      const [, put] = await Promise.all([request.body.pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      // its SHA-256 taken on its way in, for its way back to carry
+      const hashed = hashing();
+      const [, put] = await Promise.all([request.body.pipeThrough(hashed.stream).pipeTo(writable), this.env.BLOBS.put(key, readable)]);
+      const sha = await hashed.digest;
       // the door ended during its upload: its file, which that end's
       // deletion may have missed, goes too, and nothing names it
       if (this.#ends !== ends) {
@@ -888,7 +892,7 @@ export class SimplexDoor extends DurableObject {
         await this.env.BLOBS.delete(key);
         return refusal(409, "superseded", `life ${generation} was superseded during its save`);
       }
-      this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable) VALUES (?, ?, ?, ?, ?, 0)", generation, seq, mark, put.size, Date.now());
+      this.ctx.storage.sql.exec("INSERT INTO saves (generation, seq, mark, bytes, at, unreadable, sha) VALUES (?, ?, ?, ?, ?, 0, ?)", generation, seq, mark, put.size, Date.now(), sha);
       this.ctx.storage.sql.exec("UPDATE door SET saved = saved + 1 WHERE id = 1");
     } finally {
       this.#uploading.delete(key);

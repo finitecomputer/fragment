@@ -4267,7 +4267,7 @@ impl ComputerCell {
     /// bridge placed it. Its bridge's answer is passed on as it came; a
     /// handover it refused (a 4xx but `moved`: it changed nothing) is
     /// marked moved no more.
-    async fn simplex_hand(&self, mut req: Request) -> CellResult<Response> {
+    async fn simplex_hand(&self, req: Request) -> CellResult<Response> {
         let header = |k: &str| req.headers().get(k).ok().flatten().unwrap_or_default();
         let (act, agent, behind) = (header("x-door-act"), header("x-door-agent"), header("x-door-behind"));
         if !matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
@@ -4305,14 +4305,14 @@ impl ComputerCell {
             headers.set("x-door-ticket", &ticket.to_string()).map_err(|_| CellError::host("a header"))?;
             headers.set("x-door-behind", if behind == "1" { "1" } else { "0" }).map_err(|_| CellError::host("a header"))?;
             // its SHA-256, the door's, which the bridge checks before it
-            // places it; the save whole, at its length, never a stream into
-            // its container (one streamed came damaged once on Cloudflare)
+            // places it (a copy damaged on its way, seen once on Cloudflare,
+            // is refused and asked for again); streamed, never held whole
+            // here (a save may be 64 MiB, past what an isolate holds twice)
             if let Some(sha) = req.headers().get("x-door-sha256")?.filter(|s| s.len() == 64) {
                 headers.set("x-door-sha256", &sha).map_err(|_| CellError::host("a header"))?;
             }
-            let bytes = req.bytes().await?;
-            if !bytes.is_empty() {
-                init.set_body(&js_sys::Uint8Array::from(bytes.as_slice()).into());
+            if let Some(body) = req.inner().body() {
+                init.set_body(&body);
             }
         }
         init.set_headers(&headers);
