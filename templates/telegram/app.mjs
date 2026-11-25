@@ -16,8 +16,10 @@
 //   only while its owner has bound this chat as that agent's `telegram`
 //   door. A message they forward, or send through an inline bot, is not
 //   their words: it goes marked so (`marked`), its text quoted.
-// - `mirror` (each reply an agent posts here) sends it to that account,
-//   while the door is open.
+// - `mirror` (each reply an agent posts here, and each question it asks
+//   its owner on `work`, as applib/question.mjs words it) sends it to that
+//   account, while the door is open. Their next message answers a
+//   question that takes words.
 // - `typing`, started by `intake` as it relays a message, shows that
 //   account the bot typing until `mirror` sends the agent's answer, or
 //   for at most TYPING_ROUNDS_MAX rounds.
@@ -29,6 +31,7 @@
 // Telegram carries it all as plain text to and from its servers: it is not
 // end-to-end encrypted. Direct messages only, text only, for now.
 import { DurableObject } from "cloudflare:workers";
+import { asked } from "./applib/question.mjs";
 
 const TELEGRAM = "https://api.telegram.org";
 const PAIRING_MS = 10 * 60_000;
@@ -386,22 +389,31 @@ export class App extends DurableObject {
   }
 
   async mirror({ record } = {}, job) {
-    // its trigger's runs alone: each reply an agent posts here
-    if (job.via !== "channel") return { sent: 0, why: "only the chat's trigger sends" };
+    // its triggers' runs alone: each reply an agent posts here, each
+    // question it asks
+    if (job.via !== "channel") return { sent: 0, why: "only its triggers send" };
     // unlinked, or its door shut: the agent's words stay in the chat; and
     // only the bound agent's replies reach Telegram, never another's here
     if (!job.door) return { sent: 0, why: "not linked" };
     if (record?.principal !== job.door.to) return { sent: 0, why: "not its bound agent's" };
     const b = record?.body;
-    if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
-    const said = typeof b.text === "string" ? b.text.trim() : "";
-    // its files stay in the chat (Telegram carries its words alone): said so
-    const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
-    const text = [said, files ? "(Sent a file: open the chat to see it.)" : ""].filter(Boolean).join("\n\n");
-    if (!text) return { sent: 0, why: "nothing said" };
+    let text;
+    if (record.channel === "work") {
+      // a question, only one that asks its owner (whom the door is theirs)
+      text = asked(b);
+      if (!text) return { sent: 0, why: "not a question" };
+      if (b.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
+    } else {
+      if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
+      const said = typeof b.text === "string" ? b.text.trim() : "";
+      // its files stay in the chat (Telegram carries its words alone): said so
+      const files = Array.isArray(b.attachments) ? b.attachments.length : 0;
+      text = [said, files ? "(Sent a file: open the chat to see it.)" : ""].filter(Boolean).join("\n\n");
+      if (!text) return { sent: 0, why: "nothing said" };
+    }
     const { api, paired } = await job.call("route", {});
     if (!paired) return { sent: 0, why: "no account paired" };
-    // its answer: "typing…" stops, before the answer goes
+    // its answer, or its question: "typing…" stops, before it goes
     await job.call("answered", {});
     const chars = [...text];
     let parts = 0;

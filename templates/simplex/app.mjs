@@ -28,16 +28,19 @@
 //   blobs first (`job.fetch(…, {keep: true})`) and goes as its attachment.
 //   The agent's computer wakes for it as for any message: nothing here
 //   needs it awake.
-// - `mirror` (each reply its bound agent posts here) sends it through the
-//   door, once by its record, asking again until the door's runner says
-//   it is sent (or its link ended, or there is none); its files first
-//   given to the door (`job.fetch(…, {blob})`), which sends them after its
-//   text.
+// - `mirror` (each reply its bound agent posts here, and each question it
+//   asks its owner on `work`, as applib/question.mjs words it) sends it
+//   through the door, once by its record, asking again until the door's
+//   runner says it is sent (or its link ended, or there is none); a
+//   reply's files first given to the door (`job.fetch(…, {blob})`), which
+//   sends them after its text. Their next message from SimpleX answers a
+//   question that takes words.
 //
 // No one but its owner edits this chat: its secrets, its code and the
 // operations here that are an owner's are theirs alone, the platform's
 // rule for a connector (docs/api.md, "An agent's doors").
 import { DurableObject } from "cloudflare:workers";
+import { asked } from "./applib/question.mjs";
 
 const DOOR = "https://door.fragment.internal";
 // A message's text, as the platform's chat takes one (a person's post).
@@ -349,13 +352,21 @@ export class App extends DurableObject {
   }
 
   async mirror({ record } = {}, job) {
-    // its trigger's runs alone: each reply an agent posts here
-    if (job.via !== "channel") return { sent: 0, why: "only the chat's trigger sends" };
+    // its triggers' runs alone: each reply an agent posts here, each
+    // question it asks
+    if (job.via !== "channel") return { sent: 0, why: "only its triggers send" };
     // unlinked, or its door shut: the agent's words stay in the chat; and
     // only the bound agent's replies reach SimpleX, never another's here
     if (!job.door) return { sent: 0, why: "not linked" };
     if (record?.principal !== job.door.to) return { sent: 0, why: "not its bound agent's" };
     const b = record?.body;
+    // a question, only one that asks its owner (whom the door is theirs)
+    if (record.channel === "work") {
+      const question = asked(b);
+      if (!question) return { sent: 0, why: "not a question" };
+      if (b.asks !== job.door.relayed?.for) return { sent: 0, why: "it asks someone else" };
+      return reply(job, `work:${record.seq}`, question);
+    }
     if (!b || typeof b.turn !== "string" || b.interim === true || (b.kind !== undefined && b.kind !== "message")) return { sent: 0, why: "not a reply" };
     const said = typeof b.text === "string" ? b.text.trim() : "";
     // its files, each given to the door first; one it does not take stays

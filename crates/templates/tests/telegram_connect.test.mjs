@@ -195,3 +195,46 @@ test("a forwarded pairing command pairs no one: only its owner's own /start prop
   assert.equal(out.proposed, undefined);
   assert.equal(app.get("pairing").candidate, null);
 });
+
+// its mirror's job, as the platform hands one a trigger's record: its door
+// bound to the agent, and Telegram's sends kept
+function mirroring(door = { relayed: { via: "telegram", for: "npub1paul", agent: "juniper--k3x9" }, to: "npub1juniper" }) {
+  const { app } = world(BOTS);
+  app.put("paired", { user: 424242, chat: 424242, name: "Paul", bot: 7 });
+  const sent = [];
+  const job = (via = "channel") => ({
+    via,
+    door,
+    call: async (op, input) => app[op](input, { agent: null }),
+    fetch: async (url, init) => (sent.push({ method: new URL(url).pathname.split("/").pop(), ...JSON.parse(init.body) }), { ok: true, status: 200, json: () => ({ ok: true, result: {} }) }),
+  });
+  return { app, sent, job };
+}
+
+const card = (seq, body) => ({
+  record: {
+    channel: "work",
+    seq,
+    principal: "npub1juniper",
+    body: { kind: "turn.prompt", turn: "t1", prompt: "p-1", text: "Run `rm -rf ./scratch`?", asks: "npub1paul", expiresAt: 1, options: [{ id: "once", label: "Allow once" }, { id: "deny", label: "Deny" }], ...body },
+  },
+});
+
+test("its bound agent's question to its owner goes to the paired chat, worded as every door words one, its typing stopped (FIN-747)", async () => {
+  const m = mirroring();
+  m.app.put("typing", { id: 3, answered: false });
+  assert.deepEqual(await m.app.mirror(card(9), m.job()), { sent: 1 });
+  assert.deepEqual(m.sent, [{ method: "sendMessage", chat_id: 424242, text: "Run `rm -rf ./scratch`?\n\n(This one needs a button: answer it in our chat.)" }]);
+  assert.deepEqual(m.app.owed({ id: 3 }), { typing: false }, "it waits on its owner now: no longer typing");
+});
+
+test("only a question its bound agent asks its owner goes to Telegram, and nothing else of its turns' work", async () => {
+  const m = mirroring();
+  assert.deepEqual(await m.app.mirror(card(1, { asks: "npub1someone" }), m.job()), { sent: 0, why: "it asks someone else" });
+  assert.deepEqual(await m.app.mirror({ record: { ...card(2).record, principal: "npub1other" } }, m.job()), { sent: 0, why: "not its bound agent's" });
+  assert.deepEqual(await m.app.mirror({ record: { channel: "work", seq: 3, principal: "npub1juniper", body: { kind: "turn.end", turn: "t1" } } }, m.job()), { sent: 0, why: "not a question" });
+  assert.deepEqual(await m.app.mirror(card(4), m.job("call")), { sent: 0, why: "only its triggers send" });
+  assert.deepEqual(m.sent, []);
+  const unbound = mirroring(null);
+  assert.deepEqual(await unbound.app.mirror(card(5), unbound.job()), { sent: 0, why: "not linked" });
+});
