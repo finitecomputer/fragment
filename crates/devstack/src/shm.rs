@@ -341,11 +341,10 @@ mod tests {
         let mut sleep = Command::new("sleep");
         sleep.arg("600");
         crate::dies_with_this_process(&mut sleep);
-        let child = sleep.spawn().unwrap();
+        let mut child = sleep.spawn().unwrap();
         println!("started {}", child.id());
-        loop {
-            std::thread::sleep(Duration::from_secs(60));
-        }
+        // killed before the sleep ends
+        let _ = child.wait();
     }
 
     /// Goal: a run killed outright leaves no process holding its RAM: what
