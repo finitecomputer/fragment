@@ -191,13 +191,19 @@ to date from your copy before you drop anything. Being listed says you
 can read it, not that it holds what your copy does: a teammate may have
 brought over an older copy, or part of one, and the team kept writing in
 the old brain after. Your copy is how the old brain was when you left
-it. Sync the real one into a folder of its own, and catch it up:
+it. Sync the real one into a folder of its own, catch it up, and push
+it:
 
 ```sh
 W="$HOME/old-finite-brains/<id>.real" C="$HOME/old-finite-brains/<id>" && \
 mkdir -p "$W" && fragment sync <its name> --dir "$W" && \
-python3 -I "<profiles>/finite-computer.brains.py" catch-up <id> "$C.json" "$W" "$C"
+python3 -I "<profiles>/finite-computer.brains.py" catch-up <id> "$C.json" "$W" "$C" && \
+fragment sync <its name> --dir "$W" && fragment call <its name> index_status
 ```
+
+Run it, then once more: the second run takes in a teammate catching it
+up at the same moment, and otherwise changes nothing. Its answer is the
+list below.
 
 It changes only what is safe to change, page by page, by the old brain's
 own versions, and only in the folders the real one shares. It brings in:
@@ -215,6 +221,9 @@ It leaves the rest as it is, for a person, and lists it:
 - **unsynced:** pages your old agent edited and never synced: the old
   brain never had that text;
 - **missing:** pages your copy should hold and doesn't;
+- **older:** pages a newer copy than yours already caught that folder up
+  past, which the real one doesn't hold as yours does (one the old brain
+  deleted since, say);
 - **extra:** files your copy holds that the old brain didn't list (a
   page made and never synced, say): only the copy has them;
 - **unshared:** folders the real one doesn't share: left out when it
@@ -224,19 +233,13 @@ It leaves the rest as it is, for a person, and lists it:
   link.
 
 It never changes **unread folders** (folders you couldn't read on the old
-Finite, so your copy has none of them). Push it, then run both blocks
-once more: a teammate catching it up at the same moment is taken in, and
-otherwise nothing changes. Read the list it named (`$W.catch-up.json`):
-
-```sh
-W="$HOME/old-finite-brains/<id>.real" && fragment sync <its name> --dir "$W" && fragment call <its name> index_status && cat "$W.catch-up.json"
-```
+Finite, so your copy has none of them).
 
 - **`settled` is true:** the real one holds what your copy does. Delete
   the copy, its line in the README, and the memory once no copy is left:
 
   ```sh
-  rm -rf -- "$HOME/old-finite-brains/<id>" "$HOME/old-finite-brains/<id>.json" "$HOME/old-finite-brains/<id>.real" "$HOME/old-finite-brains/<id>.real.catch-up.json"
+  rm -rf -- "$HOME/old-finite-brains/<id>" "$HOME/old-finite-brains/<id>.json" "$HOME/old-finite-brains/<id>.real"
   ```
 - **`settled` is false:** keep the copy. In the report (step 8), list
   what it left for your owner and ask them, or the brain's owner, what
