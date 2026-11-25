@@ -107,17 +107,18 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
     let first = view();
     let lines = |s: &Suite| lines_of(s, &id);
-    let started = lines(s).0;
-    let line1 = started.iter().find(|l| l["generation"] == 1).cloned().unwrap_or(Value::Null);
+    // what its agent says to `write` and `read` (the stub's script)
+    let talk = Talk { api, owner: &owner, chat: &chat, agent: &agent_name, identity: &identity, n: std::cell::Cell::new(0) };
+    let wrote = talk.said(s, "write disk/first.txt one")?;
+    // its start's line is written at its first turn (that write's)
+    let line1 = || lines_of(s, &id).0.into_iter().find(|l| l["generation"] == 1).unwrap_or(Value::Null);
+    let _ = !local || s.eventually(Duration::from_secs(10), || !line1().is_null());
+    let line1 = line1();
     s.ok(
         DISK_CHECKS[1],
         woke && first["restored"]["from"] == "disk" && (!local || (line1["path"] == "disk" && line1["end"] == "ready" && line1["disk"]["mountMs"].is_u64() && line1.get("bytes").is_none())),
         json!({ "view": first["restored"], "line": line1 }),
     );
-
-    // what its agent says to `write` and `read` (the stub's script)
-    let talk = Talk { api, owner: &owner, chat: &chat, agent: &agent_name, identity: &identity, n: std::cell::Cell::new(0) };
-    let wrote = talk.said(s, "write disk/first.txt one")?;
     let (slept, _) = put_to_sleep(s, api, &owner, &id);
     let after = row();
     let sleep1 = lines(s).1.into_iter().find(|l| l["sleep"]["generation"] == 1).unwrap_or(Value::Null);
@@ -136,7 +137,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let line = lines(s).0.into_iter().find(|l| l["generation"] == generation).unwrap_or(Value::Null);
     s.ok(
         DISK_CHECKS[3],
-        woke && read == "read disk/first.txt: one" && again["restored"]["from"] == "disk" && (!local || (line["path"] == "disk" && line["disk"]["sleptUnshipped"].is_u64())),
+        woke && first_line(&read) == "read disk/first.txt: one" && again["restored"]["from"] == "disk" && (!local || (line["path"] == "disk" && line["disk"]["sleptUnshipped"].is_u64())),
         json!({ "read": read, "restored": again["restored"], "line": line }),
     );
 
@@ -154,6 +155,9 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
             let killed = lever(api, &id, "kill").is_ok_and(|r| r.status == 200);
             crashes += 1;
             let back = s.eventually(WAKE + WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
+            if !(filled.starts_with("filled ") && killed && back) {
+                println!("      (crash {i}: filled {filled:?}, killed {killed}, back {back})");
+            }
             (filled.starts_with("filled ") && killed && back, None)
         } else {
             let (slept, _) = put_to_sleep(s, api, &owner, &id);
@@ -162,8 +166,10 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
             (slept && head.is_some_and(|(_, clean)| clean) && awake(s), head)
         };
         let read = talk.said(s, "read disk/cycle.txt")?;
-        if !(wrote == "wrote disk/cycle.txt" && ended && read == format!("read disk/cycle.txt: {token}")) {
-            failed.push(json!({ "i": i, "crash": crash, "wrote": wrote, "ended": ended, "read": read, "head": head.map(|(e, c)| json!([e, c])) }));
+        if !(wrote == "wrote disk/cycle.txt" && ended && first_line(&read) == format!("read disk/cycle.txt: {token}")) {
+            let f = json!({ "i": i, "crash": crash, "wrote": wrote, "ended": ended, "read": read, "head": head.map(|(e, c)| json!([e, c])) });
+            println!("      (cycle {i} failed: {f})");
+            failed.push(f);
         }
         if (i + 1) % 10 == 0 {
             println!("      ({} of {} cycles, {crashes} crashes, {} failed, {:.0?})", i + 1, cycles(), failed.len(), t0.elapsed());
@@ -178,7 +184,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let killed = lever(api, &id, "kill")?;
     let came_back = s.eventually(WAKE + WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
     let read = talk.said(s, "read disk/crash.txt")?;
-    s.ok(DISK_CHECKS[5], wrote == "wrote disk/crash.txt" && killed.status == 200 && came_back && read == "read disk/crash.txt: synced", json!({ "read": read, "killed": killed.body, "view": view()["restored"] }));
+    s.ok(DISK_CHECKS[5], wrote == "wrote disk/crash.txt" && killed.status == 200 && came_back && first_line(&read) == "read disk/crash.txt: synced", json!({ "read": read, "killed": killed.body, "view": view()["restored"] }));
 
     // a head that will not open: one naming a checkpoint never written
     let (slept, _) = put_to_sleep(s, api, &owner, &id);
@@ -195,7 +201,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let failures = lever(api, &id, "saves")?.body["failures"].clone();
     s.ok(
         DISK_CHECKS[6],
-        slept && set.status == 200 && woke && read == "read disk/crash.txt: synced" && (!local || unusable.is_some()) && head_of(&fell["head"]).is_some_and(|(e, _)| e > epoch) && failures == 0,
+        slept && set.status == 200 && woke && first_line(&read) == "read disk/crash.txt: synced" && (!local || unusable.is_some()) && head_of(&fell["head"]).is_some_and(|(e, _)| e > epoch) && failures == 0,
         json!({ "set": set.body, "read": read, "unusable": unusable, "row": fell, "failures": failures }),
     );
 
@@ -286,6 +292,13 @@ impl Talk<'_> {
         s.eventually(WAKE, || reply().is_some());
         Ok(reply().and_then(|x| x["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     }
+}
+
+/// A reply's first line: what the stub's script answered. After a crash its
+/// bridge may add a note that its memory of the chat is behind (its memory
+/// is a file, and the crash took its last unsynced write).
+fn first_line(reply: &str) -> &str {
+    reply.lines().next().unwrap_or_default()
 }
 
 /// A head's line's epoch, and whether it marks a clean sleep

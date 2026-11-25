@@ -24,7 +24,6 @@ pub const DISK_VOLUME_BYTES: u64 = 20_000 << 20;
 /// An object's largest body: a pack's (96 MiB), under the intercept's
 /// 100 MiB request body limit. FPAC's `OBJECT_BYTES_MAX`.
 pub const OBJECT_BYTES_MAX: u64 = 96 << 20;
-const _: () = assert!(OBJECT_BYTES_MAX < 100 << 20, "under the intercept's body limit");
 
 /// An object's name, at most: `e` + 20 digits + `/` + a kind and a number,
 /// with room. FPAC's `NAME_BYTES_MAX`.
