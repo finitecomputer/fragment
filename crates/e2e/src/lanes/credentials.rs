@@ -1541,6 +1541,7 @@ pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
     "a secret named `asks` is still its person's to set and remove: the asks' routes take only a POST or an id",
     "a card answered after a secret of its name was set meanwhile grants nothing: 409, and the secret stays as set",
     "`fragment vault ask --no-wait` returns immediately with a deep link URL and `fragment vault wait <id>` receives the stand-in once answered",
+    "an ask that would take its person's Vault past 8 hosts is refused as the agent asks, in the cap's words, and no card is drawn: no one is asked to paste what Save would refuse",
 ];
 
 /// The person's waiting card for `name` (a `vault_ask` notice), once
@@ -1724,6 +1725,33 @@ pub(super) fn vault_ask_checks(
         json!({ "nw_reply": nw_reply, "nw_saved": nw_saved.body, "w_reply": w_reply, "expected": nw_stand_in }),
     );
 
+    // the Vault's hosts full: an ask toward one more is refused before any card
+    let mut full = false;
+    let mut filled = vec![];
+    for i in 0..9 {
+        let fill = format!("e2e-cap-{i}");
+        let r = api.signed(w.owner, "PUT", &format!("/api/vault/{fill}"), Some(&json!({ "value": "v", "hosts": [format!("cap{i}.vault.test")], "agents": [w.agent] })))?;
+        if r.status == 400 && r.body["message"].as_str().is_some_and(|m| m.contains("at most 8 hosts")) {
+            full = true;
+            break;
+        }
+        anyhow::ensure!(r.status == 200, "a put toward the Vault's cap: {r}");
+        filled.push(fill);
+    }
+    let turn = start(708, "vault-ask e2e-ninth ninth.vault.test One host too many")?;
+    let ninth = replied(s, &turn)?;
+    said.push(ninth.clone());
+    let told = api.signed(w.owner, "GET", "/api/notices?field=1", None)?;
+    let drawn = told.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.ends_with(" e2e-ninth"))));
+    for fill in &filled {
+        api.signed(w.owner, "DELETE", &format!("/api/vault/{fill}"), None)?;
+    }
+    s.ok(
+        VAULT_ASK_CHECKS[12],
+        full && ninth.starts_with("vault-ask refused:") && ninth.contains("at most 8 hosts") && told.status == 200 && !drawn,
+        json!({ "full": full, "filled": filled.len(), "reply": ninth, "drawn": drawn }),
+    );
+
     let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
     let logs = super::vault::logs(s);
     s.ok(VAULT_ASK_CHECKS[8], !said.iter().any(|t| t.contains(&value)) && !view.text.contains(&value) && !logs.contains(&value), json!({ "said": said }));
@@ -1733,5 +1761,5 @@ pub(super) fn vault_ask_checks(
     let set = api.signed(w.owner, "PUT", "/api/vault/asks", Some(&json!({ "value": "asks-e2e", "hosts": [], "agents": [w.agent] })))?;
     let gone = api.signed(w.owner, "DELETE", "/api/vault/asks", None)?;
     s.ok(VAULT_ASK_CHECKS[9], set.status == 200 && gone.status == 200 && gone.body["removed"] == true, json!({ "set": set.body, "removed": gone.body }));
-    Ok(7)
+    Ok(8)
 }

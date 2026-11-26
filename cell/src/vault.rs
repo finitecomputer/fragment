@@ -962,7 +962,7 @@ impl VaultCell {
     }
 
     /// An agent's ask, kept to wait on its person's card: checked as its
-    /// answer will be (`rules::ask_ok`), the same agent's ask for the same
+    /// answer will be (`rules::ask_ok`, and its hosts by `room`), the same agent's ask for the same
     /// name before it ended (one card for one secret), and refused past
     /// `ASKS_MAX` waiting. One turn: nothing here yields.
     fn ask(&self, asked: Asked) -> CellResult<String> {
@@ -971,6 +971,9 @@ impl VaultCell {
         }
         let Asked(agent, _, _, a) = &asked;
         rules::ask_ok(a, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
+        // held to the Vault's hosts now, as its answer will be, so its
+        // person is never asked to paste what Save would refuse
+        self.room(&a.name, &rules::ask_hosts(a, self.held_at(&a.name)?.0.as_ref()))?;
         let now = js::now_ms();
         self.expire(now)?;
         let kept = self.rows("SELECT COUNT(*) AS n FROM asks", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);

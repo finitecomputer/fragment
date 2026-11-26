@@ -380,6 +380,14 @@ fn join_unique(base: &[String], extra: &[String]) -> Vec<String> {
     out
 }
 
+/// The hosts an answer to `ask` puts its secret toward: the ones asked,
+/// and, for one `held` already (an Allow), its own beside them. The Vault
+/// holds them to its cap (`room`) as the ask is made, so its person never
+/// answers a card whose answer would be refused.
+pub fn ask_hosts(ask: &AskSecret, held: Option<&Secret>) -> Vec<String> {
+    join_unique(held.map(|h| h.hosts.as_slice()).unwrap_or_default(), &ask.hosts)
+}
+
 /// What `agent`'s ask puts in its person's Vault as they answer it:
 /// - when `held` is `None`: a new secret with the pasted value (`!allow`),
 ///   toward the hosts asked, in the default place, for `agent` alone;
@@ -395,7 +403,7 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
                 return Err(VaultError::Ask(format!("{} is not in your vault yet: paste its value to save it", ask.name)));
             }
             let value = answer.value.as_deref().map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| VaultError::Ask("paste the secret first".into()))?;
-            let hosts = join_unique(&[], &ask.hosts);
+            let hosts = ask_hosts(ask, None);
             Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()] })
         }
         Some(h) => {
@@ -405,7 +413,7 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
             if answer.value.is_some() {
                 return Err(VaultError::Ask("Allow keeps the saved secret: it takes no value".into()));
             }
-            let hosts = join_unique(&h.hosts, &ask.hosts);
+            let hosts = ask_hosts(ask, Some(h));
             if hosts.len() > HOSTS_MAX {
                 return Err(VaultError::Hosts(format!("at most {HOSTS_MAX}, not {}", hosts.len())));
             }
@@ -822,6 +830,25 @@ mod tests {
             assert!(ask_ok(&bad, &catalog()).is_err(), "{what}: {bad:?}");
         }
         assert!(ask_ok(&ask("github", &"é".repeat(WHY_MAX_CHARS), &[]), &catalog()).is_ok(), "counted in characters, not bytes");
+    }
+
+    #[test]
+    fn an_ask_is_held_to_the_vaults_hosts_as_its_answer_would_be() {
+        use crate::computer::egress::VAULT_HOSTS_MAX;
+        let c = catalog();
+        let eight: Vec<String> = (0..VAULT_HOSTS_MAX).map(|i| format!("h{i}.example.com")).collect();
+        // a new secret toward a ninth host: refused as the ask is made, in the cap's words
+        let new = ask_hosts(&ask("ninth", "a ninth", &["h8.example.com"]), None);
+        assert_eq!(new, strings(&["h8.example.com"]));
+        assert!(room(&new, &eight, &eight, &c).expect_err("a ninth host").to_string().contains("at most 8 hosts"));
+        // one toward a host the Vault goes to already costs nothing
+        assert_eq!(room(&ask_hosts(&ask("again", "same host", &["h0.example.com"]), None), &eight, &eight, &c), Ok(()));
+        // an Allow's hosts are the kept secret's and the asked ones together
+        let kept = held(&["h7.example.com"], Place::default(), &["other"]);
+        let allow = ask_hosts(&ask("site7", "and a ninth", &["h8.example.com"]), Some(&kept));
+        assert_eq!(allow, strings(&["h7.example.com", "h8.example.com"]));
+        assert!(room(&allow, &eight[..7], &eight, &c).is_err(), "Allow adding a ninth host");
+        assert_eq!(room(&ask_hosts(&ask("site7", "no new host", &[]), Some(&kept)), &eight[..7], &eight, &c), Ok(()));
     }
 
     fn held(hosts: &[&str], place: Place, agents: &[&str]) -> Secret {
