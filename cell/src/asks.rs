@@ -38,19 +38,24 @@ use crate::js;
 
 /// The channel a chat's cards are on: its agents' progress.
 const WORK: &str = "work";
+/// The channel a chat's people say things on: an asker's requests.
+const CHAT: &str = "chat";
 
 /// The refusal a call that asked gets: whom it asked, and that its asker
 /// asks again once they answer; with no chat to ask in, why not (a lend's
 /// as before the ask, `unasked`). Asked on `agent`'s behalf (its fragment's
-/// name), by `asker` (none: a lend's, read from its open turns).
-pub(crate) async fn refused(env: &Env, agent: &str, asker: Option<&str>, asks: &str, card: Card, unasked: &str) -> CellError {
+/// name), by `asker` (none: a lend's, read from its open turns), of `asks`
+/// (`owner`: the agent's own owner). It names whom it asked by what they
+/// are to the agent, never their email: an agent passes its refusals on,
+/// to people who may not see it.
+pub(crate) async fn refused(env: &Env, agent: &str, asker: Option<&str>, (asks, owner): (&str, bool), card: Card, unasked: &str) -> CellError {
     let confirm = Lent::of_what(&card.what).is_none();
     let asked = crate::fragment::call(env, agent, &AskFor { asker: asker.map(str::to_string), asks: asks.to_string(), card }).await;
-    let whom = name_of(env, asks).await;
+    let whom = if owner { "your owner" } else { "the person who asked" };
     match asked {
         Ok(Some(_)) if confirm => CellError::new(ErrorCode::Forbidden, format!("Asked {whom} to confirm it, on a card in the chat.")),
         Ok(Some(_)) => CellError::new(ErrorCode::Forbidden, format!("Asked {whom}, on a card in the chat. Ask again once they answer.")),
-        Ok(None) if confirm => CellError::new(ErrorCode::Forbidden, no_chat(&whom)),
+        Ok(None) if confirm => CellError::new(ErrorCode::Forbidden, no_chat(whom)),
         Ok(None) => CellError::new(ErrorCode::Forbidden, unasked),
         Err(e) => e,
     }
@@ -64,13 +69,6 @@ pub(crate) fn lend_card(ask: permit::Ask) -> Card {
 /// A confirm's refusal where no chat has its asker's turn open.
 fn no_chat(whom: &str) -> String {
     format!("This needs {whom} to confirm it in a chat: ask there.")
-}
-
-/// How a refusal names a person: their email, as a share sheet does, else
-/// their npub.
-async fn name_of(env: &Env, id: &str) -> String {
-    let asked = crate::ask_registry(env, &crate::registry::calls::Profiles { ids: vec![id.to_string()], emails_of: vec![id.to_string()] }).await;
-    asked.ok().and_then(|mut p| p.profiles.remove(id)).and_then(|p| p.email).unwrap_or_else(|| npub::display(id))
 }
 
 /// A turn of the agent's, as `ask_for` reads one.
@@ -94,6 +92,7 @@ pub(crate) struct Asked {
     key: Option<String>,
     until: i64,
     answer: Option<String>,
+    done: Option<i64>,
 }
 
 impl Asked {
@@ -124,15 +123,16 @@ impl FragmentCell {
             Whom::AgentsOwner => signed.owner.as_deref(),
         };
         let asks = asks.expect("decide asks whom the request names");
+        let owner = signed.owner.as_deref().is_some_and(|o| npub::display(o) == npub::display(asks));
         // where its turns are kept: the agent fragment it was made from
         let profiles = crate::ask_registry(&self.env, &crate::registry::calls::Profiles { ids: vec![signed.id.clone()], emails_of: vec![] }).await?;
         let Some(agent) = profiles.profiles.get(&signed.id).and_then(|p| p.fragment.clone()) else {
             // a key with no agent fragment runs no turn: no chat to ask in
-            return Err(CellError::new(ErrorCode::Forbidden, no_chat(&name_of(&self.env, asks).await)));
+            return Err(CellError::new(ErrorCode::Forbidden, no_chat(if owner { "your owner" } else { "the person who asked" })));
         };
         let title = self.meta(MetaKey::Face)?.and_then(|f| crate::json_text::<Named>(&f).ok()).and_then(|n| n.title);
         let card = Card { what: ask.what().to_string(), fragment: self.name()?, key: None, title, micros };
-        Err(refused(&self.env, &agent, signed.acting_for.as_deref(), asks, card, "").await)
+        Err(refused(&self.env, &agent, signed.acting_for.as_deref(), (asks, owner), card, "").await)
     }
 
     /// `AskFor` (an agent fragment's): where to ask, and the card posted
@@ -190,9 +190,15 @@ impl FragmentCell {
         if crate::fragment::call(&self.env, &turn.place, &post).await? {
             return Ok(Some(turn.place.clone()));
         }
-        // whom it asks is not in that chat: their own newest chat with the agent
+        // whom it asks is not in that chat: their own newest chat with the
+        // agent, its card naming the chat it is about (a lend's: there alone
+        // is it Always here, so this one is not)
         let list = crate::principal::ask(&self.env, &npub::display(&a.asks), &crate::principal::calls::List::default()).await?;
         let own = list.fragments.into_iter().filter(|f| f.kind == FragmentKind::Chat && f.role == Role::Owner && !f.archived && f.agents.iter().any(|x| npub::display(x) == npub::display(&agent)));
+        let mut post = post;
+        if lent.is_some() {
+            post.card.title = crate::fragment::call(&self.env, &turn.place, &crate::fragment::calls::FaceOf {}).await.ok().and_then(|n| n.title);
+        }
         let Some(own) = own.max_by_key(|f| f.preview_at.unwrap_or(0)) else {
             self.event("ask.nowhere", &format!("{} is not in {} and has no chat with this agent", a.asks, turn.place), json!({ "asker": asker, "what": a.card.what, "place": turn.place }));
             return Ok(None);
@@ -208,6 +214,9 @@ impl FragmentCell {
         let (agent, asker, asks) = (npub::display(&p.agent), npub::display(&p.asker), npub::display(&p.asks));
         let p = PostAsk { agent, asker, asks, ..p };
         let Some(answers) = permit::answers_of(&p.card.what) else { return Err(CellError::invalid(format!("no card asks {:?}", p.card.what))) };
+        // a lend's card in another chat than the one it is kept in: no Always here
+        let elsewhere = Lent::of_what(&p.card.what).is_some() && p.card.fragment != self.name()?;
+        let answers: Vec<&str> = answers.iter().map(|a| a.as_str()).filter(|a| !(elsewhere && *a == Answer::Always.as_str())).collect();
         if self.member_role(&p.agent)?.is_none() {
             return Err(CellError::new(ErrorCode::Forbidden, "an agent asks only in a chat it is in"));
         }
@@ -238,8 +247,11 @@ impl FragmentCell {
         let until = now + limits::ASK_LIFE_MS;
         let mut body = json!({
             "kind": "ask", "turn": p.turn, "agent": p.agent, "asker": p.asker, "asks": p.asks,
-            "what": p.card.what, "fragment": p.card.fragment, "options": answers.iter().map(|a| a.as_str()).collect::<Vec<_>>(), "expiresAt": until,
+            "what": p.card.what, "fragment": p.card.fragment, "options": answers, "expiresAt": until,
         });
+        if elsewhere {
+            body["elsewhere"] = json!(true);
+        }
         if let Some(title) = &p.card.title {
             body["title"] = json!(title);
         }
@@ -273,7 +285,7 @@ impl FragmentCell {
         if channel != WORK {
             return Ok(None);
         }
-        let rows: Vec<Asked> = self.typed("SELECT seq, agent, asker, what, about, key, until, answer FROM asks WHERE seq = ?", vec![SqlStorageValue::Integer(seq)])?;
+        let rows: Vec<Asked> = self.typed("SELECT seq, agent, asker, what, about, key, until, answer, done FROM asks WHERE seq = ?", vec![SqlStorageValue::Integer(seq)])?;
         Ok(rows.into_iter().next())
     }
 
@@ -281,6 +293,9 @@ impl FragmentCell {
     /// and the card still open. Read with no await before its append.
     pub(crate) fn ask_open(&self, ask: &Asked, body: &Value) -> CellResult<Answer> {
         let answer = permit::ask_answer(body, &ask.what).map_err(|why| CellError::invalid(format!("an answer to the platform's card {why}")))?;
+        if answer == Answer::Always && ask.about != self.name()? {
+            return Err(CellError::invalid("Always here is answered on a card in the chat it is kept in"));
+        }
         if ask.answer.is_some() {
             return Err(CellError::new(ErrorCode::Conflict, "this card was answered already"));
         }
@@ -292,17 +307,20 @@ impl FragmentCell {
 
     /// `answer`, `by`'s, taken on the card `ask` (right after its append,
     /// with no await between: a second answer finds it answered), then
-    /// written where its fact lives, and the card closed. Each step again
-    /// on a replay writes what it wrote, so a retry finishes the first.
+    /// written where its fact lives, once (`done`): a retry of the answer
+    /// finishes a first try that failed before its write, and writes nothing
+    /// again after one that did (Always here switched off since stays off,
+    /// Allow once taken stays taken). The card is closed either way.
     pub(crate) async fn ask_answered(&self, ask: &Asked, answer: Answer, by: &str) -> CellResult<()> {
         self.exec("UPDATE asks SET answer = ? WHERE seq = ? AND answer IS NULL", vec![answer.as_str().into(), SqlStorageValue::Integer(ask.seq)])?;
-        if let (Some(key), Answer::Once | Answer::Always) = (&ask.key, answer) {
+        if let (Some(key), Answer::Once | Answer::Always, None) = (&ask.key, answer, ask.done) {
             let lent = LendAnswer { agent: ask.agent.clone(), asker: ask.asker.clone(), key: key.clone(), what: ask.what.clone(), always: answer == Answer::Always, by: by.to_string() };
             match ask.about == self.name()? {
                 true => self.lend_answer(&lent).await?,
                 false => crate::fragment::call(&self.env, &ask.about, &lent).await?,
             }
         }
+        self.exec("UPDATE asks SET done = 1 WHERE seq = ?", vec![SqlStorageValue::Integer(ask.seq)])?;
         let turn = self.rows("SELECT json_extract(body, '$.turn') AS turn FROM records WHERE channel = ? AND seq = ?", vec![WORK.into(), SqlStorageValue::Integer(ask.seq)])?;
         let body = json!({ "kind": "ask.closed", "ask": ask.seq, "turn": turn.first().map(|r| r["turn"].clone()), "agent": npub::display(&ask.agent), "option": answer.as_str(), "by": npub::display(by) });
         self.append_own(WORK, &body, &format!("ask.closed:{}", ask.seq), None).await?;
@@ -326,10 +344,14 @@ impl FragmentCell {
                 self.exec("UPDATE members SET lend = ? WHERE principal = ?", vec![SqlStorageValue::Integer(i64::from(lend.bits())), agent.as_str().into()])?;
                 self.event("member.lend", &format!("{agent} lent spend {}, accounts {}, on a card", lend.spend, lend.accounts), json!({ "agent": agent, "spend": lend.spend, "accounts": lend.accounts }));
             }
+            // lent to the asker's first words here from now: after the chat's
+            // newest record now
             false => {
+                let newest = self.rows("SELECT seq FROM records WHERE channel = ? ORDER BY seq DESC LIMIT 1", vec![CHAT.into()])?;
+                let after = newest.first().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
                 self.exec(
                     "INSERT OR REPLACE INTO lent_once (agent, asker, what, after) VALUES (?, ?, ?, ?)",
-                    vec![agent.as_str().into(), asker.as_str().into(), a.what.as_str().into(), SqlStorageValue::Integer(js::now_ms())],
+                    vec![agent.as_str().into(), asker.as_str().into(), a.what.as_str().into(), SqlStorageValue::Integer(after)],
                 )?;
                 self.event("member.lent-once", &format!("{agent} lent {} once, for {asker}", a.what), json!({ "agent": agent, "asker": asker, "what": a.what }));
             }
@@ -338,33 +360,22 @@ impl FragmentCell {
     }
 
     /// `lend` with what its owner allowed once for `asked`'s asker: lent to
-    /// their first request after the answer, which takes it (and again to
-    /// that request alone, for each of its calls); none to any other.
+    /// their first words in the chat after the answer, that request alone
+    /// (each of its calls), and to no other, before or after.
     pub(crate) fn lent_once(&self, asked: &LendOf, mut lend: Lend) -> CellResult<Lend> {
-        let Some((channel, seq, at)) = &asked.request else { return Ok(lend) };
+        let Some((channel, seq)) = asked.request.as_ref().filter(|(c, _)| c == CHAT) else { return Ok(lend) };
         #[derive(Deserialize)]
         struct Row {
             what: String,
             after: i64,
-            channel: Option<String>,
-            seq: Option<i64>,
         }
         let (agent, asker) = (npub::display(&asked.agent), npub::display(&asked.asker));
-        let rows: Vec<Row> = self.typed("SELECT what, after, channel, seq FROM lent_once WHERE agent = ? AND asker = ?", vec![agent.as_str().into(), asker.as_str().into()])?;
+        let rows: Vec<Row> = self.typed("SELECT what, after FROM lent_once WHERE agent = ? AND asker = ?", vec![agent.as_str().into(), asker.as_str().into()])?;
         for r in rows {
             let Some(lent) = Lent::of_what(&r.what) else { continue };
-            let taken = match (&r.channel, r.seq) {
-                // its record written once the answer was (the request that
-                // asked was before it)
-                (None, _) if *at >= r.after => {
-                    let binds = vec![channel.as_str().into(), SqlStorageValue::Integer(*seq), agent.as_str().into(), asker.as_str().into(), r.what.as_str().into()];
-                    self.exec("UPDATE lent_once SET channel = ?, seq = ? WHERE agent = ? AND asker = ? AND what = ? AND seq IS NULL", binds)?;
-                    true
-                }
-                (Some(c), Some(s)) => c == channel && s == *seq,
-                _ => false,
-            };
-            if taken {
+            // their first record since: a seek from `after`, to their next words
+            let first = self.rows("SELECT seq FROM records WHERE channel = ? AND seq > ? AND principal = ? ORDER BY seq LIMIT 1", vec![channel.as_str().into(), SqlStorageValue::Integer(r.after), asker.as_str().into()])?;
+            if first.first().and_then(|f| f["seq"].as_i64()) == Some(*seq) {
                 lend = lent.added_to(lend);
             }
         }

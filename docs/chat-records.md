@@ -391,7 +391,8 @@ own, never in a turn:
 { "kind": "ask.closed", "ask": <its seq>, "turn": "…", "agent": "npub1…", "option": "once", "by": "npub1…" }
 ```
 
-`what` is `spend` or `accounts` (options `once`, `always`, `no`), or
+`what` is `spend` or `accounts` (options `once`, `always`, `no`; a card
+in another chat than its lend's, `"elsewhere": true`, `once` and `no`), or
 `delete` or `cap` (`yes`, `no`; `micros` null: the default), of
 `fragment`. Only `asks` answers, with `{kind: "ask_answer", option,
 answers: {channel: "work", seq}}`; a `yes` is posted once the shell has

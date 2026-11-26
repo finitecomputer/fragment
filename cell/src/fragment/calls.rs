@@ -92,15 +92,15 @@ impl Call for FaceOf {
 /// (members.rs `lend_here`), asked by that agent's fragment at each use
 /// (runs_on.rs `lent_now`): `place` is the key the ask's mandate names, so
 /// a fragment made again under its name lends nothing.
-/// `asker`, whose ask it is, with `request`, their record that asked
-/// (its channel, seq and when): what their owner allowed once is lent to
-/// it alone (asks.rs `lent_once`); none takes nothing allowed once.
+/// `asker`, whose ask it is, with `request`, their record that asked (its
+/// channel and seq): what their owner allowed once is lent to it alone
+/// (asks.rs `lent_once`); none takes nothing allowed once.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LendOf {
     pub agent: String,
     pub place: String,
     pub asker: String,
-    pub request: Option<(String, i64, i64)>,
+    pub request: Option<(String, i64)>,
 }
 
 impl Call for LendOf {

@@ -961,8 +961,9 @@ record stored before this rule promises nothing.
 
 Where a call needs someone's yes, the platform asks them on one card, in
 the chat it was asked in (FIN-615, `fragment_core::permit::Ask`), and the
-call is 403, saying whom it asked: "Asked ana@example.com, on a card in
-the chat. Ask again once they answer." Two calls ask:
+call is 403, saying whom it asked by what they are to the agent, never
+their email: "Asked your owner, on a card in the chat. Ask again once they
+answer." Two calls ask:
 
 - **A dangerous action** (`DELETE /api/f/{name}`, `PUT …/cap`) an agent
   asks for someone, unheld, asks the fragment's owner to confirm it: the
@@ -975,14 +976,16 @@ the chat. Ask again once they answer." Two calls ask:
   confirm it in a chat".
 - **Someone else's ask that needs what its place doesn't lend** (the swap's
   credit or accounts: Who asked, mandates) asks the agent's owner: **Allow
-  once** lends it to the asker's next request there (each of its calls)
-  and no other, **Always here** turns it on in that place's lend, and
-  **No** writes nothing.
+  once** lends it to the asker's first words there after the answer (each
+  of that request's calls) and no other, **Always here** turns it on in
+  that place's lend, and **No** writes nothing. An answer's write is made
+  once: the same answer again (a retry) writes nothing more.
 
 The card goes to the chat the asker's newest turn runs in (a lend's: one
 of theirs that lends it not); where whom it asks is not in that chat, to
 their own newest chat with the agent, so it never lands where its
-answerer can't see it. One for the same agent, asker, ask and thing is
+answerer can't see it; a lend's card there names the chat it is about and
+offers no Always here (400), which is answered where it is kept. One for the same agent, asker, ask and thing is
 open at a time (a second ask is the same card), at most
 `limits::ASKS_OPEN_MAX` in a chat (429 past it), each answerable for
 `limits::ASK_LIFE_MS`. Its records are the platform's own on `work`

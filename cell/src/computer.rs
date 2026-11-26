@@ -4615,7 +4615,7 @@ impl ComputerCell {
             let needs = if provider.kind == Kind::Operator { Lent::Spend } else { Lent::Accounts };
             if let Some(ask) = permit::lend_asks(grants.lend.unwrap_or(Lend::OWNER), needs) {
                 let unasked = format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if needs == Lent::Spend { "their credit" } else { "their accounts and keys" });
-                return Err(crate::asks::refused(&self.env, agent, None, &owner, crate::asks::lend_card(ask), &unasked).await);
+                return Err(crate::asks::refused(&self.env, agent, None, (&owner, true), crate::asks::lend_card(ask), &unasked).await);
             }
             if !grants.may_use(&provider.name) {
                 let list = grants.connections.as_deref().unwrap_or_default();
@@ -5502,7 +5502,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
         if !vaulted.is_empty() && answer["accounts"] == false {
             let unasked = format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here");
-            return Err(crate::asks::refused(env, &agent, None, &owner, crate::asks::lend_card(permit::Ask::Lend(Lent::Accounts)), &unasked).await);
+            return Err(crate::asks::refused(env, &agent, None, (&owner, true), crate::asks::lend_card(permit::Ask::Lend(Lent::Accounts)), &unasked).await);
         }
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {

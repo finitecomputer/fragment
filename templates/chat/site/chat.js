@@ -1043,7 +1043,7 @@ export function mount(root) {
       const about = b.fragment;
       if (typeof b.asks !== "string" || typeof b.agent !== "string" || !ASK_WHAT.includes(b.what) || typeof about !== "string") return;
       const options = Array.isArray(b.options) ? b.options.filter((o) => typeof o === "string") : [];
-      state.asks.set(record.seq, { seq: record.seq, at: record.at, n: record.seq, agent: b.agent, asker: typeof b.asker === "string" ? b.asker : null, asks: b.asks, what: b.what, fragment: about, title: typeof b.title === "string" ? b.title : null, micros: Number.isSafeInteger(b.micros) ? b.micros : null, options, expiresAt: b.expiresAt });
+      state.asks.set(record.seq, { seq: record.seq, at: record.at, n: record.seq, agent: b.agent, asker: typeof b.asker === "string" ? b.asker : null, asks: b.asks, what: b.what, fragment: about, title: typeof b.title === "string" ? b.title : null, micros: Number.isSafeInteger(b.micros) ? b.micros : null, elsewhere: b.elsewhere === true, options, expiresAt: b.expiresAt });
       expiryTimer();
     } else if (Number.isInteger(b.ask) && typeof b.option === "string") {
       state.askClosed.set(b.ask, { option: b.option, by: typeof b.by === "string" ? b.by : null, at: record.at });
@@ -2064,8 +2064,10 @@ export function mount(root) {
     const asker = a.asker === me ? "you" : a.asker ? who(a.asker).name : "";
     const forWhom = a.asker && a.asker !== a.asks ? ` for ${asker}` : "";
     const what = a.title || a.fragment;
-    if (a.what === "accounts") return `${agent} wants to use ${of} accounts${forWhom}.`;
-    if (a.what === "spend") return `${agent} wants to spend ${of} credit${forWhom}.`;
+    // a lend kept in another chat: named, as it is no "here"
+    const where = a.elsewhere ? ` in ${what}` : "";
+    if (a.what === "accounts") return `${agent} wants to use ${of} accounts${forWhom}${where}.`;
+    if (a.what === "spend") return `${agent} wants to spend ${of} credit${forWhom}${where}.`;
     if (a.what === "delete") return `${agent} wants to delete ${what}${forWhom}.`;
     return `${agent} wants to set ${what}'s cap to ${dollars(a.micros)}${forWhom}.`;
   }
