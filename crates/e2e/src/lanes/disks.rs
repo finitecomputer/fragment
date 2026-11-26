@@ -295,6 +295,8 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
 /// (`fpac-refuse-at-stop`): past the old wait (the guest's 140 s, the
 /// platform's 150 s), so a stop that kept no container lost its last write.
 const REFUSE_MS: u64 = 180_000;
+// kept within its node's unsaved bound, past its stop's exit wait and a look
+const _: () = assert!(REFUSE_MS + fragment_core::computer::DISK_EXIT_WAIT_MS as u64 + fragment_core::computer::STOP_LOOK_MS as u64 <= crate::DISKS_UNSAVED_MAX_MS, "the lane's outage ends within its node's unsaved bound");
 
 /// Restores the checks arm to come damaged (the lever `damage-restores`'s
 /// `times`): a disk's start spends none.
