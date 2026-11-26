@@ -726,6 +726,23 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
+## An agent's computer tells its own turns
+
+- **Shortcut:** whose ask an agent's call is (FIN-720; docs/api.md, "An
+  agent's computer proves who asked") rests on the turns its bridge tells
+  the agent's fragment (`/api/computer/turns`), and on the agent signing
+  `for` its owner, as its CLI does. The bridge and the runtime share one
+  computer, where the agent has passwordless sudo and no secret is kept
+  from it (decisions 13, 43, 44).
+- **Risk:** an injected agent, on someone else's ask, closes or clears
+  their turns, or signs as itself with no `for`, and so acts with its
+  owner's reach or its own (which mirrors its owner's, decision 64). An
+  agent that follows its tools never does. **Delete when:** whose ask a
+  call is comes from what the computer can't forge (the places' own
+  records, or turns kept outside the agent's root, as the SimpleX entry
+  above needs too), with tests where the agent clears its turns and signs
+  as itself.
+
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
@@ -1370,3 +1387,31 @@ unfinished design, not debt.
 - **Delete when:** Settings itself offers the move where no frame can ask
   (a Use it of its own in the setup dialog's note, or a move token a tab
   carries), or every supported browser signs in the frame.
+
+## A team brain's catch-up keeps its base in a file
+
+- **Shortcut:** a brain made from the old Finite holds
+  `imported-from-finite.json`: which version of each page it took, and
+  which folders it shares, each with the newest copy taken from it. Each
+  later teammate's catch-up reads it as the base of its three-way
+  comparison and writes it again
+  (`import-agent-home/profiles/finite-computer.brains.py`, FIN-774). The
+  comparison is the skill's Python, which the agent runs as the profile
+  says, not a `fragment` command.
+- **Why:** the brain's own commits are the record of what came in, but an
+  agent can't read them: `fragment` reads `main` as it is now, never a
+  file at an earlier commit nor `main`'s commit messages (FIN-780). A
+  command would also wait for a CLI release.
+- **Risk:** a person can edit or delete the file: a deleted one makes the
+  next import compare by hand (`NO RECORD`), and an edited one stops it
+  (`STOP`). Two teammates catching up within the same few seconds can
+  lose one's record entries (they heal at the next catch-up), or one's
+  new page can replace the other's at the same path. A page a person
+  deletes in the seconds between a catch-up's pull and its push, after
+  the catch-up updated it, comes back (the sync's local change wins over
+  a remote delete). Either way, the bytes stay in the brain's history. Nothing in a test runs the profile's text itself,
+  only the helper (`crates/templates/tests/import_brains.rs`).
+- **Delete when:** an agent can list `main`'s commits and read a file at
+  one (FIN-780). Then each import's commit names its old brain, its
+  sequence and the folders its copy could read, the page at the last
+  import's commit is the base, and the file goes.

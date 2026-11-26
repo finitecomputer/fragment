@@ -40,7 +40,7 @@ const CYCLES_MAX: u32 = 1_000;
 const CRASH_EVERY: u32 = 10;
 const FILL_MIB: u32 = 64;
 
-const DISK_CHECKS: [&str; 13] = [
+const DISK_CHECKS: [&str; 14] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
@@ -54,6 +54,7 @@ const DISK_CHECKS: [&str; 13] = [
     "after an export's walk and a sleep, its owner's Storage is the sleep's total at the sleep's time, the older breakdown not shown beside it",
     "a new disk's guest that reads its view has its disk kept as come up before its read is heard: no reading of its row shows its guest heard and its disk never up",
     "its owner's wipe from the CLI (`fragment operator wipe --yes`) finishes, its disk's settle waited out within its calls, and deletes every object of its disk's lives",
+    "a computer on a disk restores no save, so a restore's retry never touches it: damage armed for its next restores (the lever `damage-restores`) stays unspent through a blank first life's fall back to a new disk, and through a wake after an export took a save, no save found unusable and its writes read there",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -94,7 +95,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
         sleeps_as_it_grows(s, api)?;
     }
     came_up_as_heard(s, api)?;
-    first_lives(s, api)?;
+    let fell_unspent = first_lives(s, api)?;
 
     // its agent, and a chat it is in: its join wakes the computer
     let (agent_name, chat, identity) = agent_in_chat(s, api, &owner, &id, &[])?;
@@ -244,8 +245,31 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let (disk_at, sizes_at) = (after["disk"]["at"].as_i64(), after["sizes"]["at"].as_i64());
     let current = after["disk"]["data"].is_u64() && disk_at > walked["disk"]["at"].as_i64() && sizes_at.is_none_or(|at| disk_at.is_some_and(|d| at >= d));
     s.ok(DISK_CHECKS[10], walked["sizes"].is_object() && slept && current, json!({ "exported": { "disk": walked["disk"], "sizesAt": walked["sizes"]["at"] }, "slept": { "disk": after["disk"], "sizesAt": sizes_at } }));
+
+    // a restore's retry (FIN-784) is a save's: armed to damage its next
+    // restores, a wake of it after its export took a save spends none, and
+    // finds none unusable (a blank first life's fall back, `first_lives`)
+    let armed = lever_with(api, &id, json!({ "op": "damage-restores", "times": RESTORE_DAMAGE }))?;
+    let before = view()["restored"]["generation"].as_u64().unwrap_or(0);
+    let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let woke = s.eventually(WAKE, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > before) && phase(api, &owner, &id) == "awake");
+    let read = talk.said(s, "read disk/crash.txt")?;
+    let from = view()["restored"]["from"].clone();
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let left = lever_with(api, &id, json!({ "op": "damage-restores", "times": 0 }))?.body["unspent"].as_u64();
+    let saves = lever(api, &id, "saves")?.body;
+    let unusable = saves["saves"].as_array().is_some_and(|l| l.iter().any(|v| v["unusable"] == true));
+    s.ok(
+        DISK_CHECKS[13],
+        armed.status == 200 && woke && from == "disk" && first_line(&read) == "read disk/crash.txt: synced" && slept && left == Some(u64::from(RESTORE_DAMAGE)) && !unusable && fell_unspent == Some(u64::from(RESTORE_DAMAGE)),
+        json!({ "fellBack": { "unspent": fell_unspent }, "afterExport": { "from": from, "read": read, "unspent": left, "saves": saves["saves"] } }),
+    );
     wiped(s, api, &owner, &id)
 }
+
+/// Restores the checks arm to come damaged (the lever `damage-restores`'s
+/// `times`): a disk's start spends none.
+const RESTORE_DAMAGE: u32 = 3;
 
 /// A new computer's first wake, its row read as often as the lever
 /// answers until its guest is heard: every reading after it heard shows
@@ -338,15 +362,21 @@ const FIRST_LIVES: &str = "a new disk's first life killed as it starts, at once 
 /// platform's lines of the starts that fell back (a blank device begun
 /// again as a new disk, and no other); a local run's logs say here which
 /// fell back.
-fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
+fn first_lives(s: &mut Suite, api: &Api) -> Result<Option<u64>> {
     let local = !s.hosted();
     let mut lives = vec![];
+    // the first kill's restores armed to come damaged: its fall back, blank,
+    // to a new disk spends none (DISK_CHECKS[13])
+    let mut fell_unspent = None;
     let row = |id: &str| lever(api, id, "fpac").map(|r| r.body).unwrap_or(Value::Null);
     for (n, after) in FIRST_KILLS_MS.into_iter().enumerate() {
         let owner = api.person()?;
         let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
         let id = r.body["computer"].as_str().unwrap_or("").to_string();
         anyhow::ensure!(r.status == 200 && id.starts_with("computer:"), "a computer: {r}");
+        if n == 0 {
+            lever_with(api, &id, json!({ "op": "damage-restores", "times": RESTORE_DAMAGE }))?;
+        }
         let t0 = Instant::now();
         // its wake answers once its start is up: its claim is looked for as
         // it starts, so the kill lands as soon after the claim as it can
@@ -365,6 +395,10 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
             (claim, claimed, claimed_ms, life)
         });
         let (slept, _) = put_to_sleep(s, api, &owner, &id);
+        if n == 0 {
+            fell_unspent = lever_with(api, &id, json!({ "op": "damage-restores", "times": 0 }))?.body["unspent"].as_u64();
+            life["restoreDamageUnspent"] = json!(fell_unspent);
+        }
         let (killed, next) = (life["killed"].as_u64().unwrap_or(0), life["generation"].as_u64().unwrap_or(0));
         let clean = head_of(&row(&id)["head"]).is_some_and(|(e, c)| e == next && c);
         // its next start the one after its kill, mounting what shipped (its
@@ -440,7 +474,7 @@ fn first_lives(s: &mut Suite, api: &Api) -> Result<()> {
     println!("      FIRSTLIFE {life}");
     lives.push(life);
     s.ok(FIRST_LIVES, both && lives.iter().all(|l| l["ok"] == true), json!(lives));
-    Ok(())
+    Ok(fell_unspent)
 }
 
 /// Kills computer `id`'s life (again while its container is not yet one

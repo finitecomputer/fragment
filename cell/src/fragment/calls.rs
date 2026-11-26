@@ -88,6 +88,21 @@ impl Call for FaceOf {
     type Answer = Named;
 }
 
+/// What an agent member's owner lends it here for someone else's ask
+/// (members.rs `lend_here`), asked by that agent's fragment at each use
+/// (runs_on.rs `lent_now`): `place` is the key the ask's mandate names, so
+/// a fragment made again under its name lends nothing.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LendOf {
+    pub agent: String,
+    pub place: String,
+}
+
+impl Call for LendOf {
+    const PATH: &'static str = "/call/lend";
+    type Answer = fragment_proto::Lend;
+}
+
 /// Its reach, whether its link opens it, and whether it is an agent
 /// fragment shared past its owner, for an operator's census (reach.rs).
 #[derive(Serialize, Deserialize)]

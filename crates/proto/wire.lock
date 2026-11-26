@@ -8,6 +8,7 @@
 
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
+bound ChannelRecord.asker default null
 bound ChannelRecord.at range i64
 bound ChannelRecord.author default null
 bound ChannelRecord.mandate default null
@@ -77,6 +78,7 @@ bound Member.addedAt range i64
 bound Member.door default null
 bound Member.email default null
 bound Member.kind default null
+bound Member.lend default null
 bound Member.owner default null
 bound MessageHit.at range i64
 bound MessageHit.seq range i64
@@ -166,6 +168,7 @@ field ChannelPage.channel required string
 field ChannelPage.more required boolean
 field ChannelPage.next required integer
 field ChannelPage.records required array<ChannelRecord>
+field ChannelRecord.asker optional string|null
 field ChannelRecord.at required integer
 field ChannelRecord.author optional Author|null
 field ChannelRecord.body required any
@@ -227,6 +230,8 @@ field Has.telegram required boolean
 field LeftBehind.bytes required integer
 field LeftBehind.path required string
 field LeftBehind.why required string
+field Lend.accounts required boolean
+field Lend.spend required boolean
 field ListWatchFrame.changed.type required "changed"
 field ListWatchFrame.hello.type required "hello"
 field ListWatchFrame.invited.type required "invited"
@@ -351,6 +356,7 @@ field Member.addedBy required string
 field Member.door optional string|null
 field Member.email optional string|null
 field Member.kind optional IdentityKind|null
+field Member.lend optional Lend|null
 field Member.owner optional string|null
 field Member.principal required string
 field Member.role required Role
@@ -517,6 +523,8 @@ field fragments.pin.path.name required string
 field fragments.seen.path.name required string
 field fragments.status.path.name required string
 field live.open.path.name required string
+field members.lend.path.agent required string
+field members.lend.path.name required string
 field members.list.path.name required string
 field migrations.again.path.old required string
 field migrations.complete.path.stage required string
@@ -622,6 +630,13 @@ route live.open path live.open.path
 route live.open query live.open.query
 route live.open receives LiveOut
 route live.open sends LiveIn
+route members.lend PUT /api/f/{name}/members/{agent}/lend
+route members.lend accepts nip98
+route members.lend accepts session
+route members.lend path members.lend.path
+route members.lend query members.lend.query
+route members.lend request Lend
+route members.lend response Lend
 route members.list GET /api/f/{name}/members
 route members.list accepts nip98
 route members.list accepts session
@@ -779,6 +794,7 @@ type HandoffItem in object closed
 type Has in object
 type IdentityKind out enum
 type LeftBehind both object
+type Lend both object closed
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -916,6 +932,8 @@ type fragments.watch.path in object
 type fragments.watch.query in object
 type live.open.path in object
 type live.open.query in object
+type members.lend.path in object
+type members.lend.query in object
 type members.list.path in object
 type members.list.query in object
 type migrations.again.path in object

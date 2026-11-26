@@ -270,7 +270,9 @@ class Job {
   #onStep;
 
   constructor(meta, results, onStep) {
+    // whose ask it runs, and the agent that asked for them (or null), as a call's
     this.principal = meta.principal;
+    this.agent = meta.agent ?? null;
     this.role = meta.role;
     this.run = meta.run;
     this.attempt = meta.attempt;

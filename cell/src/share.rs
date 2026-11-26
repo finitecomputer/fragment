@@ -51,7 +51,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, ListedFragment, Member, MemberList, Role, SetRole,
+    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, Lend, ListedFragment, Member, MemberList, Role, SetRole,
     SetVisibility, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
@@ -141,6 +141,8 @@ const SCRIPT: &str = r#"<script>(() => {
     m.classList.toggle("up", m.querySelector(".menu-panel").getBoundingClientRect().bottom > innerHeight);
   });
   document.addEventListener("click", (e) => { if (!e.target.closest("details.menu")) shut(); });
+  // a switch sends its card at once
+  for (const s of document.querySelectorAll("input[data-send]")) s.addEventListener("change", () => s.form.requestSubmit());
   // the invite's role menu says what is chosen, and closes on a choice
   for (const m of document.querySelectorAll("[data-invite-role]")) m.addEventListener("change", (e) => {
     m.querySelector("[data-label]").textContent = e.target.closest("label").textContent;
@@ -467,8 +469,9 @@ struct Sheet {
     /// The invites waiting: the owner's only.
     invites: Vec<Invite>,
     visibility: Visibility,
-    /// What it is: inviting someone to a chat warns (`talks_to_owners_agent`).
-    kind: FragmentKind,
+    /// The person's own agents in it, each with what they lend it here
+    /// for someone else's ask (the lend card; members.rs `set_lend`).
+    lends: Vec<(String, Lend)>,
     /// Its title, else its label.
     title: String,
     /// A chat's own agent, its lead (the first agent in it): it stays an
@@ -536,6 +539,11 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     let alone = kind == FragmentKind::Agent || all.iter().any(|m| m.principal == status.npub);
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
+    // the list says a lend to its owner alone, of their own agents; one
+    // matters in a chat, the one place an agent hears (no agent hears an
+    // app's records)
+    let lends: Vec<(String, Lend)> = all.iter().filter(|_| kind == FragmentKind::Chat).filter(|m| m.owner.as_deref() == Some(who.id.as_str())).filter_map(|m| Some((m.principal.clone(), m.lend?))).collect();
+    let named = named_ids(&members).into_iter().chain(lends.iter().map(|(a, _)| a.clone())).collect();
     // an agent by its title and picture, as the shell shows it, read
     // beside the owner's invites (the sheet waits on both, not one by one)
     let invites = async {
@@ -544,7 +552,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
             _ => Ok(vec![]),
         }
     };
-    let (invites, profiles) = join(invites, profiles(env, named_ids(&members))).await;
+    let (invites, profiles) = join(invites, profiles(env, named)).await;
     let invites = invites?;
     Ok(Sheet {
         me: who.id.clone(),
@@ -553,7 +561,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         with_agents,
         invites,
         visibility,
-        kind,
+        lends,
         title,
         chat_agent,
         link,
@@ -755,12 +763,6 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
             ),
             "add",
         );
-        // whoever comes into a chat can talk to the owner's agent in it
-        // (Paul, 2026-10-23: the design, and this its safeguard; 10-24:
-        // only on a chat, one short line, and no other paragraph here)
-        if fragment_core::permit::talks_to_owners_agent(sheet.kind, &sheet.members) {
-            out += &format!("<p class=\"hint trust\">{}</p>", fragment_core::permit::TRUST_WARNING);
-        }
         if sheet.reach {
             out += &format!("<p class=\"hint keys\">{KEYS_LINE}</p>");
         }
@@ -802,6 +804,25 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // owner cannot)
     if !sheet.owner() {
         out += "<p class=\"hint\">Only its owner changes who has access.</p>";
+    }
+    // the person's own agents here: what of theirs each uses when someone
+    // else asks it (Paul, 2026-11-24: spend "on"; accounts off)
+    for (agent, lend) in &sheet.lends {
+        let named = name_of(agent, sheet.profiles.get(agent));
+        let switch = |field: &str, on: bool, words: &str, like: &str| {
+            format!(
+                "<label class=\"switch\"><span>{words}<small>{like}</small></span><input type=\"checkbox\" name=\"{field}\" value=\"on\"{} data-send data-arm disabled></label>",
+                if on { " checked" } else { "" }
+            )
+        };
+        let inner = format!(
+            "{}<p class=\"hint\">{}</p>{}{}",
+            hidden("agent", agent),
+            esc(&fragment_core::permit::asked_here(&named)),
+            switch("spend", lend.spend, "Spend my credit on paid tools", "Images, video, search"),
+            switch("accounts", lend.accounts, "Use my accounts and keys", "Gmail, Calendar, Drive, my Vault"),
+        );
+        out += &format!("<section><h2>{} for others</h2>{}</section>", esc(&named), action_form(sheet, "lend", &inner, "lend"));
     }
     if sheet.role.is_some_and(|r| r != Role::Owner) {
         out += &format!("<footer>{}</footer>", action_form(sheet, "leave", "<button class=\"quiet\" data-confirm=\"Leave it?\" data-arm disabled>Leave</button>", "leave"));
@@ -911,6 +932,10 @@ async fn share_post(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: 
         "remove" => match member() {
             Ok(m) => ask(env, url, name, &who, Method::Delete, &format!("/api/members/{m}"), None).await,
             Err(e) => Err(e),
+        },
+        "lend" => match field("agent") {
+            a if npub::is_identity(a) => ask(env, url, name, &who, Method::Put, &format!("/api/members/{a}/lend"), body(&Lend { spend: field("spend") == "on", accounts: field("accounts") == "on" })).await,
+            a => Err(CellError::invalid(format!("{a:?} is no agent of yours here"))),
         },
         "uninvite" => match field("email") {
             email if fragment_core::mail::valid_address(email) => ask(env, url, name, &who, Method::Delete, &format!("/api/invites/{}", enc(email)), None).await,
