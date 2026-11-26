@@ -607,6 +607,17 @@ pub fn turn_start(turn: &str, asker: &str, by_code: bool, agent: &str, cause: &C
     start
 }
 
+/// A hand-off's start, naming whose ask the words that started it were on
+/// (`carried`: FIN-615, PR 16a), beside its asker, the agent that said them:
+/// a page says "Rowan is working for Skyler (via Juniper)". None, or no
+/// identity (no known turn's), names none.
+pub fn carrying(mut start: Value, ask: Option<&str>) -> Value {
+    if let Some(ask) = ask.filter(|a| is_identity(a)) {
+        start["carried"] = json!(ask);
+    }
+    start
+}
+
 /// What a step does, whatever its runtime calls the tool: a page shows each
 /// with its own icon and verb (docs/chat-records.md, `turn.step`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

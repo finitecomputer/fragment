@@ -16,6 +16,14 @@
 //! it. An agent's computer can neither make nor alter one, and one names
 //! its agent, so no other key may carry it. It holds from its record's
 //! writing for `limits::MANDATE_LIFE_MS`, so old words start nothing new.
+//!
+//! **Carried** (FIN-615, PR 16a: `fragment ask`): an agent working on
+//! someone's ask that asks another agent of its owner's, in a chat of
+//! theirs, hands that agent the same ask (`Mandate::carried`): the same
+//! asker, place, record and day, and the same agent lent there (`via`), so
+//! the agent asked acts for them within what the place where they asked
+//! lends, and can only narrow it, never widen it ("Fred for Ben, via
+//! Juniper").
 
 pub use fragment_proto::Lend;
 use fragment_proto::{limits, valid_channel_name, Author};
@@ -23,8 +31,13 @@ use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
-/// What a mandate's text begins with (its form's version).
-pub const PREFIX: &str = "fm1.";
+/// What a mandate's text begins with (its form's version): `fm2` names its
+/// place's fragment name and the agent the place lends (`via`).
+pub const PREFIX: &str = "fm2.";
+/// The form before (FIN-615 PR 16a), naming neither: still opened while a
+/// turn may hold one (docs/technical-debt-ledger.md, "A mandate of the
+/// first form still opens").
+const PREFIX_V1: &str = "fm1.";
 /// The request header a mandate rides in.
 pub const HEADER: &str = "x-fragment-mandate";
 /// What the mandate key is derived from the host secret with.
@@ -70,12 +83,19 @@ pub struct Mandate {
     /// The fragment they asked in, by its life's own key (its npub): a name
     /// made again is another place.
     pub place: String,
+    /// That fragment's name, where its lend is asked (its key checked
+    /// there); none in a mandate of the first form.
+    pub name: Option<String>,
     /// Their record there.
     pub channel: String,
     pub seq: i64,
     /// Until when it holds, ms since the epoch: its record's `at` and
     /// `limits::MANDATE_LIFE_MS`.
     pub until: i64,
+    /// The agent the place lends for this ask: the one they asked, or, for
+    /// a mandate carried to another of its owner's agents, the one first
+    /// asked (`carried`).
+    pub via: String,
 }
 
 /// Why a request's mandate is no proof.
@@ -100,21 +120,35 @@ impl Refused {
 }
 
 impl Mandate {
-    /// The mandate for `agent` of a record `asker` wrote in `place`, on
-    /// `channel` at `seq`, at `at` (ms); none when a name is not of its
-    /// kind, which no mandate could carry.
-    pub fn of_record(asker: &str, agent: &str, place: &str, channel: &str, seq: i64, at: i64) -> Option<Mandate> {
-        let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until: at.saturating_add(limits::MANDATE_LIFE_MS) };
+    /// The mandate for `agent` of a record `asker` wrote in `place` (its
+    /// key; `name`, its fragment's name), on `channel` at `seq`, at `at`
+    /// (ms); none when a name is not of its kind, which no mandate could
+    /// carry.
+    pub fn of_record(asker: &str, agent: &str, place: &str, name: &str, channel: &str, seq: i64, at: i64) -> Option<Mandate> {
+        let until = at.saturating_add(limits::MANDATE_LIFE_MS);
+        let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), name: Some(name.into()), channel: channel.into(), seq, until, via: agent.into() };
         well_formed(&m).then_some(m)
     }
 
-    /// Its text: `fm1.<asker>.<agent>.<place>.<channel>.<seq>.<until>.<mark>`,
+    /// This ask carried by its agent to `agent`, another agent of its
+    /// owner's it asked (the caller checks they share an owner): the same
+    /// asker, place, record and day, lent by the same agent there (`via`),
+    /// so it narrows nothing it was given and widens nothing. None for a
+    /// mandate of the first form (no place name to read its lend at: the
+    /// ask goes on unproven, as before), or a name not of its kind.
+    pub fn carried(&self, agent: &str) -> Option<Mandate> {
+        let m = Mandate { agent: agent.into(), ..self.clone() };
+        (m.name.is_some() && well_formed(&m)).then_some(m)
+    }
+
+    /// Its text: `fm2.<asker>.<agent>.<place>.<name>.<channel>.<seq>.<until>.<via>.<mark>`,
     /// its mark of all before it. No field holds a dot (each is of its
     /// kind: `well_formed`), so the text reads back as made.
     pub fn text(&self, key: &MandateKey) -> String {
         assert!(well_formed(self), "a mandate is made of names of their kind (`of_record`)");
-        let Mandate { asker, agent, place, channel, seq, until } = self;
-        let fields = format!("{PREFIX}{asker}.{agent}.{place}.{channel}.{seq}.{until}");
+        let Mandate { asker, agent, place, name, channel, seq, until, via } = self;
+        let name = name.as_deref().expect("a mandate is made with its place's name (`of_record`)");
+        let fields = format!("{PREFIX}{asker}.{agent}.{place}.{name}.{channel}.{seq}.{until}.{via}");
         let mark = key.mac(fields.as_bytes()).finalize().into_bytes();
         let text = format!("{fields}.{}", hex::encode(&mark[..MARK_BYTES]));
         assert!(text.len() <= limits::MANDATE_MAX_BYTES, "a mandate's names are bounded, so its text is");
@@ -123,9 +157,14 @@ impl Mandate {
 }
 
 /// A mandate's fields are each of their kind: the identities and the
-/// place's key (npubs), a channel's name, a record's place.
+/// place's key (npubs), its fragment name, a channel's name, a record's
+/// place.
 fn well_formed(m: &Mandate) -> bool {
-    [&m.asker, &m.agent, &m.place].iter().all(|k| crate::npub::is_identity(k)) && valid_channel_name(&m.channel) && m.seq >= 1 && m.until > 0
+    [&m.asker, &m.agent, &m.place, &m.via].iter().all(|k| crate::npub::is_identity(k))
+        && m.name.as_deref().is_none_or(fragment_proto::valid_fragment_name)
+        && valid_channel_name(&m.channel)
+        && m.seq >= 1
+        && m.until > 0
 }
 
 /// `text` read as a mandate, its mark checked under any of `keys` (the
@@ -136,17 +175,22 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
     if text.len() > limits::MANDATE_MAX_BYTES {
         return Err(Refused::Malformed);
     }
-    let (fields, mark) = text.rsplit_once('.').filter(|(f, _)| f.starts_with(PREFIX)).ok_or(Refused::Malformed)?;
+    let (fields, mark) = text.rsplit_once('.').filter(|(f, _)| f.starts_with(PREFIX) || f.starts_with(PREFIX_V1)).ok_or(Refused::Malformed)?;
     let mark = hex::decode(mark).ok().filter(|m| m.len() == MARK_BYTES).ok_or(Refused::Malformed)?;
     if !keys.iter().any(|k| k.mac(fields.as_bytes()).verify_truncated_left(&mark).is_ok()) {
         return Err(Refused::Forged);
     }
-    // marked by the platform, so made by `text`: anything else is a fault
+    // marked by the platform, so made by `text` (or the first form's): anything else is a fault
     let parts: Vec<&str> = fields[PREFIX.len()..].split('.').collect();
-    let [asker, agent, place, channel, seq, until] = parts[..] else { return Err(Refused::Malformed) };
+    let first = fields.starts_with(PREFIX_V1);
+    let (asker, agent, place, name, channel, seq, until, via) = match parts[..] {
+        [asker, agent, place, channel, seq, until] if first => (asker, agent, place, None, channel, seq, until, agent),
+        [asker, agent, place, name, channel, seq, until, via] if !first => (asker, agent, place, Some(name), channel, seq, until, via),
+        _ => return Err(Refused::Malformed),
+    };
     let number = |n: &str| n.parse::<i64>().ok().filter(|_| n.bytes().all(|b| b.is_ascii_digit()));
     let (Some(seq), Some(until)) = (number(seq), number(until)) else { return Err(Refused::Malformed) };
-    let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until };
+    let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), name: name.map(str::to_string), channel: channel.into(), seq, until, via: via.into() };
     if !well_formed(&m) {
         return Err(Refused::Malformed);
     }
@@ -156,10 +200,18 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
     Ok(m)
 }
 
-/// The place a mandate's text names (its key), read from a text already
-/// opened (`open`), as an agent fragment keeps one for an open turn.
-pub fn place_of(text: &str) -> Option<&str> {
-    text.strip_prefix(PREFIX)?.split('.').nth(2)
+/// Where a mandate's text says its lend is read, from a text already
+/// opened (`open`), as an agent fragment keeps one for an open turn: its
+/// place's key, its fragment's name (none in the first form: the turn's
+/// own place), and the agent lent there.
+pub fn lent_at(text: &str) -> Option<(&str, Option<&str>, &str)> {
+    if let Some(rest) = text.strip_prefix(PREFIX_V1) {
+        let mut f = rest.split('.');
+        let (agent, place) = (f.nth(1)?, f.next()?);
+        return Some((place, None, agent));
+    }
+    let f: Vec<&str> = text.strip_prefix(PREFIX)?.split('.').collect();
+    Some((f.get(2)?, Some(*f.get(3)?), f.get(7)?))
 }
 
 /// Whose own words a record is, as a mandate names them: a person's own
@@ -205,12 +257,25 @@ pub fn addressed(body: &str, agent: &str) -> bool {
 
 /// A mandate an agent's bridge holds for an open turn, as the agent
 /// fragment checked it: its text, and what of it the decisions read: its
-/// day, and its place's own key, where what its owner lends is kept.
+/// day, and where what its owner lends is kept: its place's own key, that
+/// fragment's name (none: the turn's own place), and the agent lent there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Held<'a> {
     pub text: &'a str,
     pub until: i64,
     pub place: &'a str,
+    pub name: Option<&'a str>,
+    pub via: &'a str,
+}
+
+/// Where a lend is read for an ask (`Proof::Asker`): the fragment asked
+/// (its name), the key it must have (its life), and the agent whose
+/// member row there holds the lend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct LentAt<'a> {
+    pub name: &'a str,
+    pub place: &'a str,
+    pub agent: &'a str,
 }
 
 /// Whether a bridge life's word on its agent's turns is heard (cell
@@ -262,10 +327,11 @@ pub enum Proof<'a> {
     /// Its owner's own words: their newest mandate.
     Owner(Held<'a>),
     /// One other person's words, proven: their newest mandate, theirs to
-    /// act for inside what its owner lends each place their turns are in
-    /// (`at`: each fragment, by its name and its key), read there at each
-    /// use, the narrowest of them.
-    Asker { held: Held<'a>, at: Vec<(&'a str, &'a str)> },
+    /// act for inside what its owner lends each place their asks began in
+    /// (`at`: each fragment by its name and key, for the agent lent there:
+    /// a carried ask's is its first agent's), read there at each use, the
+    /// narrowest of them.
+    Asker { held: Held<'a>, at: Vec<LentAt<'a>> },
     /// No single proven asker (two other people's turns, or one with no
     /// proof): the agent acts as itself, in those turns' places alone,
     /// and lends no one anything of its owner's.
@@ -282,7 +348,7 @@ pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
     let one = others.iter().all(|t| t.asker == others[0].asker);
     match newest(&mut others.iter().copied()) {
         Some(held) if one && others.iter().all(|t| t.mandate.is_some()) => {
-            let mut at: Vec<(&'a str, &'a str)> = others.iter().filter_map(|t| Some((t.place, t.mandate?.place))).collect();
+            let mut at: Vec<LentAt<'a>> = others.iter().filter_map(|t| t.mandate.map(|m| LentAt { name: m.name.unwrap_or(t.place), place: m.place, agent: m.via })).collect();
             at.sort_unstable();
             at.dedup();
             Proof::Asker { held, at }
@@ -313,7 +379,7 @@ mod tests {
 
     fn ben_asks_juniper(at: i64) -> Mandate {
         let (ben, juniper) = ids();
-        Mandate::of_record(&ben, &juniper, &a_room(), "chat", 12, at).expect("well formed")
+        Mandate::of_record(&ben, &juniper, &a_room(), "room--k3x9", "chat", 12, at).expect("well formed")
     }
 
     /// Goal: a place's mandate opens as itself until its record's day is
@@ -357,20 +423,28 @@ mod tests {
     #[test]
     fn a_mandate_is_made_only_of_names_of_their_kind() {
         let (ben, juniper, room) = (ids().0, ids().1, a_room());
-        assert!(Mandate::of_record(&ben, &juniper, &room, "chat", 1, 1).is_some());
-        for (asker, agent, place, channel, seq) in [
-            ("anon:0123456789abcdef0123456789abcdef", juniper.as_str(), room.as_str(), "chat", 1),
-            (ben.as_str(), "npub1short", room.as_str(), "chat", 1),
-            (ben.as_str(), juniper.as_str(), "chat--k3x9", "chat", 1),
-            (ben.as_str(), juniper.as_str(), room.as_str(), "Chat", 1),
-            (ben.as_str(), juniper.as_str(), room.as_str(), "chat", 0),
+        assert!(Mandate::of_record(&ben, &juniper, &room, "room--k3x9", "chat", 1, 1).is_some());
+        for (asker, agent, place, name, channel, seq) in [
+            ("anon:0123456789abcdef0123456789abcdef", juniper.as_str(), room.as_str(), "room--k3x9", "chat", 1),
+            (ben.as_str(), "npub1short", room.as_str(), "room--k3x9", "chat", 1),
+            (ben.as_str(), juniper.as_str(), "chat--k3x9", "room--k3x9", "chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "room.k3x9", "chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "room", "chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "room--k3x9", "Chat", 1),
+            (ben.as_str(), juniper.as_str(), room.as_str(), "room--k3x9", "chat", 0),
         ] {
-            assert_eq!(Mandate::of_record(asker, agent, place, channel, seq, 1), None, "{asker} {agent} {place} {channel} {seq}");
+            assert_eq!(Mandate::of_record(asker, agent, place, name, channel, seq, 1), None, "{asker} {agent} {place} {name} {channel} {seq}");
         }
         // marked, yet not of a mandate's form: a field more, or a seq that is no number
         let key = MandateKey::derive(HOST);
         let (ben, juniper, room) = (ids().0, ids().1, a_room());
-        for fields in [format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2.3"), format!("{PREFIX}{ben}.{juniper}.{room}.chat.+1.2"), format!("{PREFIX}{ben}.{juniper}.chat--k3x9.chat.1.2")] {
+        for fields in [
+            format!("{PREFIX}{ben}.{juniper}.{room}.room--k3x9.chat.1.2.{juniper}.3"),
+            format!("{PREFIX}{ben}.{juniper}.{room}.room--k3x9.chat.+1.2.{juniper}"),
+            format!("{PREFIX}{ben}.{juniper}.chat--k3x9.room--k3x9.chat.1.2.{juniper}"),
+            format!("{PREFIX}{ben}.{juniper}.{room}.chat.1.2"),
+            format!("{PREFIX_V1}{ben}.{juniper}.{room}.room--k3x9.chat.1.2.{juniper}"),
+        ] {
             let mark = hex::encode(&key.mac(fields.as_bytes()).finalize().into_bytes()[..MARK_BYTES]);
             assert_eq!(open(std::slice::from_ref(&key), &format!("{fields}.{mark}"), 1), Err(Refused::Malformed), "{fields}");
         }
@@ -441,7 +515,8 @@ mod tests {
     fn the_narrowest_ask_is_carried() {
         let (ana, ben) = ids();
         let carol = crate::npub::encode(&"e".repeat(64));
-        let held = |text: &'static str, until: i64, place: &'static str| Some(Held { text, until, place });
+        let held = |text: &'static str, until: i64, place: &'static str| Some(Held { text, until, place, name: None, via: "npub1juniper" });
+        let lent = |name: &'static str, place: &'static str| LentAt { name, place, agent: "npub1juniper" };
         let turn = |place: &'static str, asker: &str, mandate: Option<Held<'static>>| Turn { place, asker: Box::leak(asker.to_string().into_boxed_str()), mandate };
         assert_eq!(proof(&ana, &[]), Proof::Bare);
         assert_eq!(proof(&ana, &[turn("own", &ana, None)]), Proof::Bare, "its owner's, unproven: as before");
@@ -449,12 +524,52 @@ mod tests {
         assert_eq!(proof(&ana, &[turn("own", &ana, a1), turn("own", &ana, a2)]), Proof::Owner(a2.unwrap()), "its owner's newest");
         let b = held("b", 5, "npub1room");
         let bens = proof(&ana, &[turn("own", &ana, a2), turn("room", &ben, b), turn("hall", &ben, held("b2", 4, "npub1hall")), turn("room", &ben, b)]);
-        assert_eq!(bens, Proof::Asker { held: b.unwrap(), at: vec![("hall", "npub1hall"), ("room", "npub1room")] }, "another's beside its owner's is the narrower: their newest, and each place of theirs");
+        assert_eq!(bens, Proof::Asker { held: b.unwrap(), at: vec![lent("hall", "npub1hall"), lent("room", "npub1room")] }, "another's beside its owner's is the narrower: their newest, and each place of theirs");
         let busy = proof(&ana, &[turn("room", &ben, b), turn("hall", &carol, held("c", 9, "npub1hall")), turn("room", &carol, None)]);
         assert_eq!(busy, Proof::Itself(vec!["hall", "room"]), "two other people: no one's, in their places");
         assert_eq!(proof(&ana, &[turn("room", &ben, None)]), Proof::Itself(vec!["room"]), "one other, unproven");
         assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
         // replay: the same turns decide the same
         assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
+    }
+
+    /// Goal (FIN-615, PR 16a): an ask carried to another agent of its
+    /// owner's keeps whose it is, where it began and its day, and is lent
+    /// by the agent first asked there; it opens for the agent carrying it,
+    /// under the same keys, and is altered by no one. A mandate of the first
+    /// form still opens (one a turn may hold across the release), lent at
+    /// its turn's own place, and is carried by no one.
+    #[test]
+    fn a_carried_ask_is_the_same_ask_lent_where_it_began() {
+        let key = vec![MandateKey::derive(HOST)];
+        let fred = crate::npub::encode(&"f".repeat(64));
+        let m = ben_asks_juniper(1_000);
+        assert_eq!(lent_at(&m.text(&key[0])), Some((m.place.as_str(), Some("room--k3x9"), m.agent.as_str())), "first asked: lent to itself, where it was asked");
+        let c = m.carried(&fred).expect("carried");
+        assert_eq!((c.asker.as_str(), c.agent.as_str(), c.place.as_str(), c.name.as_deref(), c.channel.as_str(), c.seq, c.until, c.via.as_str()), (m.asker.as_str(), fred.as_str(), m.place.as_str(), Some("room--k3x9"), "chat", 12, m.until, m.agent.as_str()));
+        let text = c.text(&key[0]);
+        assert_eq!(open(&key, &text, 2_000), Ok(c.clone()));
+        assert_eq!(lent_at(&text), Some((m.place.as_str(), Some("room--k3x9"), m.agent.as_str())), "lent where it began, by the agent first asked");
+        assert_eq!(c.carried(&crate::npub::encode(&"9".repeat(64))).map(|again| again.via), Some(m.agent.clone()), "carried again, still lent by the first");
+        let lent_to_itself = text.replacen(&format!(".{}.", m.agent), &format!(".{fred}."), 2);
+        assert_eq!(open(&key, &lent_to_itself, 2_000), Err(Refused::Forged), "no carrier names itself the agent lent");
+        // the first form: made before this release, held by an open turn
+        let (ben, juniper, room) = (ids().0, ids().1, a_room());
+        let fields = format!("{PREFIX_V1}{ben}.{juniper}.{room}.chat.12.{}", m.until);
+        let old = format!("{fields}.{}", hex::encode(&key[0].mac(fields.as_bytes()).finalize().into_bytes()[..MARK_BYTES]));
+        let opened = open(&key, &old, 2_000).expect("a first-form mandate opens");
+        assert_eq!((opened.name.as_deref(), opened.via.as_str()), (None, juniper.as_str()));
+        assert_eq!(lent_at(&old), Some((room.as_str(), None, juniper.as_str())), "lent at its turn's own place, to itself");
+        assert_eq!(opened.carried(&fred), None, "a first-form ask goes on unproven, as before");
+    }
+
+    /// Goal: a carried ask is lent where it began, by the agent first asked
+    /// there, beside any other place's (`Proof::Asker::at`).
+    #[test]
+    fn a_carried_ask_names_where_it_began_for_its_lend() {
+        let (ana, ben) = ids();
+        let carried = Some(Held { text: "c", until: 9, place: "npub1room", name: Some("room--k3x9"), via: "npub1juniper" });
+        let turn = Turn { place: "asks--k3x9", asker: Box::leak(ben.clone().into_boxed_str()), mandate: carried };
+        assert_eq!(proof(&ana, &[turn]), Proof::Asker { held: carried.unwrap(), at: vec![LentAt { name: "room--k3x9", place: "npub1room", agent: "npub1juniper" }] });
     }
 }

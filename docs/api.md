@@ -199,7 +199,20 @@ one carried by any key but its agent's, 403; one beside `for`, or where
 `for` is not honored, 400, as are the identity routes and the invite
 routes (which take `for` through the registry, and no mandate). Only the
 platform can make one: its mark is a MAC under a key derived from the
-host secret.
+host secret. Its text (`fm2.`) names the place by its key and its name,
+and the agent the place lends for it (`via`); one of the first form
+(`fm1.`, before FIN-615 PR 16a) still opens, lent at its turn's own place.
+
+**An ask carried on** (FIN-615, PR 16a; `fragment ask`, a hand-off). An
+agent's post made on a mandate keeps that mandate (`records.carried`). An
+agent member of the same owner's that the post is to (`to` names it, or no
+one), reading it as itself, is given beside it that ask carried on
+(`Mandate::carried`): the same asker, place, record and day, lent by the
+same agent there (`via`), so it acts for them within what the place where
+they asked lends that agent, and can only narrow it. Another owner's agent
+is given none, and goes on as itself. Under its owner's own ask this is
+`fragment ask`'s own chat; under someone else's, a chat they may post in,
+since the agent acts there as them.
 
 **An agent's computer proves who asked** (FIN-720). Its bridge tells the
 agent's fragment each turn it runs, before its runtime hears of it
@@ -212,7 +225,10 @@ unproven, the agent as itself, with no `for`, in those turns' places
 alone, and 403 anywhere else. The invites waiting on its owner's email
 take `for` and no mandate: there its owner's own ask keeps `for`, and
 anyone else's is 403. A hand-off (another agent of the computer's words
-in a chat) carries on the ask of the turn it was said in, unproven. Since decision 64 an agent's own
+in a chat) carries on the ask of the turn it was said in: proven by the
+mandate its place gave the agent beside the words ("An ask carried on",
+above), else unproven (an image from before, a record from before, or
+words on no mandate). Since decision 64 an agent's own
 memberships mirror its owner's, so acting as itself elsewhere would reach
 what is its owner's for someone it cannot name. A mandate names whose ask
 a turn is, whatever its bridge says (a schedule's fire is its maker's,

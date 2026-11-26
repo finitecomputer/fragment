@@ -292,7 +292,11 @@ a step posted again is the same record. A chat's helpers set
 bridge process that claims the turn. The record is the claim, "this life
 runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
 wrote the message that started it ("Who wrote a record"): its asker is
-no one, whatever `asker` names. Older bridges write none.
+no one, whatever `asker` names. Older bridges write none. A hand-off's
+(another agent of the computer's words in the chat) names `carried`, the
+identity whose ask those words were on (FIN-615, PR 16a): a page says
+"Rowan is working for Ben (via Juniper)", `asker` being Juniper. Older
+bridges write none.
 
 **`turn.step`**, part `<step>`, from 1: one tool call.
 

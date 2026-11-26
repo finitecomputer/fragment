@@ -5343,3 +5343,24 @@ fn a_hand_off_carries_on_the_ask_it_came_from() {
         assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "{said}: no one's");
     }
 }
+
+/// Goal (FIN-615, PR 16a): a hand-off whose record carries its place's
+/// mandate for the agent asked (an ask carried on between one owner's
+/// agents) is told with that proof, and its start names the ask it carries
+/// on beside the agent that said it: "Rowan is working for Skyler (via
+/// Juniper)". One whose record carries none goes on unproven, as before
+/// (`a_hand_off_carries_on_the_ask_it_came_from`).
+#[test]
+fn a_hand_off_its_place_carried_is_told_with_that_proof() {
+    let (j, r) = (agent("juniper"), agent("rowan"));
+    let v = view(&[&j, &r]);
+    let mut e = engine(&[j.clone(), r.clone()]);
+    let talk = "talk--k3x9";
+    let skylers = Record { mandate: Some("fm2.skyler".into()), ..rec_at(1, 10, "npub1skyler", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
+    let jt = to_all(&mut e, &[&j], &v, talk, skylers, T0)[0].0.turn.clone();
+    let words = Record { mandate: Some("fm2.carried".into()), ..rec_at(2, 20, "npub1juniper", json!({ "text": "rowan, over to you", "to": ["npub1rowan"], "turn": jt, "hop": 1 })) };
+    let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: words, view: Some(v.clone()), since: 0 }, T0 + 2);
+    let start = s.effects.iter().find_map(|x| match x { Effect::Claim { body, .. } => Some(body.clone()), _ => None }).expect("Rowan's turn claimed");
+    assert_eq!((start["asker"].clone(), start["carried"].clone()), (json!("npub1juniper"), json!("npub1skyler")), "its start names the ask it carries on: {start}");
+    assert_eq!(told(&answered(&mut e, s, T0 + 2)), vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: Some("fm2.carried".into()), unproven: None }], "Skyler's ask, carried on, proven");
+}
