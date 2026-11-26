@@ -168,8 +168,8 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let again = put(api, &bob, "k3", &json!({ "value": "w", "hosts": ["api.example.com"], "agents": agents }))?;
     s.ok("a vault keeps at most 64 secrets: a 65th is refused, and one set again is not a new one", over.status == 400 && again.status == 200 && names(api, &bob)?.1.len() == 64, format!("{over} {again}"));
 
-    // its hosts: at most 8 beyond the catalog's, which a computer's egress
-    // has room for (fragment_core::computer::egress)
+    // its hosts: at most 8, the catalog's counted too, which a computer's
+    // egress has room for (fragment_core::computer::egress)
     let cy = api.person()?;
     let to = |hosts: &[&str]| json!({ "value": "v", "hosts": hosts, "agents": agents });
     for i in 0..8 {
@@ -180,21 +180,23 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let placed = put(api, &cy, "site0", &json!({ "hosts": ["h0.example.com", "h8.example.com"], "agents": agents }))?;
     let (_, listed) = names(api, &cy)?;
     s.ok(
-        "a vault sends to at most 8 hosts beyond the catalog's: a ninth is refused (400), set with a value or without, in words that say so, and eight secrets are still listed",
+        "a vault sends to at most 8 hosts: a ninth is refused (400), set with a value or without, in words that say so, and eight secrets are still listed",
         ninth.status == 400
             && ninth.body["message"].as_str().is_some_and(|m| m.contains("at most 8 hosts") && m.contains("would make 9"))
             && placed.status == 400
+            && placed.body["message"].as_str().is_some_and(|m| m.contains("at most 8 hosts"))
             && listed.len() == 8,
         format!("{ninth} {placed}"),
     );
-    let shared = put(api, &cy, "site8", &to(&["h3.example.com", crate::SWAP_CONNECTION_HOST]))?;
+    let shared = put(api, &cy, "site8", &to(&["h3.example.com"]))?;
+    let catalogs = put(api, &cy, "site9", &to(&[crate::SWAP_CONNECTION_HOST]))?;
     let moved = put(api, &cy, "site7", &to(&["h9.example.com"]))?;
     let gone = api.signed(&cy, "DELETE", "/api/vault/site1", None)?;
     let freed = put(api, &cy, "site9", &to(&["h10.example.com"]))?;
     s.ok(
-        "a host another secret goes to, or the catalog catches, costs nothing more; a secret moved to a new host keeps eight; one removed frees its host",
-        shared.status == 200 && moved.status == 200 && gone.status == 200 && freed.status == 200,
-        format!("{shared} {moved} {gone} {freed}"),
+        "a host another secret goes to costs nothing more, and the catalog's counts as any other; a secret moved to a new host keeps eight; one removed frees its host",
+        shared.status == 200 && catalogs.status == 400 && moved.status == 200 && gone.status == 200 && freed.status == 200,
+        format!("{shared} {catalogs} {moved} {gone} {freed}"),
     );
 
     // restart: what was put is still there

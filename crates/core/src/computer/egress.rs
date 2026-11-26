@@ -14,42 +14,29 @@
 pub const INTERCEPTS_MAX: usize = 128;
 /// What one host costs, caught on HTTP and on HTTPS.
 pub const HOST_COST: usize = 4;
-/// The platform's own, each on HTTP alone: `api`, `model` and
-/// `codestorage` (a local fleet's) `.fragment.internal`, and the backups'
-/// gateway, which each save and restore registers for itself (the Sandbox
-/// SDK's `DirectoryBackup`; cell/entry.mjs `#intercept`).
-pub const PLATFORM_COST: usize = 4 * 2;
-/// The most hosts a person's Vault sends secrets to beyond the catalog's
-/// own (a catalog host is caught already, and costs nothing more).
+/// The platform's own, each on HTTP alone: `api`, `model`, `codestorage`
+/// (a local fleet's) and `fpac` (a start on a disk) `.fragment.internal`,
+/// and the backups' gateway, which each save, restore and disk export
+/// registers for itself (the Sandbox SDK's `DirectoryBackup`; cell/entry.mjs
+/// `#intercept`).
+pub const PLATFORM_COST: usize = 5 * 2;
+/// The most hosts a person's Vault sends secrets to, a catalog's host
+/// counted like any other: a computer registers each Vault host as its
+/// own, so what a catalog changes never moves a Vault over its share.
 pub const VAULT_HOSTS_MAX: usize = 8;
 /// The most hosts a catalog may catch: what is left once the platform's
 /// and a full Vault's are counted.
 pub const CATALOG_HOSTS_MAX: usize = (INTERCEPTS_MAX - PLATFORM_COST - VAULT_HOSTS_MAX * HOST_COST) / HOST_COST;
 
-/// Whether `intercepts` catch `host` already: by name, or by a glob
-/// (`*.under`, an account host's: `catalog::AccountHost::covers`, a host
-/// of one label or more under it).
-pub fn caught(intercepts: &[String], host: &str) -> bool {
-    intercepts.iter().any(|c| match c.strip_prefix("*.") {
-        Some(under) => host.strip_suffix(under).is_some_and(|rest| rest.len() > 1 && rest.ends_with('.')),
-        None => c == host,
-    })
-}
+// the three shares fit one container, or this crate doesn't build
+const _: () = assert!(PLATFORM_COST + (CATALOG_HOSTS_MAX + VAULT_HOSTS_MAX) * HOST_COST <= INTERCEPTS_MAX);
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn the_shares_fit_the_containers_entries() {
-        assert_eq!(CATALOG_HOSTS_MAX, 22);
-        assert_eq!(PLATFORM_COST + (CATALOG_HOSTS_MAX + VAULT_HOSTS_MAX) * HOST_COST, INTERCEPTS_MAX);
-    }
-
-    #[test]
-    fn a_host_under_a_catalog_glob_is_caught_by_it() {
-        let catalog = vec!["*.my.salesforce.com".to_string(), "api.example.com".to_string()];
-        assert!(caught(&catalog, "acme.my.salesforce.com") && caught(&catalog, "a.b.my.salesforce.com") && caught(&catalog, "api.example.com"));
-        assert!(!caught(&catalog, "my.salesforce.com") && !caught(&catalog, "evilmy.salesforce.com") && !caught(&catalog, "x.example.com"));
+    fn a_catalog_has_room_for_21_hosts() {
+        assert_eq!(CATALOG_HOSTS_MAX, 21);
     }
 }
