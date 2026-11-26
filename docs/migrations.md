@@ -3,7 +3,8 @@
 How finite.computer's agents come to this platform (FIN-463). One
 `Migrations` Durable Object owns every old agent's move; everyone else is
 asked. All of it is removable once the move ends: the debt ledger's
-entry, "The finite.computer move", says when and in what order.
+entry, "The finite.computer move", says when and in what order. Its last
+section, "What the next migration keeps", outlives it.
 
 The shapes are `fragment_proto::migrations` (crates/proto/src/migrations.rs).
 The routes the mover and a new agent call are on the wire (docs/wire,
@@ -534,3 +535,85 @@ answer but 404, and `deploy` makes no bucket):
 `cutoff_ms`, once set, is phase 2's cutoff, in ms since the epoch. The
 cell reads them as `FRAGMENT_MIGRATIONS_MOVER` and
 `FRAGMENT_MIGRATIONS_CUTOFF_MS`.
+
+## What the next migration keeps
+
+A team's Brain came over from finite.computer one teammate's move at a
+time (FIN-774: the `finite-computer` profile's "Brains, as brains", and
+`finite-computer.brains.py` beside it). Part of that is how any team's
+move must work, and part is only how the old Finite kept its brains.
+This section says which is which, so the next migration starts from the
+rules, not from the old Finite's files. Two are in sight: a Hermes agent
+from somewhere else moving onto fragment (one person), and a team moving
+from finite.chat to a self-hosted box (fragment to fragment). It outlives
+the move: the debt ledger's "The finite.computer move" removes the
+profile only after the general rules are taken out of it.
+
+### General: any team's move needs these
+
+Each holds for any source. Today they are written in the
+`finite-computer` profile and its helper. Taking them out is later work:
+into `import-agent-home`'s `SKILL.md`, and a helper (or a `fragment home`
+command, FIN-774's trade-off) that takes its versions and its base from
+the source.
+
+- **One home per team Brain.** Only the owner who runs the team makes
+  it, after being asked whether someone already did. Every other
+  teammate's import catches that one up: two would split what the team
+  writes.
+- **Never wider than the source.** What only some of a team could read
+  never reaches everyone. Before anyone is invited, the owner is asked
+  which parts only some should read. Those stay out (each can be a Brain
+  of its own), and nothing is copied from a narrower Brain into a wider
+  one.
+- **Catch up, never copy over.** A later teammate's import decides each
+  page from three versions: what the Brain took last (the base), the
+  source's, and the Brain's now.
+  - Changed only at the source: taken.
+  - Changed only here: kept.
+  - Changed on both: listed for a person.
+  - Deleted at the source: listed, never deleted.
+- **Newer by the source's own versions, never by bytes.** An import
+  rewrites what it brings (an asset's note), so two copies of one
+  unchanged page differ.
+- **Only text the source published.** A page an old agent edited and
+  never synced is listed, never taken: no version of the source held it.
+- **An attachment goes by the notes that name it,** never by where it
+  sits. It stays out when a note of a part kept back names it, and is
+  recorded as kept out the moment any copy shows that, so no later
+  import brings it in. Each attachment has one name, the same from
+  every note that names it and in the record (`attachment_of`).
+- **A reference copy until settled.** A teammate's copy goes only when
+  the Brain holds everything in it, or a person has decided.
+- **Only what sync carries, written whole.** A page `fragment sync`
+  never carries (`syncable`, `valid_repo_path`) is refused, never
+  written where it would look settled. A page is written beside its
+  place and moved over it, so a failed write leaves what was there.
+
+Two gaps hold for any version of it: two teammates catching up within
+the same few seconds, and a page deleted between a catch-up's pull and
+its push (the debt ledger's "A team brain's catch-up keeps its base in
+a file").
+
+### Only the old Finite's
+
+| What | Why it is the old Finite's | A Hermes from elsewhere | finite.chat to self-hosted |
+|---|---|---|---|
+| `imported-from-finite.json`: the base as a file (each page's revision and what was written, the shared folders and the newest copy of each, the withheld attachments) | An agent can't read a Brain's history yet (FIN-780). | Nothing: one person's Brain is made once, and no teammate catches it up. | The Brain's history: the import's commit is the base, once the CLI reads a file at a commit and `main`'s messages (FIN-780). The withheld list becomes a fact of the Brain's own. |
+| The stage's `versions` (FIN-773): each page's revision and hash, the Brain's latest sequence, each folder's identity and whether the old agent could read it | The old Brain's sync kept them; nothing else says which teammate's copy is newer. | Nothing: no copies to rank. | Git: a commit's ancestry says which copy is newer, and a page's path is its identity. |
+| `copied`: which staged pages were their revision's exact text | A stage is a working tree, which may hold edits the old Brain never got. | Nothing. | Nothing: a commit holds exact text. |
+| `/data/<path>` notes rewritten to `raw/assets/<path>`, with `finite_asset` | The old computer kept a note's file outside the Brain. | Its own layout's mapping, if its notes name files; the one-name rule stays. | Nothing: attachments already sit in `raw/assets/`. |
+| Folders by identity and readability: one left out, one the old agent couldn't read, another at a shared folder's path | The old Brain shared folders to some of a team; here a Brain is shared whole. | Nothing: all of it is the person's. | Nothing: a part only some may read is already a Brain of its own. Each Brain's members are invited again. |
+| `owner` and `kind` in the name file decide make or reference copy | The old agent kept a working copy of every Brain it could read. | Nothing: all of it is theirs. | The fragment's own owner and members. |
+| The old Brain's own files left out (`AGENTS.md`, `_index.md`, `.keep`, `_wiki/`), and the push's top-level check | The old Brain's tree. | Its layout's. | Nothing: the repo is the Brain. |
+
+`finite-computer.brains.py` is both. Its comparison, withholding,
+refusals and whole writes are the general rules above. Its inputs are
+the old Finite's: the record file, the stage's `versions`, the name
+file, and `/data`. Taken out, it reads them through the source.
+
+A team on finite.chat has no copy per teammate: a Brain is one fragment
+its members share. A move to a self-hosted box moves that fragment once,
+with its history. A teammate-at-a-time catch-up comes back only if the
+team keeps writing on finite.chat after the move: then the newer commits
+come over as a merge, with the move's commit as the base.
