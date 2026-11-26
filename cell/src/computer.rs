@@ -2312,8 +2312,6 @@ impl ComputerCell {
         }
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
-        // whether its home's unhold let its guest go (an awake save's)
-        let mut let_go = false;
         for dir in SAVED_DIRS {
             let t = js::now_ms();
             match self.backup_dir(&g, dir, &left_out, until).await {
@@ -2325,9 +2323,7 @@ impl ComputerCell {
                     // it takes its work's (`Lifecycle`'s `HomeSaved`)
                     // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
                     if dir == "/data" {
-                        let (ms, went) = self.home_saved(generation, seq).await;
-                        until += ms;
-                        let_go = went;
+                        until += self.home_saved(generation, seq).await;
                     }
                 }
                 Err(e) => {
@@ -2342,22 +2338,24 @@ impl ComputerCell {
         }
         // each record checked against R2's own copy (FIN-784), once all are
         // taken, within what their backups left: a check never takes the
-        // time a later backup needs, nor a sleep's forget pass and its
-        // snapshot's most after it (one that runs out keeps its record
+        // time a later backup needs, nor a sleep's forget pass and the most
+        // its snapshot is given after it (one that runs out keeps its record
         // unchecked, as before). One that came out damaged is let go of
-        // (this save's forget pass deletes it) and backed up again while its
-        // guest is held as it was then and this is still the save its
-        // lifecycle asked for (an owner's sleep or restart asks its own, and
-        // a backup of this one would hold that one's up); else the save
-        // fails, tried again
-        let snapshot_after = self.cfg.computer_snapshots && matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { .. }));
+        // (this save's forget pass deletes it) and, in a sleep's own save
+        // (its guest held to its end), backed up again; else the save
+        // fails, tried again: an awake save's backup could hold up the one
+        // an owner's sleep or restart asks meanwhile (the container takes
+        // one backup at a time), which an awake save's failure costs nothing
+        let sleeping = matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { .. }));
+        let snapshot_after = sleeping && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
         let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
             // bounded: at its last try `after_check` answers no Again
             for tried in 1..=fragment_core::computer::SAVE_TRIES {
                 let checked = self.stored(&records[at], checks_until).await;
-                let asked = matches!(self.lifecycle().map(|l| l.saving()), Ok(Some(Saving::Save { seq: s, .. })) if s == seq);
-                let next = fragment_core::computer::after_check(checked, tried, asked && (dir != "/data" || !let_go));
+                // still the save its lifecycle asked for: a sleep's own
+                let own = sleeping && matches!(self.lifecycle().map(|l| l.saving()), Ok(Some(Saving::Save { seq: s, .. })) if s == seq);
+                let next = fragment_core::computer::after_check(checked, tried, own);
                 let why = match next {
                     AfterCheck::Keep => break,
                     AfterCheck::Unchecked(why) => {
@@ -2467,9 +2465,8 @@ impl ComputerCell {
     /// save, and the unhold it asks for (an awake save's, once) made at once,
     /// so its guest claims turns again while its work is copied. It asks for
     /// nothing else: no life ends, nothing of its saves is said, and its
-    /// alarm stays the save's deadline. Answers how long its unhold took,
-    /// and whether it let its guest go (an unhold that failed may have).
-    async fn home_saved(&self, generation: u64, seq: u64) -> (i64, bool) {
+    /// alarm stays the save's deadline. Answers how long its unhold took.
+    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
         let event = Event::HomeSaved { generation, seq };
         let logged = json!(event);
         let applied = self.lifecycle().and_then(|mut life| {
@@ -2480,20 +2477,18 @@ impl ComputerCell {
             Ok(step)
         });
         let t = js::now_ms();
-        let mut let_go = false;
         match applied {
             Ok(step) => {
                 assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
                 for action in step.actions {
                     let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
-                    let_go = true;
                     self.unhold(generation, true).await;
                 }
             }
             // held on to its end, as before: its end lets go
             Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
         }
-        (js::now_ms() - t, let_go)
+        js::now_ms() - t
     }
 
     /// What the held guest of start `g` names as left out of its save (its

@@ -546,11 +546,15 @@ the DO removes them from one started from a snapshot.
   a save's records are all taken, each is read back from R2 and kept once
   R2's own copy hashes to it (`fragment_core::computer::after_check`): a
   check never takes the time a later backup needs, nor what a sleep's
-  snapshot is given at most after it (`SNAPSHOT_MAX_MS`). One that came out
-  damaged is let go of (the save's forget pass deletes it) and backed up
-  again while its guest is held as it was when it was taken, three tries
-  in all, within the save's own bound; an awake save's home, its hold let
-  go since, fails the save instead, tried again as any. A check that
+  snapshot is given at most after it, nor its forget pass before that
+  (`SNAPSHOT_MAX_MS`, `FORGET_PASS_MS`; a restart, whose start is fresh,
+  takes no snapshot). One that came out damaged is let go of (the save's
+  forget pass deletes it) and, in a sleep's own save (its guest held to its
+  end), backed up again, three tries in all, within the save's own bound;
+  an awake save fails instead, tried again as any at no cost (its computer
+  is awake, its last save kept), as its backup could hold up the one an
+  owner's sleep or restart asks meanwhile (the container takes one backup
+  at a time). A check that
   cannot be made (R2 failed its read, or the save's time ran out) keeps
   the record unchecked, as before the check, and logs it: a save that fits
   its bounds is never failed for want of its check. A restore whose bytes
