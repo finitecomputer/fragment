@@ -2064,8 +2064,8 @@ export function mount(root) {
     const asker = a.asker === me ? "you" : a.asker ? who(a.asker).name : "";
     const forWhom = a.asker && a.asker !== a.asks ? ` for ${asker}` : "";
     const what = a.title || a.fragment;
-    // a lend kept in another chat: named, as it is no "here"
-    const where = a.elsewhere ? ` in ${what}` : "";
+    // a lend kept in another chat, which is no "here" (never named: its title is its own people's)
+    const where = a.elsewhere ? " in another chat" : "";
     if (a.what === "accounts") return `${agent} wants to use ${of} accounts${forWhom}${where}.`;
     if (a.what === "spend") return `${agent} wants to spend ${of} credit${forWhom}${where}.`;
     if (a.what === "delete") return `${agent} wants to delete ${what}${forWhom}.`;

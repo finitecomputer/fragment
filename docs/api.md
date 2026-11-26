@@ -984,8 +984,9 @@ answer." Two calls ask:
 The card goes to the chat the asker's newest turn runs in (a lend's: one
 of theirs that lends it not); where whom it asks is not in that chat, to
 their own newest chat with the agent, so it never lands where its
-answerer can't see it; a lend's card there names the chat it is about and
-offers no Always here (400), which is answered where it is kept. One for the same agent, asker, ask and thing is
+answerer can't see it; a lend's card there says it is about another chat
+(never naming it) and offers no Always here (400), which is answered where
+it is kept. One for the same agent, asker, ask and thing is
 open at a time (a second ask is the same card), at most
 `limits::ASKS_OPEN_MAX` in a chat (429 past it), each answerable for
 `limits::ASK_LIFE_MS`. Its records are the platform's own on `work`

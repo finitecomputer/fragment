@@ -191,14 +191,11 @@ impl FragmentCell {
             return Ok(Some(turn.place.clone()));
         }
         // whom it asks is not in that chat: their own newest chat with the
-        // agent, its card naming the chat it is about (a lend's: there alone
-        // is it Always here, so this one is not)
+        // agent, its card about another chat (a lend's: there alone is it
+        // Always here, so this one is not), never naming it: its title is
+        // its own people's, not this chat's
         let list = crate::principal::ask(&self.env, &npub::display(&a.asks), &crate::principal::calls::List::default()).await?;
         let own = list.fragments.into_iter().filter(|f| f.kind == FragmentKind::Chat && f.role == Role::Owner && !f.archived && f.agents.iter().any(|x| npub::display(x) == npub::display(&agent)));
-        let mut post = post;
-        if lent.is_some() {
-            post.card.title = crate::fragment::call(&self.env, &turn.place, &crate::fragment::calls::FaceOf {}).await.ok().and_then(|n| n.title);
-        }
         let Some(own) = own.max_by_key(|f| f.preview_at.unwrap_or(0)) else {
             self.event("ask.nowhere", &format!("{} is not in {} and has no chat with this agent", a.asks, turn.place), json!({ "asker": asker, "what": a.card.what, "place": turn.place }));
             return Ok(None);
