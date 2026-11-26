@@ -185,6 +185,8 @@ function door({ noDoors = false } = {}) {
   // the same object started again over its storage (an eviction)
   d.again = () => new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   d.prefixed = (name = DOOR) => [...blobs.files.keys()].filter((k) => k.startsWith(`doors/${name}/`));
+  // a link moved into it, its save given as the operators' move gives it
+  d.moved = () => d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("the moved link") });
   // a file its runner gives (`life`'s), and one its connector gives or reads
   d.give = (life, sha, bytes, type = "audio/mp4") => (named(sha, bytes), egress("PUT", `/egress/file/${sha}`, { "x-door-generation": String(life), "content-type": type, "content-length": String(bytes.length) }, bytes));
   d.jobFile = (method, sha, bytes) => (named(sha, bytes), call(method, `/job/file/${sha}`, { "x-fragment-door": DOOR, "x-fragment-connector": NAME, ...(bytes ? { "content-type": "application/pdf", "content-length": String(bytes.length) } : {}) }, bytes));
@@ -981,7 +983,7 @@ test("a restore names its save's SHA-256, which its runner checks before it stag
   d.st.sql.exec("UPDATE saves SET sha = NULL");
   const old = await d.restore(d.row().started);
   assert.deepEqual([old.status, old.headers.get("x-door-sha256"), await old.text()], [200, hex("its one save"), "its one save"]);
-  assert.equal(d.st.sql.exec("SELECT sha FROM saves").one().sha, hex("its one save"), "kept");
+  assert.equal(d.st.sql.exec("SELECT sha FROM saves WHERE generation = ?", life1).one().sha, hex("its one save"), "kept");
 });
 
 test("an ask its runner found damaged on its way (422: it took nothing) is asked again, as its door hashed it, at most a few times (FIN-775)", async () => {
@@ -1035,6 +1037,7 @@ test("its connector's asks and their answers are each named by its SHA-256 and u
 
 test("handed back, its runner ended: a delivery still on its way from it is taken no more, its last save holding it unread (Codex's round on 8cacd32d1)", async () => {
   const d = door();
+  await d.moved();
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.save(life1, 1, "its last");
@@ -1043,6 +1046,50 @@ test("handed back, its runner ended: a delivery still on its way from it is take
   const late = await d.deliver("m-late");
   assert.deepEqual([late.status, (await late.json()).error], [409, "handed_back"]);
   assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM deliveries").one().n, 0, "never kept, never posted");
+});
+
+test("a delivery whose body comes in only after the way back ended its runner is taken no more, looked at again as its body is read (Codex's round on f434be3bb)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its last");
+  d.c.signal = async () => void (d.c.running = false);
+  const sent = JSON.stringify({ id: "m-slow", kind: "text", text: "late", at: "2026-11-26T00:00:00Z", file: null });
+  let push;
+  const body = new ReadableStream({ start: (c) => void (push = c) });
+  // its fence passed as it began, its body still on its way
+  const pending = d.call("POST", "/egress/deliver", { "x-door-sha256": hex(sent) }, body);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal((await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }))).status, 200);
+  push.enqueue(new TextEncoder().encode(sent));
+  push.close();
+  const late = await pending;
+  assert.deepEqual([late.status, (await late.json()).error], [409, "handed_back"]);
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM deliveries").one().n, 0, "never kept");
+});
+
+test("a door whose link is its own, not the one its computer handed over, has no way back, and keeps running it (Codex's round on f434be3bb)", async () => {
+  const d = door();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "a link of its own");
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, (await r.json()).error], [410, "not_moved"]);
+  assert.deepEqual([d.row().stopped, d.c.running, d.c.signals], [null, true, []], "nothing stopped");
+});
+
+test("a way back finds a file its runner gave that no delivery names yet: busy, its runner running again, which delivers it (Codex's round on f434be3bb)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.give(life1, sha(7), "a voice memo");
+  await d.save(life1, 1, "its last");
+  d.c.signal = async () => void (d.c.running = false);
+  const busy = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([busy.status, (await busy.json()).error], [409, "busy"]);
+  assert.deepEqual([d.row().stopped, d.c.running], [null, true], "its runner running again");
 });
 
 test("a delivery to its connector's inbox is signed over its body by the inbox's secret: one its inbox refuses (a body changed on its way fails its check) is sent again at its next watch", async () => {
@@ -1087,6 +1134,7 @@ test("every answer its runner takes is named by its SHA-256 as it leaves for the
 test("the way back: a planned stop, its runner's last save, and that save handed back; again the same", async () => {
   const d = door();
   const back = (name = DOOR) => d.call("POST", "/door/handback", {}, JSON.stringify({ door: name }));
+  await d.moved();
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.save(life1, 1, "its first");
@@ -1145,6 +1193,7 @@ test("a door a link moves into starts only from that link: its connect, or a sta
 
 test("a save kept before its SHA-256 was (the door's step 9) is handed back with one, read through as a stream first, and keeps it (Codex's fix-check of #1541)", async () => {
   const d = door();
+  await d.moved();
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.save(life1, 1, "a save from before");
@@ -1153,11 +1202,12 @@ test("a save kept before its SHA-256 was (the door's step 9) is handed back with
   const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
   const sha = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode("a save from before")))].map((b) => b.toString(16).padStart(2, "0")).join("");
   assert.deepEqual([r.status, r.headers.get("x-door-sha256"), await r.text()], [200, sha, "a save from before"]);
-  assert.equal(d.st.sql.exec("SELECT sha FROM saves").one().sha, sha, "kept");
+  assert.equal(d.st.sql.exec("SELECT sha FROM saves WHERE generation = ?", life1).one().sha, sha, "kept");
 });
 
 test("a save kept before its SHA-256 was, its door ended (unlinked) as it is hashed on its way back: refused as ended, no hash written (Codex's round on #1541)", async () => {
   const d = door();
+  await d.moved();
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   await d.save(life1, 1, "a save from before");
@@ -1179,6 +1229,7 @@ test("a save kept before its SHA-256 was, its door ended (unlinked) as it is has
   // its unlink landing before the bucket answers, its save gone with it
   // (Codex's fix-check): refused as ended too, never a 500
   const e = door();
+  await e.moved();
   await e.connect();
   await e.save(life(await e.restore(e.row().started)), 1, "a save");
   e.c.signal = async () => void (e.c.running = false);
@@ -1210,6 +1261,7 @@ test("an ended door has no way back: refused (410), never a save of nothing that
 
 test("the way back waits while its owner's messages still go to its connector, never a save past a message no one has", async () => {
   const d = door();
+  await d.moved();
   await d.connect();
   const life1 = life(await d.restore(d.row().started));
   d.inbox.status = 503;
@@ -1218,7 +1270,8 @@ test("the way back waits while its owner's messages still go to its connector, n
   d.c.signal = async () => void (d.c.running = false);
   const busy = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
   assert.deepEqual([busy.status, (await busy.json()).error], [409, "busy"], "m1 not yet its connector's");
-  assert.equal(d.row().stopped, "handed back", "stopped all the same: nothing new comes");
+  assert.deepEqual([d.row().stopped, d.c.running], [null, true], "nothing handed back: its runner running again, its link at one end (Codex's round on f434be3bb)");
+  d.c.signal = async () => void (d.c.running = false);
   d.inbox.status = 200;
   const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
   assert.deepEqual([r.status, await r.text()], [200, "its save, past m1"], "asked again, m1 sent on first");

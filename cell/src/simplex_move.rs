@@ -199,17 +199,14 @@ impl Move<'_> {
         if text(&rec, "step") == "made" {
             rec = self.hand_over(&rec).await?;
         }
-        if text(&rec, "step") == "imported" {
-            rec = self.bind(&rec).await?;
-        }
-        if text(&rec, "step") == "bound" {
-            // its SimpleX name its title, as Settings connects one and as its
-            // computer named it, so its person's app shows no new name
-            let status = self.as_person(&self.agent, Method::Get, "/api/status", None).await?;
-            let title = status["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(label_of(&self.agent));
-            let name: String = title.chars().take(64).collect();
-            self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": name } }))).await?;
-            rec = self.set("bound", None, json!({ "step": "connecting" })).await?;
+        // its link in its door, its computer's core stopped, its door not
+        // yet connected: any failure but another `go`'s (a conflict: it
+        // moved the move on) goes back (Codex's round on f434be3bb)
+        if matches!(text(&rec, "step"), "imported" | "bound") {
+            rec = match self.connect(rec).await {
+                Err(e) if e.code != ErrorCode::Conflict => return Err(self.went_back(e).await),
+                r => r?,
+            };
         }
         if text(&rec, "step") == "connecting" {
             let state = self.door_state(text(&rec, "door")).await?;
@@ -231,6 +228,24 @@ impl Move<'_> {
             _ => "ask again",
         };
         Ok(json!({ "agent": self.agent, "record": rec, "next": next }))
+    }
+
+    /// Its connector bound, then its door connected (a staged chat offered
+    /// instead, waiting for its person's word).
+    async fn connect(&self, mut rec: Value) -> CellResult<Value> {
+        if text(&rec, "step") == "imported" {
+            rec = self.bind(&rec).await?;
+        }
+        if text(&rec, "step") == "bound" {
+            // its SimpleX name its title, as Settings connects one and as its
+            // computer named it, so its person's app shows no new name
+            let status = self.as_person(&self.agent, Method::Get, "/api/status", None).await?;
+            let title = status["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(label_of(&self.agent));
+            let name: String = title.chars().take(64).collect();
+            self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": name } }))).await?;
+            rec = self.set("bound", None, json!({ "step": "connecting" })).await?;
+        }
+        Ok(rec)
     }
 
     /// Its connector: made as the person's own from the SimpleX template,
@@ -317,11 +332,19 @@ impl Move<'_> {
                 Ok(_) => break (sha, length, staged),
             }
         };
-        crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
-        self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
-        // a staged chat waits for its person's word once bound, never
-        // connected for them
-        self.set("made", None, json!({ "step": "imported", "staged": staged })).await
+        // imported: until its door is connected, any failure but another
+        // `go`'s goes back (`go`), these first
+        let recorded = async {
+            crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
+            self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
+            // a staged chat waits for its person's word once bound, never
+            // connected for them
+            self.set("made", None, json!({ "step": "imported", "staged": staged })).await
+        };
+        match recorded.await {
+            Err(e) if e.code != ErrorCode::Conflict => Err(self.went_back(e).await),
+            r => r,
+        }
     }
 
     /// The one way out of a handover that failed after its core may have

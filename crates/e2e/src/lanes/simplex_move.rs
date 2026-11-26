@@ -182,10 +182,15 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let r = lever_with(&api.patient(WAKE), &id, json!({ "op": "always-on", "on": true }))?;
     anyhow::ensure!(r.status == 200, "always on again: {r}");
     let awake = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    // its bridge's answer to the way back damaged on its way out once: read
+    // as damaged, nothing marked, asked again (its bridge then says it holds
+    // the link already: Codex's round on f434be3bb)
+    let r = lever_with(api, &id, json!({ "op": "damage", "path": "/simplex/back", "times": 1 }))?;
+    anyhow::ensure!(r.status == 200, "the damage lever: {r}");
     let back = mv("back")?;
     let again = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
     s.ok(
-        "moved, its computer then not always on: the way back refuses, its door keeping the link; always on again, it goes back, its computer running its link",
+        "moved, its computer then not always on: the way back refuses, its door keeping the link; always on again, it goes back (its bridge's answer damaged once, asked again), its computer running its link",
         went["record"]["step"] == "done"
             && refused.status == 409
             && refused.body["message"].as_str().is_some_and(|m| m.contains("always on"))

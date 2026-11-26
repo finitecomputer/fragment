@@ -99,7 +99,26 @@ pub fn qr_svg(text: &str) -> Option<String> {
     Some(code.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).quiet_zone(true).build())
 }
 
+/// Each answer named by its SHA-256 (`x-door-sha256`), which the
+/// platform's Computer object checks before it uses it (FIN-775: Codex's
+/// round on f434be3bb): a refusal's code decides whether a way back is
+/// asked again, or a mark let go. A save's names its own already.
 pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body> {
+    named(answered(req, simplex).await).await
+}
+
+async fn named(r: Response<Body>) -> Response<Body> {
+    if r.headers().contains_key(SHA_HEADER) {
+        return r;
+    }
+    let (mut parts, body) = r.into_parts();
+    let Ok(body) = body.collect().await;
+    let bytes = body.to_bytes();
+    parts.headers.insert(SHA_HEADER, hyper::header::HeaderValue::from_str(&super::run::sha256_hex(&bytes)).expect("hex is a header's value"));
+    Response::from_parts(parts, Body::new(bytes))
+}
+
+async fn answered(req: Request<Incoming>, simplex: &Simplex) -> Response<Body> {
     if req.method() == Method::GET && req.uri().path() == "/simplex/" {
         return net::respond(StatusCode::OK, "text/html; charset=utf-8", PAGE);
     }
@@ -201,6 +220,19 @@ async fn ticket_of(req: Request<Incoming>) -> Result<Ticket, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: every answer names its SHA-256 as its bridge made it, a
+    /// refusal's too (its code decides a way back's next ask), and a
+    /// save's its own (Codex's round on f434be3bb).
+    #[tokio::test]
+    async fn every_answer_names_its_sha256() {
+        let refused = named(net::refusal(StatusCode::UNPROCESSABLE_ENTITY, "damaged", "its door's save came damaged on its way")).await;
+        let sha = refused.headers().get(SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let body = refused.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(sha.as_deref(), Some(super::super::run::sha256_hex(&body).as_str()));
+        let save = Response::builder().header(SHA_HEADER, "ab".repeat(32)).body(Body::new(bytes::Bytes::from_static(b"a save"))).unwrap();
+        assert_eq!(named(save).await.headers().get(SHA_HEADER).unwrap(), &"ab".repeat(32), "a save's own, kept");
+    }
 
     /// Goal: only `/simplex…` is SimpleX's, and it names one agent, once.
     #[test]

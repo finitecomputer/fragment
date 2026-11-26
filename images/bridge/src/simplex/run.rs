@@ -404,7 +404,7 @@ pub fn damaged(packed: &[u8], sha: Option<&str>) -> Option<Refused> {
     (got != sha).then(|| Refused::new(422, format!("its door's save came damaged on its way ({} bytes, SHA-256 {}…, its door's {}…); its door stays fenced: ask the way back (`--back`) again", packed.len(), &got[..12], &sha[..sha.len().min(12)])).coded("damaged"))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::Digest;
     sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }

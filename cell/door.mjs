@@ -452,7 +452,17 @@ export class SimplexDoor extends DurableObject {
       return new Response(null, { status: 204 });
     }
     if (d.door !== body.door) return refusal(409, "another_door", `this door is ${d.door}`);
-    if (d.stopped !== HANDED_BACK) this.#stop(HANDED_BACK);
+    // a link of its own, not the one its computer handed over (its person
+    // unlinked it and linked again, or let a staged chat go for a new one):
+    // no way back, and nothing stopped, its door running it (Codex's round
+    // on f434be3bb)
+    if (d.saved > 0 && !this.ctx.storage.sql.exec("SELECT 1 FROM imported").toArray().length) {
+      return refusal(410, "not_moved", "this door's link is its own now, not the one its computer handed over: no way back");
+    }
+    // a way back either hands its save back or leaves its runner running:
+    // stopped by this asking and refused below, its runner starts again
+    const fenced = d.stopped !== HANDED_BACK;
+    if (fenced) this.#stop(HANDED_BACK);
     // a start under way sees the stop before it launches, or launched
     if (this.#starting) await this.#starting.catch(() => {});
     const c = this.ctx.container;
@@ -466,8 +476,15 @@ export class SimplexDoor extends DurableObject {
     if (ended()) return gone();
     await this.#drain();
     if (ended()) return gone();
+    // its owner's messages its inbox has yet to take, or a file its runner
+    // gave that no delivery names yet (taken as it stopped: Codex's round on
+    // f434be3bb): busy, its runner running again meanwhile, which delivers it
     const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
-    if (unsent > 0) return refusal(409, "busy", `${unsent} of its owner's messages still go to its connector: ask again in a moment`);
+    const given = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner = 'given'").one().n;
+    if (unsent > 0 || given > 0) {
+      if (fenced) await this.#resume();
+      return refusal(409, "busy", `${unsent} of its owner's messages, and ${given} of their files, still go to its connector: ask again in a moment`);
+    }
     // bounded: each pass marks one save unreadable, of at most the kept few
     for (;;) {
       d = this.#door();
@@ -485,6 +502,15 @@ export class SimplexDoor extends DurableObject {
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }
+  }
+
+  // A way back that handed nothing back lets go of the fence it set: its
+  // runner starts again, from its last save (no save of it went anywhere).
+  async #resume() {
+    this.ctx.storage.sql.exec("UPDATE door SET stopped = NULL WHERE id = 1 AND stopped = ?", HANDED_BACK);
+    this.#log("door.resumed", {});
+    await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
+    await this.#ensure("resumed").catch((e) => this.#log("door.start_failed", { why: String((e && e.message) || e).slice(0, 300) }));
   }
 
   // What it is: its row, its saves, its deliveries (and how many its
@@ -1031,8 +1057,11 @@ export class SimplexDoor extends DurableObject {
     return json({ saved: `${generation}-${seq}` });
   }
 
-  // One of its owner's messages, kept once by its sender's id and numbered.
+  // One of its owner's messages, kept once by its sender's id and numbered;
+  // none once its door handed its link back and its runner ended, looked at
+  // again as its body is read (Codex's round on f434be3bb).
   #deliver(m) {
+    if (this.#door()?.stopped === HANDED_BACK && !this.ctx.container?.running) return refusal(409, "handed_back", "this door handed its link back to its computer: its runner's words are taken no more");
     if (!(typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64 && typeof m.text === "string")) throw Object.assign(new Error("a delivery is {id, kind, text, at, file}"), { status: 400 });
     // its file, which its runner gave the door first, named by its SHA-256;
     // one named otherwise (a runner that carried no files, whose delivery

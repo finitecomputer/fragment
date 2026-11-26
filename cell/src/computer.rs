@@ -4200,11 +4200,26 @@ impl ComputerCell {
     }
 
     /// A call to its bridge's SimpleX routes (images/bridge simplex/http.rs,
-    /// on its screen port), as the operators' move makes them.
-    async fn simplex_call(&self, req: worker_sys::web_sys::Request) -> CellResult<Response> {
+    /// on its screen port), as the operators' move makes them, its answer
+    /// used only whole: each names its SHA-256 (`x-door-sha256`), a save's
+    /// its save's, which its door's bucket checks as it stores it (a
+    /// handover's, streamed on, never held here). None: damaged on its way
+    /// (FIN-775; Codex's round on f434be3bb), its bytes not what it names.
+    async fn simplex_call(&self, req: worker_sys::web_sys::Request) -> CellResult<Option<Response>> {
         let out = self.call("port", &[JsValue::from_f64(f64::from(SIMPLEX_PORT)), JsValue::from(req), JsValue::from_f64(0.0)]).await?;
         let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
-        Ok(Response::from(resp))
+        let mut r = Response::from(resp);
+        if r.status_code() == 200 && r.headers().get("x-door-length")?.is_some() {
+            return Ok(Some(r));
+        }
+        let (status, headers) = (r.status_code(), r.headers().clone());
+        // an older image's bridge names none: no move begins on it
+        let named = headers.get("x-door-sha256")?.ok_or_else(|| CellError::new(ErrorCode::Conflict, "its bridge names no SHA-256 for its answers, as an older image's: restart its computer onto this release's image"))?;
+        let bytes = r.bytes().await?;
+        if named != hex::encode(Sha256::digest(&bytes)) {
+            return Ok(None);
+        }
+        Ok(Some(Response::from_bytes(bytes)?.with_status(status).with_headers(headers)))
     }
 
     /// One agent's SimpleX move record (`op`): `read` (it, whether its
@@ -4227,9 +4242,11 @@ impl ComputerCell {
                 let mut link = Value::Null;
                 if awake {
                     let asked = worker_sys::web_sys::Request::new_with_str(&format!("http://computer/simplex/state?agent={agent}")).map_err(|_| CellError::host("a request"))?;
-                    // its bridge still starting answers nothing yet: said so
+                    // its bridge still starting answers nothing yet: said so;
+                    // one damaged on its way says so too, read as nothing
                     link = match self.simplex_call(asked).await {
-                        Ok(mut r) => json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) }),
+                        Ok(Some(mut r)) => json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) }),
+                        Ok(None) => json!({ "status": 0, "said": "its answer came damaged on its way: ask again" }),
                         Err(e) => json!({ "status": 0, "said": e.message }),
                     };
                 }
@@ -4315,6 +4332,10 @@ impl ComputerCell {
                 r["moved"] = json!(true);
                 r["ticket"] = ticket.clone();
             })?;
+            // a snapshot from before its link moved is let go (it is only a
+            // cache): a start from it could boot an image whose bridge knows
+            // no move, its old core beside its door's (Codex's round on f434be3bb)
+            self.update_saves(|s| s.snapshot_failed())?;
         }
         let headers = worker_sys::web_sys::Headers::new().map_err(|_| CellError::host("headers"))?;
         let init = worker_sys::web_sys::RequestInit::new();
@@ -4339,7 +4360,12 @@ impl ComputerCell {
         init.set_headers(&headers);
         let path = if handover { "handover" } else { "back" };
         let asked = worker_sys::web_sys::Request::new_with_str_and_init(&format!("http://computer/simplex/{path}?agent={agent}"), &init).map_err(|_| CellError::host("a request"))?;
-        let mut answer = self.simplex_call(asked).await?;
+        // its answer damaged on its way: nothing marked or unmarked here (it
+        // may have placed its save, or refused), asked again as damaged, as
+        // its bridge's own refusal of a damaged save is
+        let Some(mut answer) = self.simplex_call(asked).await? else {
+            return Ok(json_response(&json!({ "error": "damaged", "message": "its bridge's answer came damaged on its way (FIN-775): ask again" }))?.with_status(422));
+        };
         let status = answer.status_code();
         let unmark = |r: &mut Value| {
             r["moved"] = json!(false);
