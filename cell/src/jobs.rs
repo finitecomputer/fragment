@@ -1167,10 +1167,10 @@ impl FragmentCell {
                 let body = body.clone();
                 let digest = js::blob_put(&self.env, &key, body, size, &sha).await.map_err(retry)?;
                 // a copy damaged on its way (FIN-775): never kept (R2 checks
-                // the name as it stores it), and asked for again, its door's
-                // own whole (it named it as it holds it)
+                // the name as it stores it, so a copy stored meanwhile
+                // stays), and asked for again, its door's own whole (it
+                // named it as it holds it)
                 if digest != sha {
-                    js::blob_delete(&self.env, js::BLOBS, &[key]).await.map_err(retry)?;
                     return Err(StepFail::Retry(format!("{host}'s file came damaged on its way: it hashes to {digest}, not {sha}")));
                 }
             }

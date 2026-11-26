@@ -116,9 +116,10 @@ impl FragmentCell {
                 let body = req.inner().body().ok_or_else(|| CellError::invalid("a blob upload carries the bytes as its body"))?;
                 // the router checked the length it declares (`blob_length`)
                 let size = req.headers().get("content-length")?.and_then(|l| l.parse::<u64>().ok()).filter(|n| *n <= limits::BLOB_MAX_BYTES).ok_or_else(|| CellError::invalid("a blob upload declares its content-length"))?;
+                // refused by the store itself, nothing kept: a copy another
+                // upload stored meanwhile stays (Codex's round on efcea7232)
                 let digest = js::blob_put(&self.env, &key, body, size, sha).await?;
                 if digest != sha {
-                    js::blob_delete(&self.env, js::BLOBS, &[key]).await?;
                     return Err(CellError::invalid(format!("the bytes hash to {digest}, not {sha}")));
                 }
                 (size, true)
