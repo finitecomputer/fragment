@@ -907,7 +907,8 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
 // what it is (a tag each, beside "Experimental": Paul, 2026-10-31,
 // literally so), and its setup page for an agent (`name`, as Settings
 // names it). Telegram's offers a bot its owner's Vault holds (`vault`: its
-// host); SimpleX's page shows a QR code (`tall`).
+// host); SimpleX's page shows a QR code, and Slack's first step two
+// fields under its link and its line (`tall`).
 export const TELEGRAM = {
   door: "telegram",
   title: "Telegram",
@@ -924,6 +925,7 @@ export const SLACK = {
   said: "Bring your agents into your team's Slack.",
   tag: ["Less secure", "Slack's servers, and everyone in a room it's in, can read these messages"],
   setup: (name) => `/setup.html?name=${encodeURIComponent(name)}`,
+  tall: true,
 };
 export const SIMPLEX = {
   door: "simplex",
