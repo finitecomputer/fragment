@@ -224,10 +224,15 @@ impl FakeDoor {
             assert_eq!(named.as_deref(), Some(sha256_hex(&body).as_str()), "{method} {path}: a runner's body names its SHA-256");
         }
         self.with(|s| s.heads.push((method.clone(), path.clone(), sized, generation)));
+        // every answer named by its SHA-256, as the cell's door egress names
+        // each (a save or a file names its own)
         let answer = |status: u16, headers: &[(&str, String)], body: Bytes| {
             let mut r = Response::builder().status(status);
             for (k, v) in headers {
                 r = r.header(*k, v.as_str());
+            }
+            if !headers.iter().any(|(k, _)| *k == "x-door-sha256") {
+                r = r.header("x-door-sha256", sha256_hex(&body));
             }
             r.body(Full::new(body)).unwrap()
         };
