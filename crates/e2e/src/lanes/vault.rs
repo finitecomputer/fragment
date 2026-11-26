@@ -195,7 +195,10 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let freed = put(api, &cy, "site9", &to(&["h10.example.com"]))?;
     s.ok(
         "a host another secret goes to costs nothing more, and the catalog's counts as any other; a secret moved to a new host keeps eight; one removed frees its host",
-        shared.status == 200 && catalogs.status == 400 && moved.status == 200 && gone.status == 200 && freed.status == 200,
+        shared.status == 200
+            && catalogs.status == 400
+            && catalogs.body["message"].as_str().is_some_and(|m| m.contains("at most 8 hosts") && m.contains("would make 9"))
+            && moved.status == 200 && gone.status == 200 && freed.status == 200,
         format!("{shared} {catalogs} {moved} {gone} {freed}"),
     );
 
