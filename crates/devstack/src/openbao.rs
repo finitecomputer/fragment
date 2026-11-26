@@ -60,9 +60,9 @@ pub use crate::openbao_release::{Tarball, OPENBAO_VERSION, TARBALLS};
 pub const RELEASES_URL: &str = "https://github.com/openbao/openbao/releases/download";
 /// Names the pinned tarball on disk, by path, in place of fetching it.
 pub const TARBALL_VAR: &str = "FRAGMENT_OPENBAO_TARBALL";
-/// A tarball larger than this is refused unread (2.7.2's are 69 to 78 MB).
+/// A tarball larger than this is refused unread (2.7.3's are 69 to 78 MB).
 pub const TARBALL_BYTES_MAX: u64 = 128 << 20;
-/// The binary, at most (2.7.2's linux_amd64 `bao` is 182 MB).
+/// The binary, at most (2.7.3's linux_amd64 `bao` is 182 MB).
 pub const BINARY_BYTES_MAX: u64 = 384 << 20;
 const BINARY: &str = "bao";
 
@@ -750,8 +750,12 @@ impl OpenBao {
         let err = log.try_clone().map_err(io_error("clone the log"))?;
         let t0 = Instant::now();
         // nothing from this environment: every setting is the config's
-        let child = crate::spawn(Command::new(&self.bin).arg("server").arg(format!("-config={}", layout.config().display())).env_clear().env("HOME", &layout.dir).stdin(Stdio::null()).stdout(log).stderr(err))
-            .map_err(io_error(format!("start {}", self.bin.display())))?;
+        let mut cmd = Command::new(&self.bin);
+        cmd.arg("server").arg(format!("-config={}", layout.config().display())).env_clear().env("HOME", &layout.dir).stdin(Stdio::null()).stdout(log).stderr(err);
+        // gone with the process that started it: its state may be a run's,
+        // in RAM (`shm`)
+        crate::dies_with_this_process(&mut cmd);
+        let child = crate::spawn(&mut cmd).map_err(io_error(format!("start {}", self.bin.display())))?;
         self.child = Some(child);
         if let Err(e) = self.wait_ready(t0) {
             let _ = self.down();

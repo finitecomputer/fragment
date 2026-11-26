@@ -124,6 +124,8 @@ pub const FRAGMENT: Class = Class {
         step!("record_author", "fragment/0011_record_author.sql"),
         step!("pending_code", "fragment/0012_pending_code.sql"),
         step!("ended_doors", "fragment/0013_ended_doors.sql"),
+        step!("trigger_kinds", "fragment/0014_trigger_kinds.sql"),
+        step!("askers", "fragment/0015_askers.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -163,7 +165,7 @@ pub const PRINCIPAL: Class = Class {
 
 pub const LEDGER: Class = Class { name: "Ledger", steps: &[step!("baseline", "ledger/0001_baseline.sql"), step!("uses", "ledger/0002_uses.sql"), step!("spend_slots", "ledger/0003_spend_slots.sql")], variants: &[], kept: &["wiped"] };
 
-pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql"), step!("key_hour_gone", "computer/0008_key_hour_gone.sql"), step!("key_calls", "computer/0009_key_calls.sql")], variants: &[], kept: &["wiped"] };
+pub const COMPUTER: Class = Class { name: "Computer", steps: &[step!("baseline", "computer/0001_baseline.sql"), step!("agent_accounts", "computer/0002_agent_accounts.sql"), step!("key_hour", "computer/0003_key_hour.sql"), step!("key_caps", "computer/0004_key_caps.sql"), step!("grants_forward_only", "computer/0005_grants_forward_only.sql"), step!("grants_owed", "computer/0006_grants_owed.sql"), step!("uses_owed", "computer/0007_uses_owed.sql"), step!("key_hour_gone", "computer/0008_key_hour_gone.sql"), step!("key_calls", "computer/0009_key_calls.sql"), step!("disk", "computer/0010_disk.sql")], variants: &[], kept: &["wiped"] };
 
 /// A fragment life's search index: its end releases its storage whole
 /// (`deleteAll`), so it keeps nothing.

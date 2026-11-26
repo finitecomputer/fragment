@@ -41,7 +41,8 @@ acts as one of the computer's agents (`x-fragment-agent`), but the
 computer's own:
 
 - the computer's: `GET /api/computer` (`?simplex=1` from an image that
-  names a SimpleX core), `POST /api/computer/door`, and the WebSockets
+  names a SimpleX core; on a disk, what its mount did, until a read has
+  said it: `disk.rs`), `POST /api/computer/door`, and the WebSockets
   `GET /api/computer/keepalive` and `GET /api/computer/relay`;
 - what an agent follows: `GET /api/fragments`, and on each fragment
   `GET …/channels`, `…/channels/{c}`, `…/members` and `…/subscriptions`
@@ -68,6 +69,12 @@ with its default. What an image sets:
 
 - `FRAGMENT_API`, required; `RESTORE_PENDING=1` to wait for
   `BRIDGE_RESTORED` before anything else (docs/computers.md).
+- `BRIDGE_MOUNTS_DISK=1`: the bridge is its image's PID 1 (the stub's),
+  so with `FRAGMENT_DISK=fpac` it mounts `/data` from the computer's disk
+  before anything else and waits for its final flush before it exits
+  (`disk.rs`; docs/computers.md, "A disk"); a head that will not open it
+  says on its disk's route (`POST /unusable`). An image whose boot mounts it
+  (our Hermes image's) leaves it unset.
 - `BRIDGE_HOLD` and `BRIDGE_HELD`, the platform's hold before a save
   (docs/computers.md, "The hold"). The bridge claims no turn while the
   hold exists, and answers it only while no claim is in flight, so a save
@@ -127,6 +134,31 @@ mid-append leaves a torn last line, and the log is read up to it.
   once; one whose life ended first is lost, and the chat is told.
 - **A claim waits** for the runtime (`Connected`) and for no hold, so a
   turn waits unclaimed, for whichever life comes next.
+- **A turn is told before it runs** (FIN-720; docs/computers.md, "The
+  fragment API"): its claim answered, its agent's fragment is told whose
+  ask it is and the mandate its record carried (`engine::Told`; someone
+  else's heard live carries none, so its record is read once over the
+  API for it, `driver::proven`): its
+  owner's for theirs and for what is one entity's with them (a routine,
+  another agent of this computer's answer), no one's for app code's
+  words, and anyone else's as them. Not told, it is not this life's yet,
+  and is claimed again; a platform from before (404) is told nothing.
+  Each word names this life and its computer's start, so the fragment
+  forgets every other life's turns and refuses a retired one's (a turn
+  this life could not tell open does not run). A turn is held as open from before it
+  is told so (its answer lost, it is still told ended), its end is told as
+  the engine ends it, and a close refused is told again at each step after.
+  No turn reaches its runtime while one its agent ended may still be held
+  open, whose mandate would sign its calls: the runtime lane tells those
+  ended first (`driver::Turns::settle`, a few tries; past them the turn
+  ends unrun, saying to ask again). A turn the bridge gives up on (gone
+  quiet, or its agent gone from its chat) is interrupted at its runtime as
+  it is forgotten (`Forget`: Claude Code's session and Hermes' relay
+  alike, the relay's again at Hermes' next dial should it be lost), so it
+  works on as no one's ask no more once it is told ended. A hand-off (another of the computer's agents' words in
+  a chat) is told as the ask of the turn it was said in, unproven, even
+  read a moment after that turn was let go; words no known turn was said
+  in are no one's ask.
 - **In the journal's order.** A chat's turns are claimed in the order
   their causes were said (`Turn::said_at`, the platform's time, the same
   in every life), admission breaking ties. A new life that reads an
@@ -569,7 +601,8 @@ never reaches another agent's core.
   sends is posted there as relayed records (docs/chat-records.md, "A
   relayed message"). What the agent says there goes to their app once
   posted: its replies but the interim ones, with their files, and a
-  card's question with its choices. An unlink stops the mirror and keeps
+  card's question with its choices, worded as every connector words one
+  (src/questions.json holds both to the same cases). An unlink stops the mirror and keeps
   the chat; a link again is that chat. The bridge's state holds nothing
   of SimpleX.
 - **Working shows as 🚀 on their message** (Paul, 2026-11-11): SimpleX

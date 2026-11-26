@@ -409,12 +409,13 @@ fn listed(name: &str, v: &Value) -> Result<ListedDecl, String> {
 /// One entry of `triggers`: `{"cron" | "channel" | "files": …, "run": op}`
 /// or `{"installed" | "woke": true, "run": op}`, a channel's with an optional
 /// `"from": "person" | "agent"` (only records a member of that kind posted
-/// start runs).
+/// start runs) and `"kinds": [...]` (only records of those kinds: a body's
+/// `kind`, named as a channel's `listed` names them).
 fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
     let at = format!("triggers[{i}]");
     let obj = v.as_object().ok_or_else(|| format!("{at} must be an object"))?;
-    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from")) {
-        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from)"));
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "cron" | "channel" | "files" | "installed" | "woke" | "run" | "from" | "kinds")) {
+        return Err(format!("{at} has an unknown key {k:?} (cron, channel, files, installed, woke, run, from, kinds)"));
     }
     let text = |k: &str| obj.get(k).map(|v| v.as_str().map(str::to_string).ok_or_else(|| format!("{at}.{k} must be a string"))).transpose();
     let flag = |k: &str| match obj.get(k) {
@@ -458,7 +459,18 @@ fn trigger(i: usize, v: &Value, m: &Manifest) -> Result<TriggerDecl, String> {
         Some(_) if !matches!(on, TriggerOn::Channel(_)) => return Err(format!("{at}.from is a channel trigger's: who posted the record")),
         Some(k) => Some(IdentityKind::parse(&k).ok_or_else(|| format!("{at}.from is person or agent, not {k:?}"))?),
     };
-    Ok(TriggerDecl { on, run, from })
+    let kinds = match obj.get("kinds") {
+        None => vec![],
+        Some(_) if !matches!(on, TriggerOn::Channel(_)) => return Err(format!("{at}.kinds is a channel trigger's: the kinds of record it starts runs for")),
+        Some(v) => {
+            let kinds = names(&format!("{at}.kinds"), Some(v), limits::TRIGGER_KINDS_MAX, valid_listed_kind, KIND_SHAPE)?;
+            if kinds.is_empty() {
+                return Err(format!("{at}.kinds names the kinds of record it starts runs for: at least one"));
+            }
+            kinds
+        }
+    };
+    Ok(TriggerDecl { on, run, from, kinds })
 }
 
 /// `files: {page?, home?, status?, graph?}` (`FilesDecl`): `page` and
@@ -801,7 +813,7 @@ mod tests {
         .unwrap();
         assert_eq!(m.operations["digest"], OpDecl { kind: OpKind::Job, role: Role::Editor, input: None, ephemeral: false, description: None });
         assert_eq!(m.triggers.len(), 4);
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Cron("0 9 * * *".into()), run: "digest".into(), from: None, kinds: vec![] });
         assert_eq!(m.triggers[1].on, TriggerOn::Channel("inbox".into()));
         assert_eq!(m.triggers[3].on, TriggerOn::Files("notes/**".into()));
         let back: TriggerDecl = serde_json::from_value(serde_json::to_value(&m.triggers[0]).unwrap()).unwrap();
@@ -869,7 +881,7 @@ mod tests {
     #[test]
     fn a_channel_trigger_may_name_its_posters() {
         let m = parse(br#"{"operations":{"n":{"kind":"job"}},"channels":{"chat":{"post":"viewer"}},"triggers":[{"channel":"chat","from":"agent","run":"n"},{"channel":"chat","run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("chat".into()), run: "n".into(), from: Some(IdentityKind::Agent) });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("chat".into()), run: "n".into(), from: Some(IdentityKind::Agent), kinds: vec![] });
         assert_eq!(m.triggers[1].from, None, "no from: every record");
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "channel": "chat", "run": "n", "from": "agent" }));
@@ -886,6 +898,34 @@ mod tests {
         }
     }
 
+    /// Goal (FIN-747): a channel trigger may start runs only for some kinds
+    /// of record (a connector's mirror: its agent's questions on `work`,
+    /// not each step of its turns). Method: `kinds` beside `from`, as it
+    /// serializes and reads back; empty, too many, twice, misnamed, and on
+    /// a trigger of another kind, refused at deploy.
+    #[test]
+    fn a_channel_trigger_may_name_its_kinds() {
+        let m = parse(br#"{"operations":{"n":{"kind":"job"}},"channels":{"work":{"post":"viewer"}},"triggers":[{"channel":"work","from":"agent","kinds":["turn.prompt"],"run":"n"}]}"#).unwrap();
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Channel("work".into()), run: "n".into(), from: Some(IdentityKind::Agent), kinds: vec!["turn.prompt".into()] });
+        let wire = serde_json::to_value(&m.triggers[0]).unwrap();
+        assert_eq!(wire, serde_json::json!({ "channel": "work", "run": "n", "from": "agent", "kinds": ["turn.prompt"] }));
+        assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
+        let nine: Vec<String> = (0..=limits::TRIGGER_KINDS_MAX).map(|i| format!("\"k{i}\"")).collect();
+        let too_many = format!(r#"{{"operations":{{"n":{{"kind":"job"}}}},"channels":{{"work":{{}}}},"triggers":[{{"channel":"work","kinds":[{}],"run":"n"}}]}}"#, nine.join(","));
+        for (bad, says) in [
+            (&br#"{"operations":{"n":{"kind":"job"}},"channels":{"work":{}},"triggers":[{"channel":"work","kinds":[],"run":"n"}]}"#[..], "at least one"),
+            (br#"{"operations":{"n":{"kind":"job"}},"channels":{"work":{}},"triggers":[{"channel":"work","kinds":["a","a"],"run":"n"}]}"#, "twice"),
+            (br#"{"operations":{"n":{"kind":"job"}},"channels":{"work":{}},"triggers":[{"channel":"work","kinds":["no spaces"],"run":"n"}]}"#, "which is no kind"),
+            (br#"{"operations":{"n":{"kind":"job"}},"channels":{"work":{}},"triggers":[{"channel":"work","kinds":"turn.prompt","run":"n"}]}"#, "must be an array"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"cron":"* * * * *","kinds":["x"],"run":"n"}]}"#, "kinds is a channel trigger's"),
+            (br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"installed":true,"kinds":["x"],"run":"n"}]}"#, "kinds is a channel trigger's"),
+            (too_many.as_bytes(), &format!("at most {}", limits::TRIGGER_KINDS_MAX)),
+        ] {
+            let e = parse(bad).expect_err(&String::from_utf8_lossy(bad));
+            assert!(e.contains(says), "{e}");
+        }
+    }
+
     /// Goal: an operation may run once after each install of new code (a
     /// brain re-reading what changed). Method: `"installed": true`, valid
     /// and stored as it serializes; any other value, or beside another
@@ -893,7 +933,7 @@ mod tests {
     #[test]
     fn an_installed_trigger_is_true_and_alone() {
         let m = parse(br#"{"operations":{"n":{"kind":"mutation"}},"triggers":[{"installed":true,"run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Installed(true), run: "n".into(), from: None, kinds: vec![] });
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "installed": true, "run": "n" }));
         assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");
@@ -917,7 +957,7 @@ mod tests {
     #[test]
     fn a_woke_trigger_is_true_and_alone() {
         let m = parse(br#"{"operations":{"n":{"kind":"job"}},"triggers":[{"woke":true,"run":"n"}]}"#).unwrap();
-        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None });
+        assert_eq!(m.triggers[0], TriggerDecl { on: TriggerOn::Woke(true), run: "n".into(), from: None, kinds: vec![] });
         let wire = serde_json::to_value(&m.triggers[0]).unwrap();
         assert_eq!(wire, serde_json::json!({ "woke": true, "run": "n" }));
         assert_eq!(serde_json::from_value::<TriggerDecl>(wire).unwrap(), m.triggers[0], "it reads back");

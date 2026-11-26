@@ -50,11 +50,22 @@ struct Row {
     /// None while paused.
     next_at: Option<i64>,
     last_at: Option<i64>,
+    /// Whose ask it is: whoever its maker acted for, else its maker
+    /// (FIN-720). `None` on one made before (Fragment step 15): its maker's
+    /// (`Row::asker`).
+    asker: Option<String>,
 }
 
-const COLUMNS: &str = "id, cron, channel, body, created_by, created_at, next_at, last_at";
+const COLUMNS: &str = "id, cron, channel, body, created_by, created_at, next_at, last_at, asker";
 
 impl Row {
+    /// Whose ask it is, always: its asker, or, on one made before askers,
+    /// its maker (`created_by`), whom it fires as, checked as if they asked
+    /// now (FIN-720).
+    fn asker(&self) -> &str {
+        self.asker.as_deref().unwrap_or(&self.created_by)
+    }
+
     /// Only the cell writes `record_schedules`, from a checked cron.
     fn cron(&self) -> Cron {
         Cron::parse(&self.cron).unwrap_or_else(|e| panic!("record_schedules.cron is a checked schedule: {e}: {:?}", self.cron))
@@ -97,11 +108,13 @@ impl FragmentCell {
         rows.into_iter().next().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no schedule #{id}")))
     }
 
-    /// The schedule the same as `c` (its cron, channel and record), if one is kept.
-    fn same_schedule(&self, c: &schedule::Checked) -> CellResult<Option<Row>> {
+    /// The schedule the same as `c` asked by `asker`, or one kept before
+    /// askers made by `maker` (none: ""), if one is kept
+    /// (`schedule::SAME_SCHEDULE`).
+    fn same_schedule(&self, c: &schedule::Checked, asker: &str, maker: &str) -> CellResult<Option<Row>> {
         let rows: Vec<Row> = self.typed(
-            &format!("SELECT {COLUMNS} FROM record_schedules WHERE cron = ? AND channel = ? AND body = ? ORDER BY id LIMIT 1"),
-            vec![c.expr.as_str().into(), c.channel.as_str().into(), c.body.as_str().into()],
+            &format!("SELECT {COLUMNS} FROM record_schedules WHERE {} ORDER BY id LIMIT 1", schedule::SAME_SCHEDULE),
+            vec![c.expr.as_str().into(), c.channel.as_str().into(), c.body.as_str().into(), asker.into(), maker.into()],
         )?;
         Ok(rows.into_iter().next())
     }
@@ -125,13 +138,18 @@ impl FragmentCell {
     pub(crate) async fn add_schedule(&self, caller: &Caller, body: AddSchedule) -> CellResult<Response> {
         let role = self.require(caller, false, Role::Editor)?;
         let by = self.caller_id(caller)?.to_string();
+        // whose ask it is: whom an agent acts for, else its maker
+        let asker = caller.signed.as_ref().and_then(|s| s.acting_for.clone()).unwrap_or_else(|| by.clone());
         self.writable().await?;
         // after the standing's wait, everything to the insert is one turn
         let checked = schedule::check(&body)?;
         let builtin = BUILTIN_CHANNELS.contains(&checked.channel.as_str());
         let decl = if builtin { None } else { self.declared_channel(&checked.channel)? };
         schedule::admit_channel(&checked.channel, decl.as_ref(), builtin, role)?;
-        if let Some(same) = self.same_schedule(&checked)? {
+        // one kept before askers is its maker's: found by its maker as
+        // themselves or for their owner, never on someone else's ask
+        let maker = if caller.signed.as_ref().is_some_and(|s| s.other_asker().is_some()) { "" } else { by.as_str() };
+        if let Some(same) = self.same_schedule(&checked, &asker, maker)? {
             return json_response(&ScheduleAdded { schedule: same.view(), replayed: true });
         }
         let kept = self.count_of("SELECT COUNT(*) AS n FROM record_schedules", vec![])?;
@@ -141,8 +159,16 @@ impl FragmentCell {
         let now = js::now_ms();
         let next = checked.cron.next_fire(now, now).ok_or_else(|| CellError::invalid("this schedule never fires again"))?;
         let rows: Vec<Row> = self.typed(
-            &format!("INSERT INTO record_schedules (cron, channel, body, created_by, created_at, next_at) VALUES (?, ?, ?, ?, ?, ?) RETURNING {COLUMNS}"),
-            vec![checked.expr.as_str().into(), checked.channel.as_str().into(), checked.body.as_str().into(), by.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(next)],
+            &format!("INSERT INTO record_schedules (cron, channel, body, created_by, created_at, next_at, asker) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING {COLUMNS}"),
+            vec![
+                checked.expr.as_str().into(),
+                checked.channel.as_str().into(),
+                checked.body.as_str().into(),
+                by.as_str().into(),
+                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(next),
+                asker.as_str().into(),
+            ],
         )?;
         let row = rows.into_iter().next().ok_or_else(|| CellError::host("a schedule's insert returned no row"))?;
         let summary = format!("schedule #{} ({}) on {}, by {}", row.id, row.cron, row.channel, npub::display(&by));
@@ -198,8 +224,10 @@ impl FragmentCell {
     /// move on to their next minute after now. Past the owner's overdraft
     /// (`read_only`, read once for the pass) none appends: each moves on,
     /// and one event says why. One whose channel no longer takes the
-    /// fragment's records (redeclared since), or whose record relays
-    /// someone (`schedule::fires`), moves on, saying so.
+    /// fragment's records (redeclared since), whose asker may no longer
+    /// post there (checked as if they asked now: FIN-720), or whose record
+    /// relays someone (`schedule::fires`), moves on, saying so. What fires
+    /// is written for its asker, whose ask the record names.
     pub(crate) async fn fire_records(&self, read_only: Option<Why>, now: i64) -> CellResult<()> {
         // bounded: a fragment's scheduled records
         let due: Vec<Row> = self.typed(
@@ -223,13 +251,15 @@ impl FragmentCell {
             let builtin = BUILTIN_CHANNELS.contains(&r.channel.as_str());
             let decl = if builtin { None } else { self.declared_channel(&r.channel)? };
             let record = r.record();
-            // as its owner may: whether the channel takes the fragment's
-            // records at all; and its record relays no one (one kept by a
-            // release before `check` refused it)
+            // as its asker may now: whether the channel takes the
+            // fragment's records at all, from their role (none, they are
+            // gone, and it fires no more); and its record relays no one
+            // (one kept by a release before `check` refused it)
             // a skipped fire moves on without claiming it fired (`lastAt` keeps the last real one)
-            let fired = match schedule::admit_channel(&r.channel, decl.as_ref(), builtin, Role::Owner).and_then(|()| schedule::fires(&record)) {
+            let admitted = self.member_role(r.asker())?.ok_or(schedule::Refusal::AskerGone).and_then(|role| schedule::admit_channel(&r.channel, decl.as_ref(), builtin, role));
+            let fired = match admitted.and_then(|()| schedule::fires(&record)) {
                 Ok(()) => {
-                    self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at)).await?;
+                    self.append_own(&r.channel, &record, &schedule::fire_key(r.id, at), Some(r.asker())).await?;
                     true
                 }
                 Err(why) => {

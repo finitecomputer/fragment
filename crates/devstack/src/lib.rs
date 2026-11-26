@@ -29,6 +29,7 @@ mod node_release;
 pub mod openbao;
 mod openbao_release;
 pub mod rows;
+pub mod shm;
 pub mod signals;
 pub mod store;
 mod tree;
@@ -205,7 +206,7 @@ const ADMIN_BUCKET: &str = "STAGE";
 /// it imports from beside it, and theirs (a deploy runs it from the source
 /// tree, so only a staged copy can miss one:
 /// `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 6] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
+pub const SHIM_FILES: [&str; 7] = ["entry.mjs", "backups.mjs", "intercepts.mjs", "fpac.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its
@@ -577,6 +578,11 @@ pub struct Fleet {
     /// the cell's thirty minutes). The e2e's is short, so its lane sees the
     /// bound run out.
     pub computer_unsaved_max_ms: Option<u64>,
+    /// The images whose new computers go on a disk
+    /// (`FRAGMENT_COMPUTER_DISKS`, docs/computers.md "A disk"): an e2e
+    /// run's disk lane's node, on a runtime that gives a container FUSE
+    /// and loop devices (krun's).
+    pub computer_disks: Option<String>,
     /// What a computer's swap offers: the provider catalog
     /// (`FRAGMENT_PROVIDERS`, `fragment_core::catalog`'s JSON: connections,
     /// operator keys and own keys, each with its hosts, placements,
@@ -810,6 +816,9 @@ impl Fleet {
         }
         if !self.door_internet {
             vars.push(("FRAGMENT_DOOR_INTERNET", "off"));
+        }
+        if let Some(d) = &self.computer_disks {
+            vars.push(("FRAGMENT_COMPUTER_DISKS", d.as_str()));
         }
         let unsaved = self.computer_unsaved_max_ms.map(|ms| ms.to_string());
         if let Some(ms) = &unsaved {
@@ -1079,6 +1088,35 @@ impl std::ops::DerefMut for Started {
     fn deref_mut(&mut self) -> &mut Child {
         &mut self.0
     }
+}
+
+/// Makes the process `cmd` starts die with this one (Linux's parent-death
+/// signal, SIGKILL), however this one ends: a run killed outright leaves
+/// no node or OpenBao running, holding its ports and the run's state in RAM
+/// (`shm`) after the next run's start has swept it. It fires when the
+/// thread that spawns exits, so it is for processes started, as the node
+/// and OpenBao are, on a thread that lives as long as the process.
+pub fn dies_with_this_process(cmd: &mut Command) {
+    #[cfg(target_os = "linux")]
+    {
+        let parent = std::process::id() as libc::pid_t;
+        // SAFETY: prctl and getppid are async-signal-safe, and the closure
+        // allocates nothing.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                // this process ended between the fork and the prctl
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = cmd;
 }
 
 /// Spawns `cmd` (`Started`); refused once the process is ending, when

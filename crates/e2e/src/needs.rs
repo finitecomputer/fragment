@@ -54,10 +54,15 @@ pub enum Need {
     /// The finite.computer move, configured (a fleet's `migrations`): off
     /// on a self-hosted deployment, which has nothing to move from.
     Move,
+    /// Computers on disks (docs/computers.md, "A disk"): a container given
+    /// FUSE and a loop device, which krun's microVMs give and workerd's
+    /// Docker does not (no `/dev/fuse`); hosted, a deployment whose new
+    /// computers go on disks (its config's `computers.disks`).
+    Disks,
 }
 
 impl Need {
-    pub const ALL: [Need; 13] = [
+    pub const ALL: [Need; 14] = [
         Need::Fakes,
         Need::Node,
         Need::Deployment,
@@ -71,6 +76,7 @@ impl Need {
         Need::RealAgent,
         Need::Operator,
         Need::Move,
+        Need::Disks,
     ];
 
     /// Whether a section of `planned` that would run needs or uses this.
@@ -93,6 +99,7 @@ impl Need {
             Need::RealAgent => "real-agent",
             Need::Operator => "operator",
             Need::Move => "move",
+            Need::Disks => "disks",
         }
     }
 }
@@ -104,6 +111,8 @@ pub struct Offers {
     pub levers: bool,
     /// The deployment makes computers (its config's `computers`).
     pub computers: bool,
+    /// Its new computers go on disks (its config's `computers.disks`).
+    pub disks: bool,
     /// The deployment runs SimpleX doors (its config's `doors`).
     pub doors: bool,
     /// The deployment calls models (its config's `ai_gateway`), and the run
@@ -135,16 +144,24 @@ pub enum Rung {
     Hosted(Offers),
 }
 
+const NO_DISKS_HERE: &str = "it needs computers on disks, whose container has FUSE and a loop device: krun's microVMs give them (FRAGMENT_E2E_RUNTIME=celld, CELLD_CONTAINER_ENGINE=krun:<socket>), workerd's Docker does not (no /dev/fuse)";
+
 const NO_REAL_AGENT: &str = "it needs a real agent (our Hermes image on a real model), which only a preview has: a local run's computers answer through the scripted model";
 
 /// Why `need` is missing on `rung`, or `None` when it is there.
 pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
     let offers = match rung {
-        Rung::Local => return (need == Need::RealAgent).then_some(NO_REAL_AGENT),
+        Rung::Local => {
+            return match need {
+                Need::RealAgent => Some(NO_REAL_AGENT),
+                Need::Disks => Some(NO_DISKS_HERE),
+                _ => None,
+            };
+        }
         Rung::Celld { computers } => {
             return match need {
                 Need::RealAgent => Some(NO_REAL_AGENT),
-                Need::LocalDocker | Need::Computers | Need::Doors if !computers => Some("it needs the runtime's own containers, and this celld node runs none: a computer needs egress intercepts and snapshots, which only the krun engine has (CELLD_CONTAINER_ENGINE=krun:<socket>; docs/self-host.md, seam 2)"),
+                Need::LocalDocker | Need::Computers | Need::Doors | Need::Disks if !computers => Some("it needs the runtime's own containers, and this celld node runs none: a computer needs egress intercepts and snapshots, which only the krun engine has (CELLD_CONTAINER_ENGINE=krun:<socket>; docs/self-host.md, seam 2)"),
                 Need::Move => Some("it needs the finite.computer move, which is off on a self-hosted deployment: nothing to move from (docs/self-host.md)"),
                 _ => None,
             };
@@ -160,6 +177,7 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Levers if !offers.levers => Some("it needs the deployment's test levers, and the run has no test secret"),
         Need::Chrome if !offers.chrome => Some("it needs Chrome, and none is installed here"),
         Need::Computers if !offers.computers => Some("it needs computers, and the deployment makes none (no `computers` in its config)"),
+        Need::Disks if !offers.disks => Some("it needs computers on disks, and the deployment's new computers are not (its config's `computers.disks` does not name its default image)"),
         Need::Doors if !offers.doors => Some("it needs SimpleX doors, and the deployment runs none (no `doors` in its config)"),
         Need::Models if !offers.models => Some("it needs models, and the deployment calls none (no `ai_gateway` in its config), or the run lends no paid calls"),
         Need::RealAgent if !offers.real_agent => {
@@ -168,7 +186,7 @@ pub fn missing(need: Need, rung: Rung) -> Option<&'static str> {
         Need::Operator if !offers.operator => {
             Some("it needs an operator key the deployment lists and no person holds (`--operator-key-file <file>`, its npub in the config's `operators`), and the run has none")
         }
-        Need::Levers | Need::Chrome | Need::Computers | Need::Doors | Need::Models | Need::RealAgent | Need::Operator | Need::Move => None,
+        Need::Levers | Need::Chrome | Need::Computers | Need::Disks | Need::Doors | Need::Models | Need::RealAgent | Need::Operator | Need::Move => None,
     }
 }
 
@@ -186,18 +204,20 @@ pub fn unmet(needs: &[Need], rung: Rung) -> Option<(Need, &'static str)> {
 mod tests {
     use super::*;
 
-    const EVERYTHING: Offers = Offers { levers: true, computers: true, doors: true, models: true, chrome: true, real_agent: true, operator: true };
-    const NOTHING: Offers = Offers { levers: false, computers: false, doors: false, models: false, chrome: false, real_agent: false, operator: false };
+    const EVERYTHING: Offers = Offers { levers: true, computers: true, disks: true, doors: true, models: true, chrome: true, real_agent: true, operator: true };
+    const NOTHING: Offers = Offers { levers: false, computers: false, disks: false, doors: false, models: false, chrome: false, real_agent: false, operator: false };
 
-    /// A local run has everything but a real agent: every other need is
-    /// met, as before.
+    /// A local run has everything but a real agent and disks: every other
+    /// need is met, as before.
     #[test]
     fn a_local_run_has_everything_but_a_real_agent() {
-        let local: Vec<Need> = Need::ALL.into_iter().filter(|n| *n != Need::RealAgent).collect();
+        let local: Vec<Need> = Need::ALL.into_iter().filter(|n| !matches!(n, Need::RealAgent | Need::Disks)).collect();
         assert_eq!(unmet(&local, Rung::Local), None);
         for need in local {
             assert_eq!(missing(need, Rung::Local), None, "{need:?}");
         }
+        // nor disks: workerd's Docker gives a container no FUSE
+        assert!(missing(Need::Disks, Rung::Local).is_some_and(|why| why.contains("/dev/fuse") && why.contains("krun")));
     }
 
     /// A celld node without an engine runs no containers of its own: no
@@ -208,7 +228,7 @@ mod tests {
         let bare = Rung::Celld { computers: false };
         let krun = Rung::Celld { computers: true };
         for need in Need::ALL {
-            let without = matches!(need, Need::LocalDocker | Need::Computers | Need::Doors | Need::RealAgent | Need::Move);
+            let without = matches!(need, Need::LocalDocker | Need::Computers | Need::Doors | Need::Disks | Need::RealAgent | Need::Move);
             assert_eq!(missing(need, bare).is_some(), without, "{need:?}");
             let without = matches!(need, Need::RealAgent | Need::Move);
             assert_eq!(missing(need, krun).is_some(), without, "{need:?} on krun");
@@ -245,7 +265,7 @@ mod tests {
     /// Levers, Chrome, computers, doors, models and a real agent are there when offered.
     #[test]
     fn a_hosted_run_has_what_its_deployment_offers() {
-        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Doors, Need::Models, Need::RealAgent, Need::Operator] {
+        for need in [Need::Levers, Need::Chrome, Need::Computers, Need::Disks, Need::Doors, Need::Models, Need::RealAgent, Need::Operator] {
             assert_eq!(missing(need, Rung::Hosted(EVERYTHING)), None, "{need:?}");
             assert!(missing(need, Rung::Hosted(NOTHING)).is_some(), "{need:?}");
         }

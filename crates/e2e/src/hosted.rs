@@ -8,7 +8,7 @@
 //!
 //!   --hosted --zone <zone> --branch <b> [--secret-file <file>]
 //!       [--operator-key-file <file> --operators <npub,...>]
-//!       [--offers computers,models] [--max-paid-calls <n>]
+//!       [--offers computers,disks,models] [--max-paid-calls <n>]
 //!       [--upgrade-from <image>]
 //!       [--only <section>[,...] | --except <section>[,...]]
 //!       [--dry-run | --sweep [<run>] | --sweep-all]
@@ -68,7 +68,7 @@ pub const MAX_PAID_CALLS_DEFAULT: u64 = 60;
 pub const MAX_PAID_CALLS_MAX: u64 = 400;
 
 const USAGE: &str = "usage: fragment-e2e [--only <section>[,...] | --except <section>[,...] | --shard <k>/<n>] [--rehearse [--max-paid-calls <n>]] [--containers]
-       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,models]
+       fragment-e2e --hosted --zone <zone> --branch <branch> [--secret-file <file>] [--operator-key-file <file> --operators <npub,...>] [--offers computers,disks,models]
                     [--max-paid-calls <n>] [--upgrade-from <image>] [--only <section>[,...] | --except <section>[,...]] [--dry-run | --sweep [<run>] | --sweep-all]";
 
 /// The suite's command line.
@@ -103,6 +103,9 @@ pub struct Hosted {
     pub operators: Vec<String>,
     /// The deployment makes computers (its config's `computers`).
     pub computers: bool,
+    /// Its new computers go on disks (its config's `computers.disks` names
+    /// its default image).
+    pub disks: bool,
     /// The deployment runs SimpleX doors (its config's `doors`).
     pub doors: bool,
     /// The deployment calls models (its config's `ai_gateway`).
@@ -225,13 +228,14 @@ pub fn parse(args: &[String]) -> Result<Args> {
     if action != Action::DryRun && secret_file.is_none() {
         bail!("a hosted run signs its people in through the preview's levers: --secret-file names the deployment's test secret (its config's test_secret_file)");
     }
-    let (mut computers, mut doors, mut models) = (false, false, false);
+    let (mut computers, mut disks, mut doors, mut models) = (false, false, false, false);
     for offer in offers.as_deref().map(list).unwrap_or_default() {
         match offer.as_str() {
             "computers" => computers = true,
+            "disks" => disks = true,
             "doors" => doors = true,
             "models" => models = true,
-            other => bail!("--offers is computers, doors and models, not {other:?}"),
+            other => bail!("--offers is computers, disks, doors and models, not {other:?}"),
         }
     }
     if operator_key_file.is_some() && operators.is_empty() {
@@ -242,7 +246,10 @@ pub fn parse(args: &[String]) -> Result<Args> {
     }
     let max_paid_calls = max_paid_calls_or_default()?;
     let preview = Preview::new(&zone, &branch);
-    let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, doors, models, max_paid_calls, upgrade_from, action };
+    if disks && !computers {
+        bail!("--offers disks: its computers on disks, so it offers computers too");
+    }
+    let hosted = Hosted { preview, secret_file, operator_key_file, operators, computers, disks, doors, models, max_paid_calls, upgrade_from, action };
     Ok(Args { only, except, hosted: Some(hosted), rehearse: None, shard: None, containers: false })
 }
 
@@ -298,7 +305,7 @@ pub fn run(only: Option<Vec<String>>, except: Vec<String>, hosted: Hosted) -> Re
 fn offers(hosted: &Hosted) -> Offers {
     let models = hosted.models && hosted.max_paid_calls > 0;
     let operator = hosted.operator_key_file.is_some();
-    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, doors: hosted.doors, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models, operator }
+    Offers { levers: hosted.secret_file.is_some(), computers: hosted.computers, disks: hosted.disks, doors: hosted.doors, models, chrome: browser::chrome().is_some(), real_agent: hosted.computers && models, operator }
 }
 
 /// A hosted suite: no node and no fakes, the preview's API, its levers'
@@ -362,6 +369,7 @@ fn nodeless(only: Option<Vec<String>>, except: Vec<String>, rung: Rung, shared: 
         cli,
         scratch,
         project: PathBuf::new(),
+        ram: None,
         shape: Shape::Plain,
         door_url: None,
         secrets: devstack::Secrets::Store,
@@ -405,7 +413,7 @@ pub fn plan(only: Option<Vec<String>>, except: Vec<String>, hosted: &Hosted) -> 
 pub fn render(hosted: &Hosted, planned: &[Planned], unknown: &[String]) -> String {
     let o = offers(hosted);
     let offered: Vec<&str> =
-        [(o.levers, "levers"), (o.computers, "computers"), (o.doors, "doors"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
+        [(o.levers, "levers"), (o.computers, "computers"), (o.disks, "disks"), (o.doors, "doors"), (o.models, "models"), (o.real_agent, "real-agent"), (o.chrome, "chrome"), (o.operator, "operator")]
             .iter()
             .filter(|(on, _)| *on)
             .map(|(_, n)| *n)

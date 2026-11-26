@@ -44,7 +44,7 @@ function say(text) {
   return p;
 }
 
-export function createSettings({ api, $, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, openSkills, markOffer }) {
+export function createSettings({ api, $, asks, account, navigation, notices, sections, agents, releaseInfo, allFragments, own, freeLabel, load, named, openApp, openFiles, openSkills, markOffer, theme }) {
   const { person, setPerson, isGuest, setGuest, setSeat, support, seatIs, switchForm, noSeatSaid } = account;
   const { at, path: SETTINGS, isOpen, enter, entered } = navigation;
   const { hideNotice, noticeCurrent, notice } = notices;
@@ -73,6 +73,24 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
       p.append(...(i ? [" · ", a] : [a]));
     });
     return p;
+  }
+  // Light or dark on this device (`theme`: shell.js hands theme.js's
+  // `themes`, `choice` and `choose`; FIN-652): the system's by default, or
+  // the one the person picks, which the shell, its pages and each app's
+  // frame follow at once. None handed, no line.
+  const THEME_NAMES = { system: "System", light: "Light", dark: "Dark" };
+  function themeLine() {
+    if (!theme) return [];
+    const pick = el("select", "settings-theme");
+    pick.setAttribute("aria-label", "Theme");
+    for (const t of theme.themes) {
+      const o = el("option", null, THEME_NAMES[t]);
+      o.value = t;
+      pick.append(o);
+    }
+    pick.value = theme.choice();
+    pick.onchange = () => theme.choose(pick.value);
+    return [line("Theme", "Light or dark on this device", pick)];
   }
   // The release this page is (`releaseInfo().mine`, its commit linked on GitHub,
   // the repo being public), when it was deployed, and the version its
@@ -319,7 +337,7 @@ export function createSettings({ api, $, asks, account, navigation, notices, sec
       open.onclick = () => location.assign("/move");
       account.append(actionLine("Agent upgrades", open));
     }
-    account.append(legalLinks());
+    account.append(...themeLine(), legalLinks());
     if (lost()) return;
     // a guest has no agents to stop, nor a computer, skills or connections
     // for them, nor apps to publish: a seat to get comes first, then who they
