@@ -273,16 +273,16 @@ pub fn staged_contact(dir: &Path, contact: i64) -> Result<bool, SaveError> {
 }
 
 /// The messages its core received from `contact` past item `after` (what
-/// its chat confirmed), oldest first, each by its item and its sender's id
-/// as the core's JSON names it (`itemSharedMsgId`: the id it stores, in
-/// standard base64): read from a stopped core's chat database in `dir`, at
-/// most `max` and one more, so a caller sees it went past.
-pub fn received_past(dir: &Path, contact: i64, after: i64, max: usize) -> Result<Vec<(i64, String)>, SaveError> {
-    use base64::Engine as _;
+/// its chat confirmed), oldest first, each by its item, its sender's id as
+/// the core's JSON names it (`wire::shared_id`), and whether its file is
+/// here still (its post not made: a posted message's file is let go):
+/// read from a stopped core's chat database in `dir`, at most `max` and one
+/// more, so a caller sees it went past.
+pub fn received_past(dir: &Path, contact: i64, after: i64, max: usize) -> Result<Vec<(i64, String, bool)>, SaveError> {
     use rusqlite::types::ValueRef;
     let c = Connection::open(dir.join(DBS[0])).map_err(sqlite)?;
     let mut q = c
-        .prepare("SELECT chat_item_id, shared_msg_id FROM chat_items WHERE contact_id = ?1 AND item_sent = 0 AND chat_item_id > ?2 AND shared_msg_id IS NOT NULL ORDER BY chat_item_id LIMIT ?3")
+        .prepare("SELECT i.chat_item_id, i.shared_msg_id, (SELECT f.file_path FROM files f WHERE f.chat_item_id = i.chat_item_id LIMIT 1) FROM chat_items i WHERE i.contact_id = ?1 AND i.item_sent = 0 AND i.chat_item_id > ?2 AND i.shared_msg_id IS NOT NULL ORDER BY i.chat_item_id LIMIT ?3")
         .map_err(sqlite)?;
     let rows = q
         .query_map(rusqlite::params![contact, after, max as i64 + 1], |r| {
@@ -290,7 +290,8 @@ pub fn received_past(dir: &Path, contact: i64, after: i64, max: usize) -> Result
                 ValueRef::Blob(b) | ValueRef::Text(b) => b.to_vec(),
                 _ => vec![],
             };
-            Ok((r.get::<_, i64>(0)?, base64::engine::general_purpose::STANDARD.encode(id)))
+            let here = r.get::<_, Option<String>>(2)?.is_some_and(|p| super::wire::file_path_ok(&p) && dir.join("files").join(p).is_file());
+            Ok((r.get::<_, i64>(0)?, super::wire::shared_id(&id), here))
         })
         .map_err(sqlite)?;
     rows.map(|r| r.map_err(sqlite)).collect()
@@ -347,13 +348,20 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         let c = Connection::open(d.join(DBS[0])).unwrap();
-        c.execute_batch("CREATE TABLE chat_items (chat_item_id INTEGER PRIMARY KEY, contact_id INTEGER, item_sent INTEGER, shared_msg_id BLOB);").unwrap();
-        for (id, contact, sent, shared) in [(40, 3, 0, "qPWF0qhirOeixjgu"), (41, 3, 0, "nQNYc3pBg4jmiYFy"), (42, 3, 1, "kYJfQnlsuwOuM4Z0"), (43, 4, 0, "FPE9+iqQrsUk42re"), (44, 3, 0, "E/VvTgrNBEB0kqgB")] {
-            c.execute("INSERT INTO chat_items VALUES (?1, ?2, ?3, ?4)", rusqlite::params![id, contact, sent, shared.as_bytes()]).unwrap();
+        c.execute_batch("CREATE TABLE chat_items (chat_item_id INTEGER PRIMARY KEY, contact_id INTEGER, item_sent INTEGER, shared_msg_id BLOB); CREATE TABLE files (file_id INTEGER PRIMARY KEY, chat_item_id INTEGER, file_path TEXT);").unwrap();
+        let items: [(i64, i64, i64, &[u8]); 6] = [(40, 3, 0, b"qPWF0qhirOeixjgu"), (41, 3, 0, b"nQNYc3pBg4jmiYFy"), (42, 3, 1, b"kYJfQnlsuwOuM4Z0"), (43, 4, 0, b"FPE9+iqQrsUk42re"), (44, 3, 0, b"E/VvTgrNBEB0kqgB"), (45, 3, 0, &[0xfb, 0xff, 0xbf])];
+        for (id, contact, sent, shared) in items {
+            c.execute("INSERT INTO chat_items VALUES (?1, ?2, ?3, ?4)", rusqlite::params![id, contact, sent, shared]).unwrap();
         }
+        // 41's file still here (its post not made); 44's let go once posted
+        c.execute_batch("INSERT INTO files VALUES (1, 41, 'kept.m4a'), (2, 44, 'posted.m4a');").unwrap();
         drop(c);
-        // as the core's own JSON names them (images/bridge's fixtures)
-        assert_eq!(received_past(&d, 3, 40, 10).unwrap(), vec![(41, "blFOWWMzcEJnNGptaVlGeQ==".to_string()), (44, "RS9WdlRnck5CRUIwa3FnQg==".into())]);
+        std::fs::create_dir_all(d.join("files")).unwrap();
+        std::fs::write(d.join("files").join("kept.m4a"), b"voice").unwrap();
+        // as the core's own JSON names them (images/bridge's fixtures;
+        // simplexmq's `strEncode`, URL-safe: 45's bytes are where it differs)
+        let want = vec![(41, "blFOWWMzcEJnNGptaVlGeQ==".to_string(), true), (44, "RS9WdlRnck5CRUIwa3FnQg==".into(), false), (45, "-_-_".into(), false)];
+        assert_eq!(received_past(&d, 3, 40, 10).unwrap(), want);
         assert_eq!(received_past(&d, 3, 0, 1).unwrap().len(), 2, "one past its bound, so it is seen");
         let _ = std::fs::remove_dir_all(&d);
     }

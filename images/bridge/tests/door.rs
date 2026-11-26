@@ -457,7 +457,7 @@ fn sent_ids_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
     std::fs::create_dir_all(&dir).expect("made");
     std::fs::write(dir.join("sx_chat.db"), file_of(packed, "sx_chat.db")).expect("written");
     let contact: i64 = rusqlite::Connection::open(dir.join("sx_chat.db")).expect("opened").query_row("SELECT max(contact_id) FROM chat_items WHERE item_sent = 0", [], |r| r.get(0)).expect("a contact");
-    fragment_bridge::simplex::save::received_past(&dir, contact, 0, 100).expect("read").into_iter().map(|(_, id)| id).collect()
+    fragment_bridge::simplex::save::received_past(&dir, contact, 0, 100).expect("read").into_iter().map(|(_, id, _)| id).collect()
 }
 
 fn build_image() {
@@ -933,7 +933,8 @@ fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
 /// restores it: the same contact, linked, with no invitation; the owner's
 /// next message arrives there once, and nothing the computer's chat holds
 /// comes again, though the computer never heard one was taken; refused
-/// while that chat can't say what it holds, its core runs on. The door's
+/// while that chat can't say what it holds, or while a message's file is
+/// on the computer alone, its core runs on. The door's
 /// reply reaches the owner's app once. The way back: the
 /// door's planned stop saves last, the computer places that save, takes its
 /// door key back, and its core runs again on it: the owner's next message
@@ -945,7 +946,7 @@ fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
 async fn a_computers_link_moves_into_a_door_and_back() {
     build_image();
     build_bridge_image();
-    let mut lab = Lab::up("door-move");
+    let mut lab = Lab::up_with("door-move", true);
     let mut person = lab.start("person", false).await;
     let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
     fake.with(|w| {
@@ -953,8 +954,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
         w.computer["generation"] = json!(1);
     });
     let data = lab.dir.join("computer-data");
-    let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
-    let c = Computer::start_with(&lab, &fake, &data, &["-e", &smp]);
+    let c = Computer::start(&lab, &fake, &data);
     c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
     c.link(&fake);
     let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
@@ -968,6 +968,44 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the move")).await;
     assert_eq!(relayed_on(&fake, &chat).len(), 1);
 
+    // a voice message whose every post is refused, its file received here:
+    // its move waits, refused as busy and saying why (a save carries no
+    // files), its core running on; its computer's restart carries it, its
+    // file with it (Codex's last round on #1541)
+    voice_file(&lab.db_dir("person").join("files").join("kept.m4a"), 2, false);
+    fake.with(|w| w.fail_channel = Some(("chat".into(), fragment_bridge::limits::POST_TRIES_MAX, false)));
+    let body = json!([{ "msgContent": { "type": "voice", "text": "", "duration": 2 }, "filePath": "/data/files/kept.m4a" }]);
+    let r = person.cmd(&format!("/_send @{agent} json {body}")).await;
+    assert_eq!(tag(&r), "newChatItems", "the person's voice message: {r}");
+    fake.until(300_000, "its every try refused", |w| w.fail_channel.as_ref().is_some_and(|(_, n, _)| *n == 0)).await;
+    fake.with(|w| w.fail_channel = None);
+    let waits = lab.dir.join("waits.sxd");
+    let t0 = Instant::now();
+    let said = loop {
+        let (code, body, _) = hand_over(&c, &fake.ticket("juniper", "handover"), &waits);
+        let said = String::from_utf8_lossy(&body).to_string();
+        if code == 409 && said.contains("on this computer alone") {
+            break said;
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "busy while its file is here alone: {code} {said}");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let t0 = Instant::now();
+    while c.cores() != 1 {
+        assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again: {said}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(relayed_on(&fake, &chat).len(), 1, "not in its chat yet");
+    drop(c);
+    let c = Computer::start(&lab, &fake, &data);
+    let t0 = Instant::now();
+    while relayed_on(&fake, &chat).len() != 2 {
+        assert!(t0.elapsed() < Duration::from_secs(120), "its restart carries it: {:?}", relayed_on(&fake, &chat));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let carried = relayed_on(&fake, &chat)[1].clone();
+    assert!(carried["body"]["attachments"].as_array().is_some_and(|a| a.len() == 1), "its file with it: {carried}");
+
     // a message its chat took whose every answer was lost: the bridge gives
     // up on it, its cursor before it and no record of it kept; the chat's
     // own word (`held`) keeps its door from delivering it again (Codex's
@@ -976,7 +1014,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     say(&mut person, agent, "taken, unheard").await;
     fake.until(300_000, "its every try's answer lost", |w| w.lose_relayed.as_ref().is_some_and(|(_, n)| *n == 0)).await;
     fake.with(|w| w.lose_relayed = None);
-    assert_eq!(relayed_on(&fake, &chat).len(), 2, "taken once");
+    assert_eq!(relayed_on(&fake, &chat).len(), 3, "taken once");
 
     // its chat unasked (its `held` answering 503): nothing handed over,
     // and its core runs again, its link at one end (Codex's rounds on #1541)
@@ -1044,7 +1082,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     let mut got = vec![];
     g1.reply(&door, "chat:1", "from the door").await;
     person_got(&mut person, &mut got, &["from the door"]).await;
-    assert_eq!(relayed_on(&fake, &chat).len(), 2, "nothing more on the computer's chat");
+    assert_eq!(relayed_on(&fake, &chat).len(), 3, "nothing more on the computer's chat");
     assert_eq!(c.cores(), 0, "the computer's core never ran beside the door's");
     assert_eq!(door.with(|s| s.delivered.iter().filter(|(_, t)| t == "after the move").count()), 1, "delivered once");
 
@@ -1063,7 +1101,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     c.state_until(Duration::from_secs(90), "running again", |v| v["running"] == true && v["phase"] == "linked").await;
     say(&mut person, agent, "after the way back").await;
     received(&mut person, Duration::from_secs(90), |got| got.iter().any(|t| t == "echo: [paul] after the way back")).await;
-    assert_eq!(relayed_on(&fake, &chat).len(), 3, "on the computer's chat again, nothing twice");
+    assert_eq!(relayed_on(&fake, &chat).len(), 4, "on the computer's chat again, nothing twice");
     println!("moved and back: the door's save {} bytes, behind {behind}", bytes.len());
 }
 
