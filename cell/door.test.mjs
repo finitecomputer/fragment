@@ -1111,6 +1111,16 @@ test("a way back whose save can't be read, its runner stopped for it: refused, i
   assert.deepEqual([r.status, await r.text(), d.row().stopped], [200, "its last", "handed back"]);
 });
 
+test("a connect named in 33 emoji (33 characters, as its connector's `connect` counts them, though 66 UTF-16 units) starts its door; 65 characters is refused (Codex's round on b898dcf13)", async () => {
+  const d = door();
+  const named = (name) => d.job("connect", { name }, { "x-door-secret": "s3cret-of-the-inbox" });
+  const r = await named("🙂".repeat(33));
+  assert.equal(r.status, 200, await r.clone().text());
+  assert.equal(d.c.starts.length, 1);
+  const e = door();
+  assert.equal((await e.job("connect", { name: "a".repeat(65) }, { "x-door-secret": "s3cret-of-the-inbox" })).status, 400);
+});
+
 test("a way back from a door holding a staged chat, its save unreadable: its fence let go, nothing started, the chat still its owner's to keep or let go (Codex's check of 2165e149b)", async () => {
   const d = door();
   await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("their old chat"), staged: true });

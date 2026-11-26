@@ -249,7 +249,7 @@ impl Move<'_> {
             // computer named it, so its person's app shows no new name
             let status = self.as_person(&self.agent, Method::Get, "/api/status", None).await?;
             let title = status["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(label_of(&self.agent));
-            let name = fragment_core::door::door_name(title);
+            let name: String = title.chars().take(64).collect();
             self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": name } }))).await?;
             rec = self.set("bound", None, json!({ "step": "connecting" })).await?;
         }

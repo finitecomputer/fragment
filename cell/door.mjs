@@ -327,7 +327,9 @@ export class SimplexDoor extends DurableObject {
   // doors refuses it before anything is kept, so nothing watches in vain.
   async #begin(door, agent) {
     if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
-    if (!nameOk(door) || typeof agent !== "string" || !agent || agent.length > 64) throw Object.assign(new Error("a start names its door and its agent (at most 64 characters)"), { status: 400 });
+    // its name counted in characters, as its connector's `connect` counts
+    // it (an emoji is one, never two: Codex's round on b898dcf13)
+    if (!nameOk(door) || typeof agent !== "string" || !agent || [...agent].length > 64) throw Object.assign(new Error("a start names its door and its agent (at most 64 characters)"), { status: 400 });
     const d = this.#door();
     if (!d) this.ctx.storage.sql.exec("INSERT INTO door (id, door, agent, started, generation, marks, saved, stopped) VALUES (1, ?, ?, 0, 0, 0, 0, NULL)", door, agent);
     else if (d.door !== door) return refusal(409, "another_door", `this door is ${d.door}`);
@@ -357,7 +359,7 @@ export class SimplexDoor extends DurableObject {
     // its owner's chat with their old agent, staged on their computer, never kept there
     const staged = request.headers.get("x-door-staged") === "1" ? 1 : 0;
     const refuse = async (status, error, message) => (await request.body?.cancel(), refusal(status, error, message));
-    if (!nameOk(door) || typeof agent !== "string" || !agent || agent.length > 64 || !shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
+    if (!nameOk(door) || typeof agent !== "string" || !agent || [...agent].length > 64 || !shaOk(sha) || !(Number.isInteger(length) && length > 0) || !request.body) {
       return refuse(400, "invalid", "an import names its door, its agent and its save's SHA-256, and says its length");
     }
     const d = this.#door();
