@@ -128,6 +128,11 @@ pub struct World {
     pub broken: Vec<String>,
     /// The next this many asks of a channel's `held` answer 503.
     pub fail_held: u32,
+    /// The next this many tries of relayed posts on this channel, a replay
+    /// or another body under one's id among them: appended once and
+    /// answered 503, as a platform that took a message and went down
+    /// before its poster heard, past its every try.
+    pub lose_relayed: Option<(String, u32)>,
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
@@ -904,6 +909,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 if r["agent"] != agent.as_str() || !door::verify(&key, &digest, r["sig"].as_str().unwrap_or("")) {
                     return refuse(StatusCode::FORBIDDEN, "a relayed record is signed by its agent's door");
                 }
+            }
+            if body.get("relayed").is_some() && w.lose_relayed.as_ref().is_some_and(|(on, n)| *on == channel && *n > 0) {
+                let taken = c.ids.contains_key(&id);
+                if let Some((_, n)) = &mut w.lose_relayed {
+                    *n -= 1;
+                }
+                if !taken {
+                    let record = w.append(&fragment, &channel, &me, body.clone());
+                    let seq = record["seq"].as_u64().unwrap();
+                    w.fragments.get_mut(&fragment).unwrap().channels.get_mut(&channel).unwrap().ids.insert(id, (seq, body));
+                }
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "taken, and its answer lost, as asked");
             }
             if let Some((seq, old)) = c.ids.get(&id) {
                 if *old == body {

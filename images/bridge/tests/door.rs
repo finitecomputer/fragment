@@ -931,8 +931,10 @@ fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
 /// computer's core stopped for good, its answer the door's first save,
 /// whose SHA-256 it says; a second handover's ticket refused. The door
 /// restores it: the same contact, linked, with no invitation; the owner's
-/// next message arrives there once, and nothing the computer posted comes
-/// again; the door's reply reaches the owner's app once. The way back: the
+/// next message arrives there once, and nothing the computer's chat holds
+/// comes again, though the computer never heard one was taken; refused
+/// while that chat can't say what it holds, its core runs on. The door's
+/// reply reaches the owner's app once. The way back: the
 /// door's planned stop saves last, the computer places that save, takes its
 /// door key back, and its core runs again on it: the owner's next message
 /// is answered in the computer's chat. Method: the real bridge image (the
@@ -965,6 +967,16 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     say(&mut person, agent, "before the move").await;
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the move")).await;
     assert_eq!(relayed_on(&fake, &chat).len(), 1);
+
+    // a message its chat took whose every answer was lost: the bridge gives
+    // up on it, its cursor before it and no record of it kept; the chat's
+    // own word (`held`) keeps its door from delivering it again (Codex's
+    // rounds on #1541)
+    fake.with(|w| w.lose_relayed = Some(("chat".into(), fragment_bridge::limits::POST_TRIES_MAX)));
+    say(&mut person, agent, "taken, unheard").await;
+    fake.until(300_000, "its every try's answer lost", |w| w.lose_relayed.as_ref().is_some_and(|(_, n)| *n == 0)).await;
+    fake.with(|w| w.lose_relayed = None);
+    assert_eq!(relayed_on(&fake, &chat).len(), 2, "taken once");
 
     // its chat unasked (its `held` answering 503): nothing handed over,
     // and its core runs again, its link at one end (Codex's rounds on #1541)
@@ -1032,7 +1044,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     let mut got = vec![];
     g1.reply(&door, "chat:1", "from the door").await;
     person_got(&mut person, &mut got, &["from the door"]).await;
-    assert_eq!(relayed_on(&fake, &chat).len(), 1, "nothing more on the computer's chat");
+    assert_eq!(relayed_on(&fake, &chat).len(), 2, "nothing more on the computer's chat");
     assert_eq!(c.cores(), 0, "the computer's core never ran beside the door's");
     assert_eq!(door.with(|s| s.delivered.iter().filter(|(_, t)| t == "after the move").count()), 1, "delivered once");
 
@@ -1051,7 +1063,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     c.state_until(Duration::from_secs(90), "running again", |v| v["running"] == true && v["phase"] == "linked").await;
     say(&mut person, agent, "after the way back").await;
     received(&mut person, Duration::from_secs(90), |got| got.iter().any(|t| t == "echo: [paul] after the way back")).await;
-    assert_eq!(relayed_on(&fake, &chat).len(), 2, "on the computer's chat again");
+    assert_eq!(relayed_on(&fake, &chat).len(), 3, "on the computer's chat again, nothing twice");
     println!("moved and back: the door's save {} bytes, behind {behind}", bytes.len());
 }
 
