@@ -484,6 +484,16 @@ async function saved() {
   return { d, l };
 }
 
+test("a state read its door's end overtakes as it waits for its runner answers ended (410), never a missing table", async () => {
+  const { d } = await saved();
+  d.c.answers.push(async () => {
+    assert.equal((await d.end()).status, 200, "its connector deleted meanwhile: its door ends");
+    return [200, { phase: "linked" }];
+  });
+  const r = await d.lever("state");
+  assert.equal(r.status, 410, await r.clone().text());
+});
+
 test("its end ends it: no last save, every file under its prefix gone, its storage whole gone, its watch let go; asked again, the same", async () => {
   const { d } = await saved();
   assert.equal(d.prefixed().length, 2);

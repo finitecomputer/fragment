@@ -551,6 +551,9 @@ export class SimplexDoor extends DurableObject {
       const r = await this.#runner("GET", "/state");
       runner = r.ok ? await r.json().catch(() => null) : null;
     }
+    // ended as it waited (its connector's delete ends it), or before (the
+    // move's `/door/state` comes ahead of that refusal): its tables gone
+    if (this.#ended || this.#over) return refusal(410, "ended", "this door has ended: its connector's connect starts it again");
     const n = this.ctx.storage.sql.exec("SELECT count(*) AS n, coalesce(sum(sent = 0), 0) AS unsent FROM deliveries").one();
     const inbox = this.ctx.storage.sql.exec("SELECT 1 FROM inbox WHERE id = 1").toArray().length === 1;
     // `doors`: whether this deployment runs doors at all (a container for
