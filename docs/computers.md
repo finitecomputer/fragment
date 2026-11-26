@@ -556,10 +556,9 @@ the DO removes them from one started from a snapshot.
   the transfer's; or read neither whole nor bad: its reads failed or
   disagreed, or a very large one's ran out of time or CPU), fails a first
   start as one that may pass, its save kept; at a start after a failed one
-  that save is set aside (`Saves::unconfirmed`), as a save too big for its
-  disk is: kept, exportable, never found unusable, and the save before it
-  is next, at once and no strike ("rollback is preferred to being stuck").
-  A start
+  that save is found unusable, as master found every damaged restore's at
+  once, and the save before it is next, no strike ("rollback is preferred
+  to being stuck"). A start
   after a failed one reads R2's copy of each of its records from the start
   of its restores (`checkAhead`), so a copy damaged in R2 is found even
   when a long restore, or the restores before it, leave no time to read it

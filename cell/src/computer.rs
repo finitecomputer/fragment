@@ -468,10 +468,6 @@ enum Unstarted {
     /// The save's restore found no room on its disk
     /// (`fragment_core::computer::restore_found_no_room`).
     NoRoom(String),
-    /// A start after a failed one: the save's restore kept coming in
-    /// damaged, R2's copy not proven bad (backups.mjs `restoreChecked`'s
-    /// `{unconfirmed}`).
-    Unconfirmed(String),
     /// It came up, and its guest never read its view within its wait: a
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
@@ -1820,27 +1816,20 @@ impl ComputerCell {
                 let _ = self.destroy(generation, "its save would not restore").await;
                 Event::RestoreFailed { generation, why, older }
             }
-            Err(unstarted @ (Unstarted::NoRoom(_) | Unstarted::Unconfirmed(_))) => {
+            Err(Unstarted::NoRoom(why)) => {
                 // Paul, 2026-11-20: "rollback is preferred to being stuck".
                 // It is set aside, kept and exportable, and the save before
                 // it is next, at once and no strike; with none older, a
-                // strike as any failed start, its save kept current. A save
-                // whose restore kept coming damaged, its copy in R2 not
-                // proven bad, is so too (FIN-784), never found unusable
-                let (too_big, why) = match unstarted {
-                    Unstarted::NoRoom(why) => (true, why),
-                    Unstarted::Unconfirmed(why) => (false, why),
-                    _ => unreachable!("matched as one of the two"),
-                };
-                self.starts.borrow_mut().failing(generation, if too_big { start_line::Failed::NoRoom } else { start_line::Failed::Unconfirmed });
+                // strike as any failed start, its save kept current
+                self.starts.borrow_mut().failing(generation, start_line::Failed::NoRoom);
                 let id = save_id.expect("only a start from a save restores one");
-                let set = self.update_saves(|s| if too_big { s.too_big(&id, js::now_ms()) } else { s.unconfirmed(&id, js::now_ms()) });
+                let set = self.update_saves(|s| s.too_big(&id, js::now_ms()));
                 let older = matches!(set, Ok(Some(_)));
-                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": if too_big { "no_room" } else { "unconfirmed" }, "id": id, "generation": generation, "why": why, "setAside": older }));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "no_room", "id": id, "generation": generation, "why": why, "setAside": older }));
                 for record in set.ok().flatten().unwrap_or_default() {
                     console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
                 }
-                let _ = self.destroy(generation, if too_big { "its save did not fit its disk" } else { "its save's restore kept coming damaged" }).await;
+                let _ = self.destroy(generation, "its save did not fit its disk").await;
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
@@ -2037,11 +2026,14 @@ impl ComputerCell {
                     if let Some(why) = answer["unusable"].as_str() {
                         return Err(Unstarted::Unusable(of(why)));
                     }
-                    // a first start: a failed start (the next reads R2's copy
-                    // ahead); a start after a failed one: set aside
+                    // its restore kept coming damaged, R2's copy not proven
+                    // bad: a first start fails as one that may pass (the next
+                    // reads R2's copy ahead); a start after a failed one
+                    // finds the save unusable, as master did at once, so no
+                    // computer is stuck on it
                     if let Some(why) = answer["unconfirmed"].as_str() {
                         return Err(match after_failed {
-                            true => Unstarted::Unconfirmed(of(why)),
+                            true => Unstarted::Unusable(of(&format!("{why} (after a failed start)"))),
                             false => CellError::host(of(why)).into(),
                         });
                     }

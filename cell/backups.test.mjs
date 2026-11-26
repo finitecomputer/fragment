@@ -94,7 +94,7 @@ test("a copy found bad is heard whatever else a try failed by: its time, or a tr
   assert.match((await pending.run()).unusable, /^BACKUP_TRANSFER: gateway connection failed; R2's copy holds 100 bytes/);
   // a copy not found bad: the failure as it came
   await assert.rejects(restores([DAMAGED, transfer], [{ late: whole }]).run(), /BACKUP_TRANSFER/);
-  // its time ran out after damage, its copy whole: unconfirmed (a start after a failed one sets it aside)
+  // its time ran out after damage, its copy whole: unconfirmed (a start after a failed one finds it unusable, as master did at once)
   assert.match((await restores([DAMAGED, overdue], [whole]).run()).unconfirmed, /no answer within 1 ms, after its bytes came damaged; R2's copy whole/);
 });
 

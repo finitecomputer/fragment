@@ -54,9 +54,9 @@ export function verdictOf(record, stored) {
 // after this record came damaged) with R2's copy not proven bad (whole,
 // the damage the transfer's; or read neither whole nor bad: a CPU or time
 // limit on a very large one, or R2 failing it): the cell fails a first
-// start so, one that may pass, and at a start after a failed one sets the
-// save aside, never condemning it, so no computer is stuck on it. Throws
-// whatever `restore` throws but damage.
+// start so, one that may pass, and at a start after a failed one finds the
+// save unusable, as master did at once, so no computer is stuck on it.
+// Throws whatever `restore` throws but damage.
 export async function restoreChecked({ record, restore, stored, again = () => {}, ahead = null }) {
   // a read of R2's copy under way or done (it never rejects), and its
   // verdict once in: {bad}, {unread} or {} (whole)

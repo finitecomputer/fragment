@@ -686,27 +686,13 @@ impl Saves {
     /// `id` not the current save): its failure is a strike, so a computer
     /// none of whose saves fit ends `wont_wake`, never started with nothing.
     pub fn too_big(&mut self, id: &str, now_ms: i64) -> Option<Vec<Value>> {
-        self.set_aside_current(id, now_ms, true)
-    }
-
-    /// The save `id`'s restore came in damaged at each try a start after a
-    /// failed one gave it, R2's own copy not proven bad (FIN-784): set aside
-    /// as one too big for its disk is
-    /// (`too_big`), never found unusable, so its next start restores the one
-    /// before it at once, no strike, and an operator may still choose it.
-    /// None, nothing changed, with no older save left (or `id` not current).
-    pub fn unconfirmed(&mut self, id: &str, now_ms: i64) -> Option<Vec<Value>> {
-        self.set_aside_current(id, now_ms, false)
-    }
-
-    fn set_aside_current(&mut self, id: &str, now_ms: i64, too_big: bool) -> Option<Vec<Value>> {
         if self.current().is_none_or(|c| c.id != id) {
             return None;
         }
         let older = self.saves.iter().skip_while(|s| s.id != id).skip(1).find(|s| !s.unusable)?.number;
         let lost = self.choose(older, now_ms).expect("an older save kept, not found unusable");
         if let Some(s) = self.aside.iter_mut().find(|s| s.id == id) {
-            s.too_big = too_big;
+            s.too_big = true;
         }
         assert!(self.current().is_some_and(|c| c.number == older), "its next start restores the save before it");
         Some(lost)
@@ -1267,27 +1253,6 @@ mod tests {
         let mut s = Saves::default();
         s.saved(1, rec("a"), 0, T, true);
         s.let_go(rec("a"));
-    }
-
-    /// Goal (FIN-784): a save whose restore kept coming damaged, its copy in
-    /// R2 not proven bad, is set aside, as one too big
-    /// is, but not as too big and never unusable: kept, its next start
-    /// restores the one before. Valid (an older save left), invalid (none
-    /// left, or not the current save: nothing changed).
-    #[test]
-    fn an_unconfirmed_save_is_set_aside_never_found_unusable() {
-        let mut s = Saves::default();
-        s.saved(1, rec("b1"), 1, T, true);
-        s.saved(1, rec("b2"), 2, T + 10, true);
-        assert_eq!(s.unconfirmed("b1", T + 20), None, "not the current save");
-        assert_eq!(s.unconfirmed("b2", T + 20), Some(vec![]));
-        assert_eq!(s.current().map(|c| c.id.as_str()), Some("b1"), "its next start restores the one before");
-        let aside = s.aside().iter().find(|a| a.id == "b2").expect("set aside, kept");
-        assert!(!aside.too_big && !aside.unusable && aside.set_aside_ms == Some(T + 20));
-        let mut alone = Saves::default();
-        alone.saved(1, rec("c1"), 1, T, true);
-        assert_eq!(alone.unconfirmed("c1", T + 20), None, "none older: nothing set aside");
-        assert_eq!(alone.current().map(|c| c.id.as_str()), Some("c1"));
     }
 
     /// Goal (P9, Codex and alexlwn123 on #1378): a save that a newer save

@@ -107,9 +107,6 @@ pub enum Failed {
     Unusable,
     /// Its save's restore found no room on its disk (`Saves::too_big`).
     NoRoom,
-    /// Its save's restore kept coming in damaged, R2's copy not proven bad
-    /// (`Saves::unconfirmed`).
-    Unconfirmed,
     /// Its container stopped before it came up.
     Exit,
     /// It did not come up within `START_DEADLINE_MS`.
@@ -128,7 +125,6 @@ impl Failed {
             Failed::Dead => "dead",
             Failed::Unusable => "unusable",
             Failed::NoRoom => "no_room",
-            Failed::Unconfirmed => "unconfirmed",
             Failed::Exit => "exit",
             Failed::Deadline => "deadline",
             Failed::Blocked => "blocked",
