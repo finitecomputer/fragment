@@ -460,6 +460,60 @@ test("a secret's refusal and Add's failure in one redraw open one sheet, and Add
   assert.match(line(page, ""), /at most 8 hosts/);
 });
 
+test("a stale write whose redraw cannot read the Vault still says why, in the section", async () => {
+  const vaultApi = async (method) => {
+    if (method === "GET") return null;
+    throw new ApiError(409, "github changed since you read it: look at it again");
+  };
+  const drawn = [];
+  const { secretsSection } = setup(null, undefined, vaultApi, (ui) => drawn.push(ui.secretsSection(null)));
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  await walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  assert.match(line(drawn[0], "github"), /changed since you read it/);
+});
+
+test("two failures for one secret while the page is away are both said", async () => {
+  const errors = [new ApiError(503, "the Vault could not be reached"), new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9")];
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [github()] };
+    throw errors.shift();
+  };
+  const { secretsSection } = setup(null, undefined, vaultApi);
+  const first = secretsSection({ secrets: [github()] });
+  const card = walk(first).find((x) => x.dataset?.secret === "github");
+  for (const x of walk(first)) x.isConnected = false;
+  const hostsForm = walk(card).find((x) => x.className.includes("secret-hosts-form"));
+  await Promise.all([walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick(), hostsForm.onsubmit({ preventDefault() {} })]);
+  const next = secretsSection({ secrets: [github()] });
+  const said = walk(next).filter((x) => x.dataset?.secretSaid === "github").map((x) => x.textContent).join(" | ");
+  assert.match(said, /could not be reached/);
+  assert.match(said, /at most 8 hosts/);
+});
+
+test("a failure said in an open sheet is said again in the sheet a redraw opens, until it is closed", async () => {
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [github()] };
+    throw new ApiError(503, "the Vault could not be reached");
+  };
+  const { secretsSection } = setup(null, undefined, vaultApi);
+  const first = secretsSection({ secrets: [github()] });
+  const card = walk(first).find((x) => x.dataset?.secret === "github");
+  walk(card).find((x) => x.dataset?.action === "open").onclick();
+  await walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  assert.match(sheetSays(walk(card).find((x) => x.dataset?.secretSheet === "github")), /could not be reached/);
+  // a queued write's success draws the page again before the person reads it
+  for (const x of walk(first)) x.isConnected = false;
+  const next = secretsSection({ secrets: [github()] });
+  await new Promise((r) => setTimeout(r, 0));
+  const sheet = walk(next).find((x) => x.dataset?.secretSheet === "github");
+  assert.equal(sheet.open, true);
+  assert.match(sheetSays(sheet), /could not be reached/);
+  sheet.close();
+  assert.equal(line(next, "github"), "", "read once it closed");
+  walk(next).find((x) => x.dataset?.action === "open").onclick();
+  assert.equal(sheetSays(sheet), "");
+});
+
 test("two edits at once go one after the other, each onto what the last left", async () => {
   // the Vault: each PUT makes a new revision, and refuses one read before it
   let held = github();

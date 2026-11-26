@@ -34,64 +34,67 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   let writing = Promise.resolve();
   // What went wrong is said where the person is looking: in the sheet it
   // belongs to (`ADD`: the Add form) while that sheet is open, and
-  // otherwise as a line in the section, kept through the page's redraws
-  // until that sheet is opened again (it moves there) or Settings is left.
-  // Only in the Settings visit its write began in (`visit`), never a later
-  // one. A stale write (409) draws the page again with its sheet open,
-  // which says why. Nothing else opens a sheet, so at most one is open.
+  // otherwise as a line in the section. Each failure is kept (`told`),
+  // through the page's redraws, until a sheet that showed it is closed or
+  // the person acts in it again, or Settings is left: only in the Settings
+  // visit its write began in (`visit`), never a later one. A stale write
+  // (409) draws the page again with its sheet open, which says why.
+  // Nothing else opens a sheet, so at most one is open.
   const ADD = "";
-  const sheets = new Map(); // name -> the newest { sheet, said } drawn for it
-  const unread = new Map(); // name -> { text, visit }, said in no sheet yet
+  const sheets = new Map(); // name -> the newest { sheet, said, showing } drawn
+  let told = []; // { name, text, visit }, oldest first
   let lines = null; // the section's lines, as last drawn
   function say(name, text, visit) {
     if (!asks.current(visit)) return;
-    const shown = sheets.get(name);
-    if (shown?.sheet.isConnected && shown.sheet.open) {
-      shown.said.textContent = text;
-      shown.said.hidden = false;
-      return;
+    told.push({ name, text, visit });
+    tell();
+  }
+  const isShown = (entry) => entry?.sheet.isConnected && entry.sheet.open;
+  // every place that says what went wrong, drawn from `told` again
+  function tell() {
+    told = told.filter((t) => asks.current(t.visit));
+    for (const entry of sheets.values()) {
+      if (!isShown(entry)) continue;
+      entry.showing = told.filter((t) => t.name === entry.name);
+      if (!entry.showing.length) continue;
+      entry.said.textContent = entry.showing.map((t) => t.text).join(" ");
+      entry.said.hidden = false;
     }
-    unread.set(name, { text, visit });
-    drawLines();
-  }
-  // what waits for `name` in this visit, taken: its sheet says it now
-  function take(name) {
-    const u = unread.get(name);
-    unread.delete(name);
-    drawLines();
-    return u && asks.current(u.visit) ? u.text : null;
-  }
-  function drawLines() {
     if (!lines) return;
     lines.replaceChildren();
-    for (const [name, u] of unread) {
-      if (!asks.current(u.visit)) {
-        unread.delete(name);
-        continue;
-      }
-      const text = name === ADD ? `Add secret: ${u.text}` : u.text.startsWith(name) ? u.text : `${name}: ${u.text}`;
+    for (const t of told) {
+      if (isShown(sheets.get(t.name))) continue;
+      const text = t.name === ADD ? `Add secret: ${t.text}` : t.text.startsWith(t.name) ? t.text : `${t.name}: ${t.text}`;
       const line = el("p", "form-error secret-said", text);
-      line.dataset.secretSaid = name;
+      line.dataset.secretSaid = t.name;
       lines.append(line);
     }
   }
-  // a sheet as it opens: what waits for it, or nothing from before
-  function opened(name, said) {
-    const text = take(name);
-    said.textContent = text ?? "";
-    said.hidden = !text;
+  // what a sheet showed is read: closed, or the person acts in it again
+  function read(entry) {
+    told = told.filter((t) => !entry.showing.includes(t));
+    entry.showing = [];
+    entry.said.hidden = true;
+    tell();
+  }
+  // a sheet just drawn, for `name`
+  function sheetFor(name, sheet, said) {
+    const entry = { name, sheet, said, showing: [] };
+    sheets.set(name, entry);
+    return entry;
   }
 
   function secretsSection(vault) {
     const s = section("Secrets");
     s.id = "settings-secrets";
+    lines = el("div", "secret-lines");
     if (!vault) {
-      s.append(el("p", "muted", "Your secrets could not be read."));
+      s.append(el("p", "muted", "Your secrets could not be read."), lines);
+      tell();
       return s;
     }
     s.append(el("p", "muted", "Secrets your agents can send to specific hosts without ever seeing the values."));
     const list = vault.secrets ?? [];
-    lines = el("div", "secret-lines");
     s.append(lines);
     const agents = computer()?.agents ?? [];
     if (list.length) {
@@ -103,7 +106,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     }
     const add = addSecretControl(agents, new Set(list.map((sec) => sec.name)));
     s.append(add.button, add.dialog);
-    drawLines();
+    tell();
     return s;
   }
 
@@ -165,10 +168,10 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     let shown = sec;
     const said = el("p", "form-error secret-said");
     said.hidden = true;
-    sheets.set(sec.name, { sheet, said });
-    // drawn again after a stale write: this sheet opens, saying why
+    const entry = sheetFor(sec.name, sheet, said);
+    const dismiss = () => read(entry);
+    // drawn again after a stale write, or after an edit made in it: open
     const reopen = openSheet?.secret === sec.name && asks.current(openSheet.visit) && isOpen();
-    if (reopen) opened(sec.name, said);
     const path = `/api/vault/${encodeURIComponent(sec.name)}`;
     function written(write) {
       const run = writing.then(async () => {
@@ -184,7 +187,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       // stale: drawn again from what the Vault holds, which says why, in
       // the visit its write began in alone
       if (!asks.current(visit)) return;
-      unread.set(sec.name, { text, visit });
+      say(sec.name, text, visit);
       openSheet = { secret: sec.name, visit };
       await reopenSettings();
     }
@@ -212,14 +215,14 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       const cancel = el("button", "quiet", "Cancel");
       cancel.type = "button";
       cancel.onclick = () => {
-        said.hidden = true;
+        dismiss();
         renderRemove(false);
       };
       yes.onclick = async () => {
         const visit = asks.now("settings");
         yes.disabled = true;
         cancel.disabled = true;
-        said.hidden = true;
+        dismiss();
         try {
           await written((now) => api("DELETE", now.revision ? `${path}?held=${encodeURIComponent(now.revision)}` : path));
           openSheet = null;
@@ -257,7 +260,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         flip.setAttribute("aria-pressed", String(allowed));
         named(flip, fragment, (t) => `${t} may use ${sec.name}`, "aria-label");
         flip.onclick = async () => {
-          said.hidden = true;
+          dismiss();
           if (allowed && (sec.agents ?? []).length === 1) {
             said.textContent = "Keep at least one agent, or remove the secret instead.";
             said.hidden = false;
@@ -300,7 +303,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     hostsForm.append(hostsInput, hostsSave);
     hostsForm.onsubmit = async (e) => {
       e.preventDefault();
-      said.hidden = true;
+      dismiss();
       const visit = asks.now("settings");
       const hosts = parseHosts(hostsInput.value);
       hostsSave.disabled = true;
@@ -332,7 +335,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     replaceForm.append(valueInput, replaceSave);
     replaceForm.onsubmit = async (e) => {
       e.preventDefault();
-      said.hidden = true;
+      dismiss();
       const val = valueInput.value.trim();
       if (!val) {
         said.textContent = "Paste a new value first.";
@@ -361,18 +364,21 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     closeOnOutsidePress(sheet);
     sheet.onclose = () => {
       valueInput.value = "";
+      dismiss();
       if (openSheet?.secret === sec.name) openSheet = null;
     };
     open.onclick = () => {
       openSheet = { secret: sec.name, visit: asks.now("settings") };
-      opened(sec.name, said);
       show();
+      tell();
     };
     card.append(tile(false), body, light(), foot, open, sheet);
 
     if (reopen) {
       queueMicrotask(() => {
-        if (sheet.isConnected && !sheet.open && isOpen()) show();
+        if (!sheet.isConnected || sheet.open || !isOpen()) return;
+        show();
+        tell();
       });
     }
     return card;
@@ -461,6 +467,8 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
 
     const said = el("p", "form-error secret-said");
     said.hidden = true;
+    const entry = sheetFor(ADD, dialog, said);
+    const dismiss = () => read(entry);
     const footer = el("div", "settings-actions secret-form-actions");
     const save = el("button", "primary", "Save secret");
     save.type = "submit";
@@ -473,7 +481,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     form.append(nameLabel, valueLabel, hostsLabel, agentsBlock, said, footer);
     form.onsubmit = async (e) => {
       e.preventDefault();
-      said.hidden = true;
+      dismiss();
       const name = nameInput.value.trim().toLowerCase();
       const value = valueInput.value.trim();
       const chosen = [...selected];
@@ -524,13 +532,13 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     closeOnOutsidePress(dialog);
     dialog.onclose = () => {
       valueInput.value = "";
+      dismiss();
     };
     button.onclick = () => {
-      opened(ADD, said);
       dialog.showModal();
       nameInput.focus();
+      tell();
     };
-    sheets.set(ADD, { sheet: dialog, said });
     return { button, dialog };
   }
 
