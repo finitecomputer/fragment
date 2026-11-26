@@ -222,8 +222,11 @@ only once its fragment holds it: its sockets hold what they are sent
 meanwhile, and its page reads and its claim answer 502; one not told is
 told again from the alarm. Its owner's own asks narrow nothing (decision
 64) and wait for nothing. A hand-off (one of its owner's agents' words in
-a turn of its own) carries on that turn's ask there; another agent's
-words are its own, unproven. An agent removed has its asks there closed.
+a turn of its own) carries on that turn's ask there only when it is
+their owner's own, proven, by the same words and day; anyone else's, and
+another owner's agent's words, are the posting agent's own, unproven,
+lending nothing (Ben's ask would otherwise reach what another of its
+agents' cap, grants and lend reach). An agent removed has its asks there closed.
 A computer's own word on its turns (`/api/computer/turns`) opens nothing;
 a turn it told before the release that brought this one still holds, until
 its bridge ends it or a new bridge life starts.
