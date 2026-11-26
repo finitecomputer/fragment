@@ -87,6 +87,20 @@ pub const FILE_SHA_HEADER: &str = "x-door-sha256";
 /// A door id's digits of its connector's life.
 pub const DOOR_LIFE_HEX: usize = 12;
 
+/// A door's SimpleX name (its connector's `connect`'s `name`) is at most
+/// this many UTF-16 units, as its door counts a string (cell/door.mjs; an
+/// emoji is two).
+pub const NAME_UNITS: usize = 64;
+
+/// `title` cut to a door's SimpleX name, at a character.
+pub fn door_name(title: &str) -> String {
+    let mut units = 0;
+    title.chars().take_while(|c| {
+        units += c.len_utf16();
+        units <= NAME_UNITS
+    }).collect()
+}
+
 /// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
 /// digits of a digest of its life's own key (its npub, drawn new for each
 /// life), as its repo is named (`codestorage::repo_name`). A name made
@@ -330,6 +344,19 @@ mod tests {
 
     pub(crate) fn ticket() -> Ticket {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
+    }
+
+    /// Goal: a door's name is one its door takes, cut at a character.
+    /// Invalid: 33 emoji, 33 characters and 66 units, past its door's 64
+    /// (Codex's round on b898dcf13). Valid: those cut to 32; 70 letters to
+    /// 64; a short title as it is.
+    #[test]
+    fn a_doors_name_is_cut_as_its_door_counts() {
+        let cut = door_name(&"🙂".repeat(33));
+        assert_eq!((cut.chars().count(), cut.encode_utf16().count()), (32, 64));
+        assert_eq!(door_name(&"a".repeat(70)), "a".repeat(64));
+        assert_eq!(door_name(&format!("{}🙂", "a".repeat(63))), "a".repeat(63), "never half an emoji");
+        assert_eq!(door_name("Juniper"), "Juniper");
     }
 
     /// Goal: a SimpleX connector's jobs reach their own door alone, and no

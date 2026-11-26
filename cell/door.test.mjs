@@ -1092,6 +1092,25 @@ test("a way back finds a file its runner gave that no delivery names yet: busy, 
   assert.deepEqual([d.row().stopped, d.c.running], [null, true], "its runner running again");
 });
 
+test("a way back whose save can't be read, its runner stopped for it: refused, its runner running again; asked again, it hands that save back (Codex's round on b898dcf13)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its last");
+  d.c.signal = async () => void (d.c.running = false);
+  const get = d.blobs.get;
+  d.blobs.get = async () => {
+    d.blobs.get = get;
+    throw new Error("the bucket's read failed");
+  };
+  const failed = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.equal(failed.status, 500);
+  assert.deepEqual([d.row().stopped, d.c.running], [null, true], "nothing handed back: its runner running again, its link at one end");
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, await r.text(), d.row().stopped], [200, "its last", "handed back"]);
+});
+
 test("a delivery to its connector's inbox is signed over its body by the inbox's secret: one its inbox refuses (a body changed on its way fails its check) is sent again at its next watch", async () => {
   const d = door();
   await d.connect();

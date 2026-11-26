@@ -211,6 +211,12 @@ impl Move<'_> {
         if text(&rec, "step") == "connecting" {
             let state = self.door_state(text(&rec, "door")).await?;
             if state["runner"]["phase"] != "linked" {
+                // its connect over, its door never started (refused, or its
+                // job failed): its link runs at neither end, so it goes back
+                // (Codex's round on b898dcf13)
+                if state["door"]["started"] == 0 && !self.unfinished(text(&rec, "connector"), "connect").await? {
+                    return Err(self.went_back(CellError::new(ErrorCode::Conflict, "its connector's connect ended, its door never started")).await);
+                }
                 return Ok(json!({ "agent": self.agent, "record": rec, "next": "wait for its door to link, then ask again", "door": { "running": state["running"], "runner": state["runner"]["phase"] } }));
             }
             // its connector told whom its door is linked to, as its page asks
@@ -241,7 +247,7 @@ impl Move<'_> {
             // computer named it, so its person's app shows no new name
             let status = self.as_person(&self.agent, Method::Get, "/api/status", None).await?;
             let title = status["title"].as_str().map(str::trim).filter(|t| !t.is_empty()).unwrap_or(label_of(&self.agent));
-            let name: String = title.chars().take(64).collect();
+            let name = fragment_core::door::door_name(title);
             self.as_person(text(&rec, "connector"), Method::Post, "/api/ops/connect", Some(&json!({ "id": "simplex-move-connect", "input": { "name": name } }))).await?;
             rec = self.set("bound", None, json!({ "step": "connecting" })).await?;
         }
@@ -426,7 +432,7 @@ impl Move<'_> {
         // its connector kept, its chat's history with it: unbound (its door
         // ends) once it has taken what its door delivered, and archived
         if let Some(connector) = rec["connector"].as_str() {
-            if self.intake_waiting(connector).await? {
+            if self.unfinished(connector, "intake").await? {
                 return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has delivered messages not yet published (an intake run queued, running, held or blocked): ask again, or replay them")));
             }
             match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
@@ -444,12 +450,12 @@ impl Move<'_> {
     /// what its door delivered: queued or under way, or held (failed, kept
     /// for a replay) or blocked (paused), whose file its door must keep
     /// until it is replayed or let go.
-    async fn intake_waiting(&self, connector: &str) -> CellResult<bool> {
-        // its intake's runs counted by status, every one of them (never a
+    async fn unfinished(&self, connector: &str, op: &str) -> CellResult<bool> {
+        // its op's runs counted by status, every one of them (never a
         // page: one held behind many newer is counted), in one read, so a
         // run replayed meanwhile is seen in one status or another
         let mut url = self.url.clone();
-        url.set_query(Some("op=intake&limit=1"));
+        url.set_query(Some(&format!("op={op}&limit=1")));
         let bare = Request::new(url.as_str(), Method::Get)?;
         let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
         let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;

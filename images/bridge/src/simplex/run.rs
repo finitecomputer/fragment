@@ -302,6 +302,11 @@ struct DoorKept {
     /// would restore it): never placed here as this link's.
     #[serde(default)]
     adopt: Option<serde_json::Value>,
+    /// Its replies' files whose upload its door's core had under way as it
+    /// stopped, by the core's id: their copies stay with that door, so
+    /// each is said not to have come through (Codex's round on b898dcf13).
+    #[serde(default)]
+    sending: serde_json::Map<String, serde_json::Value>,
 }
 
 /// One of them (images/simplex-door's `Reply`): its words, whether its door
@@ -374,6 +379,7 @@ fn place_back(dir: &Path, packed: &[u8]) -> Result<Placing, super::save::SaveErr
             carried.push(FILE_LEFT.to_string());
         }
     }
+    carried.extend(kept.sending.values().map(|_| FILE_LEFT.to_string()));
     Ok(Placing::Link(Box::new(kept.link), carried))
 }
 
@@ -4679,7 +4685,7 @@ mod tests {
         core_dbs(&door_dir, 3);
         let file = serde_json::json!({ "sha256": "ab".repeat(32), "name": "plan.pdf", "type": "application/pdf", "size": 4 });
         let replies = serde_json::json!([{ "key": "chat:7", "text": "sent before it stopped", "contact": 3, "said": true }, { "key": "chat:8", "text": "taken, not yet sent", "contact": 3 }, { "key": "chat:9", "text": "its words sent", "contact": 3, "said": true, "files": [file] }]);
-        let newest = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": at_door, "mark": 9, "replies": replies })).expect("json")).expect("its door's save");
+        let newest = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": at_door, "mark": 9, "replies": replies, "sending": { "44": { "folder": "1-9", "kind": "image", "contact": 3 } } })).expect("json")).expect("its door's save");
         let stranger = Link { phase: Phase::Linked { contact: 8, name: "someone".into() }, ..Link::default() };
         let wrong = super::super::save::make(&door_dir, &door_dir.join("work"), &serde_json::to_vec(&serde_json::json!({ "link": stranger })).expect("json")).expect("a save");
         let (into, _) = m.back(f, &signed("back", &"0d".repeat(16))).expect("taken");
@@ -4688,17 +4694,17 @@ mod tests {
         assert!(m.moved(f), "nothing placed: still moved");
         let (into, _) = m.back(f, &signed("back", &"0e".repeat(16))).expect("taken");
         let Ok(Placing::Link(link, carried)) = place_back(&into, &newest) else { panic!("placed") };
-        assert_eq!(carried, ["taken, not yet sent", FILE_LEFT], "what its door had not sent: words, and a note for a file it holds");
+        assert_eq!(carried, ["taken, not yet sent", FILE_LEFT, FILE_LEFT], "what its door had not sent: words, and a note for each file it holds, one whose upload was under way too");
         m.placed(f, Back::Placed(link, carried), true).expect("its view");
         let read = load(&link_dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
-        assert_eq!(read.carried, ["taken, not yet sent", FILE_LEFT], "kept for its core's next start, on disk");
+        assert_eq!(read.carried, ["taken, not yet sent", FILE_LEFT, FILE_LEFT], "kept for its core's next start, on disk");
         // the same way back again, its answer lost before the platform
         // unmarked it (its view still says moved, so its bridge takes it):
         // what its door had not sent is carried once, never twice
         let Ok(Placing::Link(again, carried)) = place_back(&into, &newest) else { panic!("placed again") };
         m.placed(f, Back::Placed(again, carried), true).expect("its view");
-        assert_eq!(load(&link_dir, &agent()).expect("its file").carried, ["taken, not yet sent", FILE_LEFT], "carried once (Codex's fix-check of #1541)");
+        assert_eq!(load(&link_dir, &agent()).expect("its file").carried, ["taken, not yet sent", FILE_LEFT, FILE_LEFT], "carried once (Codex's fix-check of #1541)");
         at_door.syncing = true;
         at_door.forced = true;
         assert_eq!(read.link, at_door, "its door's link, forced to sync as it was behind");

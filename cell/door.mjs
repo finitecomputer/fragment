@@ -460,9 +460,21 @@ export class SimplexDoor extends DurableObject {
       return refusal(410, "not_moved", "this door's link is its own now, not the one its computer handed over: no way back");
     }
     // a way back either hands its save back or leaves its runner running:
-    // stopped by this asking and refused below, its runner starts again
+    // one stopped by this asking that fails before it hands its save back
+    // (busy, or a read that throws) lets go of its fence, and its runner
+    // starts again; no save of it went anywhere (Codex's rounds on
+    // f434be3bb and b898dcf13)
     const fenced = d.stopped !== HANDED_BACK;
     if (fenced) this.#stop(HANDED_BACK);
+    try {
+      return await this.#handingBack(d, ended, gone, fenced);
+    } catch (e) {
+      if (fenced && !ended()) await this.#resume();
+      throw e;
+    }
+  }
+
+  async #handingBack(d, ended, gone, fenced) {
     // a start under way sees the stop before it launches, or launched
     if (this.#starting) await this.#starting.catch(() => {});
     const c = this.ctx.container;
