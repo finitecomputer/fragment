@@ -341,6 +341,16 @@ test("its agent's reply's files are given to the door first, then sent with its 
     assert.deepEqual(await o.app.mirror(o.reply(43, { attachments: [one] }), o.job("channel")), { sent: 1 });
     assert.deepEqual(o.asked.slice(1).map((a) => a.body), [{ key: "chat:43", text: "It'll be sunny.", files: [one] }, { key: "chat:43", text: "It'll be sunny.\n\n(I sent a file in our chat.)" }], error);
   }
+  // a copy the door found damaged on its way (422) is given again, its
+  // reply going with it (Codex's round on 45fc87eee); damaged every time,
+  // after a few, it stays in the chat, said so
+  const hurt = world({ [`file/${one.sha256}`]: [[422, { error: "damaged" }], [200, { kept: one.sha256 }]], reply: [[200, { done: true }]] });
+  assert.deepEqual(await hurt.app.mirror(hurt.reply(44, { attachments: [one] }), hurt.job("channel")), { sent: 1 });
+  assert.deepEqual(hurt.asked.map((a) => a.ask), [`file/${one.sha256}`, `file/${one.sha256}`, "reply"]);
+  assert.deepEqual(hurt.asked[2].body, { key: "chat:44", text: "It'll be sunny.", files: [one] }, "its file goes with it");
+  const worse = world({ [`file/${one.sha256}`]: [[422, {}], [422, {}], [422, {}], [200, {}]], reply: [[200, { done: true }]] });
+  await worse.app.mirror(worse.reply(45, { attachments: [one] }), worse.job("channel"));
+  assert.deepEqual([worse.asked.filter((a) => a.ask === `file/${one.sha256}`).length, worse.asked.at(-1).body.text], [3, "It'll be sunny.\n\n(I sent a file in our chat.)"]);
   // at most a message's files
   const many = world({ reply: [[200, { done: true }]] });
   await many.app.mirror(many.reply(44, { attachments: Array.from({ length: 12 }, (_, n) => ({ ...one, sha256: String(n).padStart(2, "0").repeat(32) })) }), many.job("channel"));

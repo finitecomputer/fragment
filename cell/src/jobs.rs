@@ -1160,9 +1160,11 @@ impl FragmentCell {
                 let ResponseBody::Stream(body) = resp.body() else { return Err(permanent(format!("{host} answered no bytes"))) };
                 let body = body.clone();
                 let digest = js::blob_put(&self.env, &key, body, size).await.map_err(retry)?;
+                // a copy damaged on its way (FIN-775): never kept, and asked
+                // for again, its door's own whole (it named it as it holds it)
                 if digest != sha {
                     js::blob_delete(&self.env, js::BLOBS, &[key]).await.map_err(retry)?;
-                    return Err(permanent(format!("{host}'s file hashes to {digest}, not {sha}")));
+                    return Err(StepFail::Retry(format!("{host}'s file came damaged on its way: it hashes to {digest}, not {sha}")));
                 }
             }
             self.record_blob(&sha, size, mime).map_err(retry)?;

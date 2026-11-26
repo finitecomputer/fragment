@@ -10,7 +10,8 @@
 //!   computer's SimpleX chat;
 //! - its save damaged on its way out of its computer each time its move
 //!   asks for it (FIN-775): never imported, and the move goes back at once,
-//!   its computer running its link again (no model call before it);
+//!   its computer running its link again; and its handover failing once its
+//!   core may have stopped: the same way back (no model call before them);
 //! - `operator simplex-move` plans it, then goes: the connector made and
 //!   bound as theirs, the link handed over and imported, its door connected
 //!   and linked with the same contact, the old chat archived; a message the
@@ -132,6 +133,24 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok(
         "its save damaged on its way out each time its move asks: never imported, and it goes back at once, its computer running its link again",
         failed.status != 200 && said.contains("not_its_sha") && said.contains("went back") && again && forgot.body["record"].is_null(),
+        json!({ "go": failed.body, "plan": forgot.body }),
+    );
+    if !again {
+        return Ok(());
+    }
+    // its handover failing once its core may have stopped (a pack's disk
+    // error, an answer lost: here a 500 after its bridge packed), whatever
+    // the failure: the same way back, its computer running its link again
+    // (Codex's round on 45fc87eee)
+    let r = lever_with(api, &id, json!({ "op": "fail", "path": "/simplex/handover", "times": 1 }))?;
+    anyhow::ensure!(r.status == 200, "the fail lever: {r}");
+    let failed = mv("go")?;
+    let again = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
+    let forgot = mv("plan")?;
+    let said = failed.body["message"].as_str().unwrap_or("");
+    s.ok(
+        "its handover failing once its core may have stopped (an answer lost after it packed), whatever the failure: the same way back, its computer running its link again",
+        failed.status != 200 && said.contains("went back") && again && forgot.body["record"].is_null(),
         json!({ "go": failed.body, "plan": forgot.body }),
     );
     if !again {

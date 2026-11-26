@@ -1477,10 +1477,21 @@ impl Runner {
     }
 }
 
-/// The door's calls, to the loop: refused at once (503) before it runs,
-/// as it is up no sooner (a restore asked again, as a copy damaged on its
-/// way is, may take a while).
+/// The door's calls, to the loop, each answer named by its SHA-256
+/// (`door::SHA_HEADER`), which its door checks before it uses it (FIN-775:
+/// a state's invitation one character off would still parse).
 async fn handle(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic::AtomicBool>, req: Request<Incoming>) -> Response<Body> {
+    let (mut parts, body) = asked_of(to, looping, req).await.into_parts();
+    let Ok(body) = body.collect().await;
+    let bytes = body.to_bytes();
+    parts.headers.insert(door::SHA_HEADER, hyper::header::HeaderValue::from_str(&files::sha256_hex(&bytes)).expect("hex is a header's value"));
+    Response::from_parts(parts, Body::new(bytes))
+}
+
+/// A call of its door's, answered: refused at once (503) before its loop
+/// runs, as it is up no sooner (a restore asked again, as a copy damaged on
+/// its way is, may take a while).
+async fn asked_of(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic::AtomicBool>, req: Request<Incoming>) -> Response<Body> {
     if !looping.load(std::sync::atomic::Ordering::Acquire) {
         return refuse(StatusCode::SERVICE_UNAVAILABLE, "the door is starting or stopping");
     }
@@ -1496,7 +1507,7 @@ async fn handle(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic
             };
             // taken only as its door hashed it: one damaged on its way
             // (FIN-775) is refused before anything, and its door asks again
-            if sha.as_deref() != Some(files::sha256_hex(&body).as_str()) {
+            if !door::whole(&body, sha.as_deref()) {
                 return refuse(StatusCode::UNPROCESSABLE_ENTITY, "a reply that is not the bytes its SHA-256 names: damaged on its way");
             }
             match reply(&body) {
@@ -1833,6 +1844,38 @@ mod tests {
         let sent = send(whole, Some(&sha)).await.unwrap();
         assert_eq!((damaged.status(), unnamed.status(), sent.status()), (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::UNPROCESSABLE_ENTITY, StatusCode::OK));
         assert_eq!(*taken.lock().unwrap(), ["hello"], "only the whole reply reaches the runner");
+    }
+
+    /// Goal: every answer its door reads names its SHA-256, as its runner
+    /// made it, whatever the answer (a refusal, a state, a reply's), so its
+    /// door uses none that came damaged (Codex's round on 45fc87eee: a
+    /// state's invitation one character off would still parse). Method: the
+    /// runner's own server, a refusal before its loop runs, then a state.
+    #[tokio::test]
+    async fn every_answer_names_its_sha256() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/state", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open = looping.clone();
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), open.clone(), req), stop_rx));
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::State, tx)) = asks.recv().await {
+                let _ = tx.send(answer(StatusCode::OK, r#"{"phase":"inviting","link":"simplex:/invitation#abc"}"#));
+            }
+        });
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let read = || async {
+            let r = client.request(Request::get(&url).body(http_body_util::Full::new(Bytes::new())).unwrap()).await.unwrap();
+            let sha = r.headers().get(door::SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let status = r.status();
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            (status, door::whole(&body, sha.as_deref()))
+        };
+        assert_eq!(read().await, (StatusCode::SERVICE_UNAVAILABLE, true), "a refusal, named");
+        looping.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(read().await, (StatusCode::OK, true), "a state, named");
     }
 
     /// Goal: its door's calls are answered at once while its save restores

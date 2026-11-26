@@ -126,15 +126,16 @@ function container() {
     c.running = false;
     c.destroyed += 1;
   };
-  // its runner: `answers`, each ask's (status, body) in turn, then 202
+  // its runner: `answers`, each ask's (status, body, and its SHA-256's
+  // header, its own by default: `null` for none) in turn, then 202
   c.asked = [];
   c.answers = [];
   c.getTcpPort = () => ({
     fetch: async (url, init) => {
       c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null, sha: init.headers["x-door-sha256"] });
       const next = c.answers.shift() ?? [202, { done: false }];
-      const [status, body] = typeof next === "function" ? await next() : next;
-      return new Response(JSON.stringify(body), { status });
+      const [status, body, named = hex(JSON.stringify(body))] = typeof next === "function" ? await next() : next;
+      return new Response(JSON.stringify(body), { status, headers: named === null ? {} : { "x-door-sha256": named } });
     },
   });
   return c;
@@ -990,8 +991,52 @@ test("an ask its runner found damaged on its way (422: it took nothing) is asked
   assert.equal(replies.length, 2);
   assert.ok(replies.every((a) => a.sha === hex(JSON.stringify(a.body)) && a.mark === replies[0].mark), "the same ask, named by its SHA-256");
   d.c.answers.push([422, {}], [422, {}], [422, {}], [200, {}]);
-  assert.equal((await d.job("reply", { key: "k2", text: "again" })).status, 422, "damaged every time: said so, after a few");
+  assert.equal((await d.job("reply", { key: "k2", text: "again" })).status, 503, "damaged every time: asked again later (the platform retries a 503), after a few");
   assert.equal(d.c.asked.filter((a) => a.path === "/reply").length, 5);
+});
+
+test("a runner's answer damaged on its way is asked again, and used only whole: a state's invitation one character off is never shown (Codex's round on 45fc87eee)", async () => {
+  const d = door();
+  await d.connect();
+  await d.restore(d.row().started);
+  const whole = { phase: "inviting", link: "simplex:/invitation#abc", files: true };
+  // one character changed after its runner named it
+  d.c.answers.push([200, { ...whole, link: "simplex:/invitation#abd" }, hex(JSON.stringify(whole))], [200, whole]);
+  const s = await (await d.job("state")).json();
+  assert.deepEqual(s.runner, whole, "the whole one, asked again");
+  assert.equal(d.c.asked.filter((a) => a.path === "/state").length, 2);
+  // a reply's file list read from its state: damaged, it is asked again, never "no files"
+  const file = { sha256: hex("%PDF"), name: "plan.pdf", type: "application/pdf", size: 4 };
+  assert.equal((await d.jobFile("PUT", file.sha256, "%PDF")).status, 200);
+  d.c.answers.push([200, { files: false }, hex(JSON.stringify({ files: true }))], [200, { files: true }], [202, { done: false }]);
+  const r = await d.job("reply", { key: "k1", text: "", files: [file] });
+  assert.equal(r.status, 202, "its file goes, the state read again");
+  assert.deepEqual(d.c.asked.filter((a) => a.path === "/reply").map((a) => a.body.files.length), [1]);
+});
+
+test("a runner that names no answer's SHA-256 is older than its door: ended, so it starts again on its deployment's image, and its answer is not used", async () => {
+  const d = door();
+  await d.connect();
+  await d.restore(d.row().started);
+  const destroyed = d.c.destroyed;
+  d.c.answers.push([200, { phase: "linked" }, null]);
+  const s = await (await d.job("state")).json();
+  assert.deepEqual([s.runner, d.c.destroyed], [null, destroyed + 1]);
+});
+
+test("every answer its runner takes is named by its SHA-256 as it leaves for the container; a save or a file names its own", async () => {
+  const { DoorEgress } = await import("./door.mjs");
+  const answers = [new Response(JSON.stringify({ saved: "2-1" }), { status: 200 }), new Response(null, { status: 204, headers: { "x-door-life": "2" } }), new Response("its bytes", { headers: { "x-door-sha256": hex("its bytes") } })];
+  const e = new DoorEgress();
+  e.env = { FRAGMENT_DEPLOY_ID: "dev", SIMPLEX_DOOR: { idFromName: (n) => n, get: () => ({ fetch: async () => answers.shift() }) } };
+  e.ctx = { props: { door: DOOR } };
+  const ask = () => e.fetch(new Request("http://door.fragment.internal/save", { method: "GET" }));
+  const saved = await ask();
+  assert.equal(saved.headers.get("x-door-sha256"), hex(JSON.stringify({ saved: "2-1" })));
+  const none = await ask();
+  assert.deepEqual([none.status, none.headers.get("x-door-sha256"), none.headers.get("x-door-life")], [204, hex(""), "2"]);
+  const file = await ask();
+  assert.deepEqual([file.headers.get("x-door-sha256"), await file.text()], [hex("its bytes"), "its bytes"]);
 });
 
 test("the way back: a planned stop, its runner's last save, and that save handed back; again the same", async () => {

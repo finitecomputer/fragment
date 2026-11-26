@@ -390,18 +390,18 @@ fn save_refused(e: super::save::SaveError) -> Refused {
 
 /// A way back's save that is not the one its door hashed (`sha`): damaged
 /// on its way, refused before anything is taken (422 `damaged`), so it is
-/// asked for again; or one that names no SHA-256 to be checked by (400,
-/// never placed unchecked). A way back that carries none (its computer's
-/// own copy the link still) has nothing to check.
+/// asked for again, its door fenced meanwhile: an empty body that names a
+/// save's SHA-256 is such a copy too, never its computer's own copy (Codex's
+/// round on 45fc87eee). One that names no SHA-256 but carries bytes is
+/// refused (400, never placed unchecked). Only an empty body naming none is
+/// the way back that carries no save (its computer's own copy the link
+/// still), with nothing to check.
 pub fn damaged(packed: &[u8], sha: Option<&str>) -> Option<Refused> {
-    if packed.is_empty() {
-        return None;
-    }
     let Some(sha) = sha else {
-        return Some(Refused::new(400, "its door's save names no SHA-256 (x-door-sha256) to check it by").coded("unnamed"));
+        return (!packed.is_empty()).then(|| Refused::new(400, "its door's save names no SHA-256 (x-door-sha256) to check it by").coded("unnamed"));
     };
     let got = sha256_hex(packed);
-    (got != sha).then(|| Refused::new(422, format!("its door's save came damaged on its way ({} bytes, SHA-256 {}…, its door's {}…): ask again", packed.len(), &got[..12], &sha[..sha.len().min(12)])).coded("damaged"))
+    (got != sha).then(|| Refused::new(422, format!("its door's save came damaged on its way ({} bytes, SHA-256 {}…, its door's {}…); its door stays fenced: ask the way back (`--back`) again", packed.len(), &got[..12], &sha[..sha.len().min(12)])).coded("damaged"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -4602,6 +4602,11 @@ mod tests {
         let r = damaged(&save, None).expect("unnamed");
         assert_eq!((r.status, r.code), (400, Some("unnamed")));
         assert!(damaged(&[], None).is_none(), "its computer's own copy");
+        // an empty body that names a save is a copy cut to nothing, never its
+        // computer's own copy (Codex's round on 45fc87eee)
+        let r = damaged(&[], Some(&sha)).expect("cut to nothing");
+        assert_eq!((r.status, r.code), (422, Some("damaged")));
+        assert!(r.why.contains("--back"), "it says how to go on: {}", r.why);
     }
 
     /// Goal (D4, Codex's fix-check of #1541): what a way back carried from its

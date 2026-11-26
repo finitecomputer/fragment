@@ -282,10 +282,10 @@ impl Move<'_> {
 
     /// Its computer's link handed over and its save given to its door, then
     /// the agent's computer door closed: what its computer signs relays no
-    /// one now. An import that fails goes back (`back`: its door fenced,
-    /// its computer given the save its door took, or told to run its own
-    /// copy again when it took none), so its link runs at one end, never
-    /// none, and says why.
+    /// one now. A handover that fails once its core may have stopped (its
+    /// computer's own moved mark stands, whatever the failure), or an import
+    /// that fails, goes back (`went_back`), so its link runs at one end,
+    /// never none.
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
         // its save, streamed out of its computer's container into its door,
         // whose bucket checks its SHA-256 as it stores it: a copy damaged on
@@ -295,7 +295,13 @@ impl Move<'_> {
         let mut asks = 0;
         let (sha, length, staged) = loop {
             asks += 1;
-            let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false, "").await?.into();
+            let save: worker::worker_sys::web_sys::Response = match self.hand("handover", None, false, "").await {
+                Ok(save) => save.into(),
+                // a pack that failed, an answer lost: its mark, its computer's
+                // own, says whether its core may have stopped
+                Err(e) if self.read().await.is_ok_and(|r| r["record"]["moved"] == true) => return Err(self.went_back(e).await),
+                Err(e) => return Err(e),
+            };
             let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
             let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
             let body = save.body().map(Into::into);
@@ -307,10 +313,7 @@ impl Move<'_> {
             match put {
                 Err(e) if e.message.contains(" 422 not_its_sha:") && asks < HAND_ASKS => continue,
                 // its computer's core stopped, its door holding no link it runs
-                Err(e) => {
-                    let back = self.back().await.err().map_or_else(|| "went back: its computer runs its link again".into(), |b| format!("its way back failed too ({}): ask `back` again", b.message));
-                    return Err(CellError::new(e.code, format!("{}; {back}", e.message)));
-                }
+                Err(e) => return Err(self.went_back(e).await),
                 Ok(_) => break (sha, length, staged),
             }
         };
@@ -319,6 +322,16 @@ impl Move<'_> {
         // a staged chat waits for its person's word once bound, never
         // connected for them
         self.set("made", None, json!({ "step": "imported", "staged": staged })).await
+    }
+
+    /// The one way out of a handover that failed after its core may have
+    /// stopped: the way back (`back`: its door fenced, its computer given
+    /// the save its door took, or told to run its own copy again, both its
+    /// marks, its bridge's and its computer's, let go), then `e`, and
+    /// whether it went back.
+    async fn went_back(&self, e: CellError) -> CellError {
+        let back = self.back().await.err().map_or_else(|| "went back: its computer runs its link again".into(), |b| format!("its way back failed too ({}): ask `--back` again", b.message));
+        CellError::new(e.code, format!("{}; {back}", e.message))
     }
 
     /// Its computer's half (`computer/simplex-hand`): a handover, or the

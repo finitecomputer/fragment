@@ -325,10 +325,13 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
-  // The e2e's lever `damage` (cell/src/computer.rs): the next `n` answers
-  // on one of its bridge's paths through `port` come damaged on their way
-  // out of its container, as FIN-775's handover did.
+  // The e2e's levers on its bridge's paths through `port` (cell/src/
+  // computer.rs): `damage`, the next `n` answers on one damaged on their way
+  // out of its container, as FIN-775's handover was; `fail`, the next `n`
+  // answered 500 once its container answered (a handover's answer lost
+  // after its bridge packed, its core stopped).
   #damage = null;
+  #fail = null;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -621,8 +624,14 @@ class ContainerHost {
   async port(port, request, usedEvery) {
     if (usedEvery > 0) this.#usedEvery = usedEvery;
     const sleeps = this.#sleeps;
-    const damaged = !!this.#damage && this.#damage.path === new URL(request.url).pathname && this.#damage.n-- > 0;
+    const path = (this.#damage || this.#fail) && new URL(request.url).pathname;
+    const damaged = !!this.#damage && this.#damage.path === path && this.#damage.n-- > 0;
+    const failed = !!this.#fail && this.#fail.path === path && this.#fail.n-- > 0;
     const resp = await this.#c.getTcpPort(port).fetch(request);
+    if (failed) {
+      await resp.body?.cancel();
+      return new Response("the test lever's failure, once its container answered", { status: 500 });
+    }
     const upstream = resp.webSocket;
     if (!upstream) return damaged && resp.body ? new Response(flipped(resp.body), resp) : resp;
     const [client, server] = Object.values(new WebSocketPair());
@@ -688,6 +697,10 @@ class ContainerHost {
 
   damage(path, n) {
     this.#damage = { path, n };
+  }
+
+  fail(path, n) {
+    this.#fail = { path, n };
   }
 
   // A sleep (or a restart's) begins, before its hold: each open port tab

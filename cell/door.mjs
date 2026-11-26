@@ -682,7 +682,7 @@ export class SimplexDoor extends DurableObject {
       }
       // kept only as its name says: a copy damaged on its way is refused,
       // and given again
-      await store(this.env.BLOBS, key, request.body, length, sha, "damaged");
+      await store(this.env.BLOBS, key, this.#flip("file", request.body), length, sha, "damaged");
       if (this.#ends !== ends) {
         await this.env.BLOBS.delete(key);
         return refusal(410, "ended", "this door ended as its file came");
@@ -726,7 +726,7 @@ export class SimplexDoor extends DurableObject {
       this.ctx.storage.sql.exec("DELETE FROM files WHERE sha = ?", sha);
       return refusal(404, "no_file", `the door's file ${sha} is gone`);
     }
-    return new Response(obj.body, { headers: { "content-type": row.type, "content-length": String(row.bytes), [FILE_SHA_HEADER]: sha } });
+    return new Response(this.#flip("give", obj.body), { headers: { "content-type": row.type, "content-length": String(row.bytes), [FILE_SHA_HEADER]: sha } });
   }
 
   // The files held past `FILE_KEPT_MS`, but those a delivery its inbox has
@@ -845,10 +845,15 @@ export class SimplexDoor extends DurableObject {
     this.#log("door.stopped", { why });
   }
 
-  // A call to its runner (`PORT`, its container's own), its body named by
-  // its SHA-256, which its runner checks before it takes it: one it found
-  // damaged on its way (422: it took nothing) is asked again, at most
-  // `DAMAGED_ASKS` times.
+  // A call to its runner (`PORT`, its container's own): its body named by
+  // its SHA-256, which its runner checks before it takes it, and its answer
+  // used only as its runner named it (a state's invitation one character
+  // off would still parse: Codex's round on 45fc87eee). Either damaged on
+  // its way (422: its runner took nothing; or an answer not its bytes) is
+  // asked again, the same ask under the same mark (its runner answers a
+  // mark it took with its state, or as stale), at most `DAMAGED_ASKS` times,
+  // then 503 (asked again later). A runner that names no answer's SHA-256 is
+  // older than its door: ended, it starts again on its deployment's image.
   async #runner(method, path, mark, body) {
     if (!this.ctx.container?.running) return refusal(503, "starting", "the door's runner is not up");
     const headers = { "content-type": "application/json" };
@@ -858,19 +863,26 @@ export class SimplexDoor extends DurableObject {
       init.body = JSON.stringify(body);
       headers[FILE_SHA_HEADER] = await sha256Hex(new TextEncoder().encode(init.body));
     }
-    let r;
     // bounded: `DAMAGED_ASKS`
-    for (let n = 1; ; n += 1) {
+    for (let n = 1; n <= DAMAGED_ASKS; n += 1) {
+      let r;
       try {
         r = await this.ctx.container.getTcpPort(PORT).fetch(`http://door${path}`, init);
       } catch (e) {
         // its container started, its runner not yet listening
         return refusal(503, "starting", String((e && e.message) || e).slice(0, 300));
       }
-      if (r.status !== 422 || n >= DAMAGED_ASKS) break;
-      await r.body?.cancel();
+      const named = r.headers.get(FILE_SHA_HEADER);
+      const bytes = this.#flipped("answer", new Uint8Array(await r.arrayBuffer()));
+      if (!shaOk(named)) {
+        this.#log("door.runner_outdated", { path });
+        await this.ctx.container.destroy().catch(() => {});
+        return refusal(503, "starting", "its runner is older than its door: it starts again on its deployment's image");
+      }
+      if (r.status !== 422 && (await sha256Hex(bytes)) === named) return new Response(bytes, { status: r.status, headers: { "content-type": "application/json" } });
+      this.#log("door.runner_damaged", { path, status: r.status, try: n });
     }
-    return new Response(r.body, { status: r.status, headers: { "content-type": "application/json" } });
+    return refusal(503, "damaged", `the runner's ${path} came damaged ${DAMAGED_ASKS} times: ask again`);
   }
 
   // ---- what its runner asks (images/simplex-door/src/door.rs) ----
@@ -932,6 +944,18 @@ export class SimplexDoor extends DurableObject {
     obj = await get();
     if (!current()) return lost(obj);
     return obj && { obj, sha };
+  }
+
+  // Bytes held whole (a runner's answer) as the lever's `damage` asks, one
+  // flipped (at most its 65th), or as they are.
+  #flipped(on, bytes) {
+    const n = this.#damage.get(on) ?? 0;
+    if (!n || !bytes.length) return bytes;
+    this.#damage.set(on, n - 1);
+    this.#log("door.damaged_by_lever", { on });
+    const out = bytes.slice();
+    out[Math.min(64, out.length - 1)] ^= 1;
+    return out;
   }
 
   // A transfer as the lever's `damage` asks, or as it is.
@@ -1092,8 +1116,9 @@ export class SimplexDoor extends DurableObject {
         if (this.#starting) await this.#starting.catch(() => {});
         if (this.ctx.container?.running) await this.ctx.container.signal(15);
         return json({});
-      // the next `n` of its `save`s (as they come in) or `restore`s (as
-      // they go out) damaged on their way, one byte flipped, their lengths
+      // the next `n` of its `save`s or `file`s (as they come in), its
+      // `restore`s or `give`s (a file, as it goes out), or its runner's
+      // `answer`s, damaged on their way, one byte flipped, their lengths
       // kept: as FIN-775's were between a container and its Worker
       case "damage":
         this.#damage.set(String(a.on), Number(a.n) || 0);
@@ -1153,6 +1178,17 @@ export class DoorEgress extends WorkerEntrypoint {
     headers.set(RELEASE, own(this.env));
     const init = { method: request.method, headers };
     if (request.method !== "GET" && request.method !== "HEAD") init.body = request.body;
-    return stub.fetch(`http://door/egress${url.pathname}${url.search}`, init);
+    return named(await stub.fetch(`http://door/egress${url.pathname}${url.search}`, init));
   }
+}
+
+// Every answer its runner takes, named by its SHA-256 as it leaves for its
+// container, which its runner checks before it uses it (FIN-775): a save or
+// a file names its own, as kept; any other (its few words) is named here.
+async function named(r) {
+  if (r.headers.has(FILE_SHA_HEADER)) return r;
+  const bytes = await r.arrayBuffer();
+  const headers = new Headers(r.headers);
+  headers.set(FILE_SHA_HEADER, await sha256Hex(bytes));
+  return new Response([101, 204, 205, 304].includes(r.status) ? null : bytes, { status: r.status, headers });
 }

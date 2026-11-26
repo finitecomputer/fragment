@@ -55,6 +55,10 @@ const SEEN_MAX = 2000;
 // (two steps a round, within a job's JOB_STEPS_MAX of 256).
 const REPLY_ASKS_MAX = 30;
 const REPLY_WAIT_MAX_MS = 30_000;
+// A reply's file the door found damaged on its way (422: not the bytes its
+// name, its SHA-256, says; FIN-775), given again at most this often before
+// it stays in the chat alone: the chat's own copy is whole.
+const GIVE_ASKS = 3;
 // The door's invitation, looked for this many times a second apart once
 // asked (two steps a round).
 const INVITE_LOOKS_MAX = 30;
@@ -122,11 +126,15 @@ async function reply(job, key, text, files = []) {
 
 // A reply's file, one of this chat's blobs, given to its door for reply
 // `key` (which uses it until it is done): whether the door holds it now (a
-// step that fails for good is one it does not).
+// step that fails for good is one it does not). A copy the door found
+// damaged on its way is given again, at most `GIVE_ASKS` times.
 async function give(job, a, key) {
   try {
-    const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream", "x-door-for": key } });
-    return r.ok;
+    // bounded: `GIVE_ASKS`
+    for (let ask = 1; ; ask += 1) {
+      const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream", "x-door-for": key } });
+      if (r.status !== 422 || ask >= GIVE_ASKS) return r.ok;
+    }
   } catch {
     return false;
   }

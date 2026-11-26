@@ -454,12 +454,15 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let memo: Vec<u8> = (0..150_000u32).map(|n| (n % 253) as u8).collect();
     let sha = give(api, &door, &memo, "audio/mp4")?;
     let named = json!({ "sha256": sha, "name": "memo.m4a", "type": "audio/mp4", "size": memo.len() });
+    // its first copy to the connector damaged on its way (FIN-775): never
+    // kept, asked for again (Codex's round on 45fc87eee)
+    lever(api, &door, "damage", json!({ "on": "give", "n": 1 }))?;
     deliver_file(api, &door, "sx-e2e-voice", "voice", named)?;
     let intake = newest("intake");
     let voiced = chat().into_iter().find(|r| r["body"]["attachments"][0]["sha256"] == sha.as_str()).unwrap_or_default();
     let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
     s.ok(
-        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole",
+        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole, its first copy damaged on its way and asked for again",
         intake["output"] == json!({ "relayed": true, "file": true })
             && voiced["body"]["attachments"] == json!([{ "sha256": sha, "size": memo.len(), "type": "audio/mp4", "name": "memo.m4a" }])
             && voiced["body"]["relayed"]["via"] == "simplex"
@@ -469,7 +472,9 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     );
 
     // its agent's reply's file (a drawing), uploaded there by its agent, a
-    // viewer: given to the door, which holds those very bytes
+    // viewer: given to the door, which holds those very bytes, its first
+    // copy damaged on its way, refused and given again (FIN-775)
+    lever(api, &door, "damage", json!({ "on": "file", "n": 1 }))?;
     deliver(api, &door, "sx-e2e-draw", "draw me something")?;
     let drew = s.eventually(a.wake, || super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["attachments"][0]["sha256"].is_string()));
     let drawn = super::computers::agent_replies(&chat(), a.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
@@ -479,7 +484,7 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let held = s.eventually(a.wake, || look()["sha256"] == fsha.as_str());
     let mirror = newest("mirror");
     s.ok(
-        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes, and the door holds those very bytes",
+        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes (its first copy damaged on its way, given again), and the door holds those very bytes",
         drew && held && look()["size"] == file["size"] && mirror["output"] == json!({ "sent": 0, "why": "not linked" }) && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
         json!({ "reply": drawn, "held": look(), "mirror": mirror }),
     );
