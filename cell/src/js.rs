@@ -415,9 +415,14 @@ async fn await_js(v: Result<JsValue, JsValue>, what: &str) -> CellResult<JsValue
 /// store at `key`, each chunk hashed (`crypto.DigestStream`) before it is
 /// handed on: in series, so a sender faster than the store fills nothing
 /// (a `tee`'s branch would hold all the store had not read yet). A body of
-/// another length fails the store. Answers its SHA-256 hex.
-pub async fn blob_put(env: &Env, key: &str, body: ReadableStream, size: u64) -> CellResult<String> {
+/// another length fails the store, and so does one that is not the bytes
+/// `sha` names: R2 checks it as it stores them, so no step, however it
+/// ends, leaves other bytes under that name to be served (Codex's round on
+/// 6f714bbde). Answers its SHA-256 hex, which is not `sha` when R2 refused
+/// it for that.
+pub async fn blob_put(env: &Env, key: &str, body: ReadableStream, size: u64, sha: &str) -> CellResult<String> {
     use futures_util::TryStreamExt;
+    let expected = hex::decode(sha).map_err(|_| CellError::invalid(format!("{sha} is no SHA-256")))?;
     let digest = DigestStream::new(DigestStreamAlgorithm::Sha256);
     let writer = digest.raw().get_writer().map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
     let hashing = writer.clone();
@@ -428,9 +433,14 @@ pub async fn blob_put(env: &Env, key: &str, body: ReadableStream, size: u64) -> 
             Ok(chunk)
         }
     });
-    blobs(env)?.put(key, worker::FixedLengthStream::wrap(hashed, size)).execute().await.map_err(|e| CellError::host(format!("storing the blob: {e}")))?;
+    let put = blobs(env)?.put(key, worker::FixedLengthStream::wrap(hashed, size)).sha256(expected).execute().await;
     JsFuture::from(writer.close()).await.map_err(|e| CellError::host(format!("hashing the blob: {}", js_message(&e))))?;
-    Ok(hex::encode(digest.digest().await?.to_vec()))
+    let got = hex::encode(digest.digest().await?.to_vec());
+    match put {
+        Ok(_) => Ok(got),
+        Err(_) if got != sha => Ok(got),
+        Err(e) => Err(CellError::host(format!("storing the blob: {e}"))),
+    }
 }
 
 /// Reads a request's body to its end, keeping nothing, when nothing read

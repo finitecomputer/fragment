@@ -184,11 +184,13 @@ impl Move<'_> {
             return Err(CellError::new(ErrorCode::Conflict, "a `go` is making its connector: ask again (one that stopped: `back`)"));
         }
         // one failure handler (Rule B): from its handover until its door is
-        // connected, any failure while its computer's own moved mark stands
-        // (its core may have stopped), but another `go`'s moving it on, goes
-        // back, so its link runs at one end, never none
+        // connected, any failure but another `go`'s moving it on goes back,
+        // unless its computer's own moved mark is read and stands not (its
+        // core never stopped). A mark unread is not known: the way back is
+        // tried, and if it fails too, it says to ask `--back` again (Codex's
+        // round on 6f714bbde).
         rec = match self.onward(rec).await {
-            Err(e) if !e.message.contains(crate::computer::MOVED_ON) && self.read().await.is_ok_and(|r| r["record"]["moved"] == true) => return Err(self.went_back(e).await),
+            Err(e) if !e.message.contains(crate::computer::MOVED_ON) && self.read().await.map_or(true, |r| r["record"]["moved"] == true) => return Err(self.went_back(e).await),
             r => r?,
         };
         if text(&rec, "step") == "connecting" {

@@ -104,6 +104,16 @@ pub fn blobs(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("bytes that are not what they claim are refused", r.status == 400 && r.message().contains("hash to"), &r);
     let r = api.signed(&keys, "HEAD", &blob_path(&claimed), None)?;
     s.ok("and not kept", r.status == 404, &r);
+    // the store's own put: bytes that are not the hash they're named by are
+    // never kept under it, even for a moment a step could end in (Codex's
+    // round on 6f714bbde); the hash's own bytes are
+    let lever = |text: &str, sha: &str| api.unsigned("POST", "/api/test/blob-put", Some(&serde_json::json!({ "text": text, "sha": sha })));
+    let (bad, good) = (lever("not these bytes", &sha256_hex(b"other bytes"))?, lever("these bytes", &sha256_hex(b"these bytes"))?);
+    s.ok(
+        "the blob store keeps no bytes under a hash that isn't theirs, as it stores them; its own bytes it keeps",
+        bad.status == 200 && bad.body["kept"] == false && bad.body["digest"] == sha256_hex(b"not these bytes") && good.body["kept"] == true,
+        &serde_json::json!({ "bad": bad.body, "good": good.body }),
+    );
     let tagged = bytes_of(1024, 7);
     let r = put_tagged(Some(&keys), &sha256_hex(&tagged), Some(&sha256_hex(&tagged)), tagged.clone())?;
     let stored = api.signed(&keys, "GET", &blob_path(&sha256_hex(&tagged)), None)?;

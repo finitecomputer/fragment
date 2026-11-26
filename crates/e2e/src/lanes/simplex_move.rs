@@ -142,16 +142,19 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     }
     // its handover failing once its core may have stopped (a pack's disk
     // error, an answer lost: here a 500 after its bridge packed), whatever
-    // the failure: the same way back, its computer running its link again
-    // (Codex's round on 45fc87eee)
+    // the failure, and its computer's mark then unread too (a computer
+    // gone unavailable): the same way back, its computer running its link
+    // again (Codex's rounds on 45fc87eee and 6f714bbde)
     let r = lever_with(api, &id, json!({ "op": "fail", "path": "/simplex/handover", "times": 1 }))?;
     anyhow::ensure!(r.status == 200, "the fail lever: {r}");
+    let r = lever_with(api, &id, json!({ "op": "fail-read", "times": 1 }))?;
+    anyhow::ensure!(r.status == 200, "the fail-read lever: {r}");
     let failed = mv("go")?;
     let again = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
     let forgot = mv("plan")?;
     let said = failed.body["message"].as_str().unwrap_or("");
     s.ok(
-        "its handover failing once its core may have stopped (an answer lost after it packed), whatever the failure: the same way back, its computer running its link again",
+        "its handover failing once its core may have stopped (an answer lost after it packed), whatever the failure, its mark then unread: the same way back, its computer running its link again",
         failed.status != 200 && said.contains("went back") && again && forgot.body["record"].is_null(),
         json!({ "go": failed.body, "plan": forgot.body }),
     );
