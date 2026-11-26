@@ -977,11 +977,11 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
   // are its person's alone, docs/secrets.md), since a page runs its
   // authors' code with its visitor's session; so its Use it asks here
   // (`KIND.vaultLend`), and the shell lends only what it offered that
-  // frame, to that connector: the Vault's secret set again with no value,
-  // bound to it under the name its code fills, its hosts, place and agents
-  // as they were (FIN-615, PR 12: a person's secret never moves). The
-  // connector's own token of that name goes, or it would fill first. The
-  // page names nothing it could change.
+  // frame, to that connector, under the name its code fills, and nothing
+  // else of the secret changes (`PUT /api/vault/{secret}/apps/{app}`; FIN-615,
+  // PR 12: a person's secret never moves). The connector's own token of
+  // that name goes, or it would fill first. The page names nothing it
+  // could change.
   const offers = new Map();
   const onVaultLend = async (e) => {
     if (e.data?.fragment !== KIND.vaultLend) return;
@@ -991,8 +991,7 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     const reply = { fragment: KIND.vaultLend, nonce: e.data.nonce, ok: false };
     const { bot, name, key } = offer;
     try {
-      const apps = [...(bot.apps ?? []).filter((a) => a.app !== name), { app: name, key }];
-      await api("PUT", `/api/vault/${seg(bot.name)}`, { hosts: bot.hosts, place: bot.place, agents: bot.agents, apps });
+      await api("PUT", `/api/vault/${seg(bot.name)}/apps/${seg(name)}`, { key });
       await api("DELETE", `/api/f/${seg(name)}/secrets/${key}`);
       reply.ok = true;
     } catch (err) {

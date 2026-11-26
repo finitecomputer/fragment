@@ -49,6 +49,18 @@ pub struct AppUse {
     pub key: String,
 }
 
+/// `PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under
+/// `key`, the name its code fills, in place of any name it had for that
+/// app; nothing else of the secret changes, so a lend never puts back what
+/// its person changed meanwhile (FIN-615, PR 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LendSecret {
+    /// The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`).
+    pub key: String,
+}
+
 /// Where a secret goes on a request: one of a header in a format
 /// (`{"header": "authorization", "format": "Bearer {}"}`), a query
 /// parameter (`{"query": "key"}`), a half of basic auth (`{"basic":

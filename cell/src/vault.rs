@@ -41,7 +41,7 @@ use fragment_core::catalog::Kind;
 use fragment_core::own_signin;
 use fragment_core::vault::{self as rules, Placing};
 use fragment_proto::computer::ProviderState;
-use fragment_proto::vault::{AppUse, Place, PutSecret, Secret, SecretRemoved};
+use fragment_proto::vault::{AppUse, LendSecret, Place, PutSecret, Secret, SecretRemoved};
 use fragment_proto::{ErrorCode, IdentityKind};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -358,6 +358,14 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
             put(env, person, name, &raw).await?
         }
         (Method::Delete, [name]) => delete(env, person, name).await?,
+        (Method::Put, [name, "apps", app]) => {
+            // of its form before any route is built (`op_path`)
+            if !fragment_proto::valid_fragment_name(app) {
+                return Err(CellError::invalid(format!("{:?} is not an app's fragment name (label--suffix)", app.chars().take(64).collect::<String>())));
+            }
+            let raw: Box<RawValue> = crate::json_body(body)?;
+            ask(env, person, &format!("{}/{app}", op_path("lend", name)?), Some(&raw)).await?
+        }
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
     };
     json_bytes(answer)
@@ -445,6 +453,7 @@ impl VaultCell {
             ["vault", "names"] => self.names(&crate::json_body(&req.bytes().await?)?)?,
             ["vault", "fill"] => self.fill(&crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "lent"] => self.lent(crate::json_body(&req.bytes().await?)?).await?,
+            ["vault", "lend", name, app] => self.lend(name, app, crate::json_body(&req.bytes().await?)?)?,
             ["vault", "own", provider] => self.own_put(provider, crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "own-keys"] => self.own_keys(crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "own-handover"] => self.hand_over(crate::json_body(&req.bytes().await?)?).await?,
@@ -536,6 +545,20 @@ impl VaultCell {
         self.binds_alone(name, &checked.apps)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, apps: checked.apps, set_at: held.set_at };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
+        self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
+        Ok(text)
+    }
+
+    /// `name` lent to `app` under `lend.key`, nothing else of it changed:
+    /// its `Secret`'s JSON. Read and written in one turn (nothing here
+    /// yields), so what its person set meanwhile stands, and one not held
+    /// is 404, never made.
+    fn lend(&self, name: &str, app: &str, lend: LendSecret) -> CellResult<String> {
+        let rows = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
+        let mut held: Secret = rows.first().map(stored).transpose()?.ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no secret {name} in your vault (GET /api/vault lists them)")))?;
+        held.apps = rules::lend(&held.apps, &held.place, app, &lend.key).map_err(|e| CellError::invalid(e.to_string()))?;
+        self.binds_alone(name, &held.apps)?;
+        let text = serde_json::to_string(&held).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
         Ok(text)
     }

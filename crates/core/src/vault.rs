@@ -248,6 +248,16 @@ fn apps(given: &[AppUse], placing: &Placing) -> Result<Vec<AppUse>, VaultError> 
     Ok(apps)
 }
 
+/// `held`'s apps (a secret placed as `place`) with `app` lent it under
+/// `key`, in place of any name it had for that app: checked as a put's
+/// apps are (`apps`), so a lend is held to the same rules.
+pub fn lend(held: &[AppUse], place: &Place, app: &str, key: &str) -> Result<Vec<AppUse>, VaultError> {
+    let (placing, _) = placing(place).map_err(|_| VaultError::Place("this secret's place is no longer one: set it again with its value".into()))?;
+    let mut apps: Vec<AppUse> = held.iter().filter(|a| a.app != app).cloned().collect();
+    apps.push(AppUse { app: app.to_string(), key: key.to_string() });
+    self::apps(&apps, &placing)
+}
+
 /// The secret of `held` (each a secret's name and its apps) that binds
 /// `app`'s `key`, other than `name`'s: an app's key is filled by one secret
 /// of its person's, so a put that would bind a second is refused.
@@ -508,6 +518,19 @@ mod tests {
         assert_eq!(binds_already("telegram-new", &tg, held), Some(("telegram-ada", tg[0].clone())));
         assert_eq!(binds_already("telegram-ada", &tg, held), None, "the secret set again is not another");
         assert_eq!(binds_already("x", &[app(APP, "THIRD")], held), None);
+    }
+
+    /// Goal: a lend adds one app's name for a secret and nothing else, held
+    /// to a put's rules. Method: a new app, the same app renamed, a signing
+    /// key, a bad name.
+    #[test]
+    fn a_lend_names_one_app_once_and_is_held_to_a_puts_rules() {
+        let bearer = Place { header: Some("authorization".into()), format: Some("Bearer {}".into()), ..Place::default() };
+        let held = [app("b--k3x9", "OTHER")];
+        assert_eq!(lend(&held, &bearer, APP, "TOKEN"), Ok(vec![app("b--k3x9", "OTHER"), app(APP, "TOKEN")]));
+        assert_eq!(lend(&[app(APP, "OLD")], &bearer, APP, "NEW"), Ok(vec![app(APP, "NEW")]), "an app's name for it replaced, never two");
+        assert!(matches!(lend(&[], &sign(), APP, "TOKEN"), Err(VaultError::Apps(_))), "a key that signs is lent to no app");
+        assert!(matches!(lend(&[], &bearer, APP, "token"), Err(VaultError::Apps(_))));
     }
 
     /// Goal: a dev or e2e fleet's fakes may be a Vault secret's hosts, as an

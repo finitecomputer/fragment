@@ -840,8 +840,26 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
         mine["status"] == "succeeded" && upstream.hits(&format!("/spell/{own_value}")).len() == 1 && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
         &mine,
     );
+    // a connector lent a key, then given other code (a fork's): what it was
+    // lent while its owner's alone to edit is not the new code's to send,
+    // as its own secrets go then (plane.rs)
+    let connector = s.named(api, &ada, "lent-tg")?;
+    let made = api.create_with(&ada, json!({ "name": connector, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "a Telegram connector: {made}");
+    s.owned(&made.body, &ada);
+    let tg_value = format!("sk-tg-{}", &Keys::generate().pubkey_hex()[..20]);
+    let lent_tg = vault(&ada, "tg-key", json!({ "value": tg_value, "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&connector) }))?;
+    anyhow::ensure!(lent_tg.status == 200, "lent to the connector: {lent_tg}");
+    ship(s, &made.body, JOBS_APP, JOBS_JSON);
+    private(&ada, &connector)?;
+    let unmade = spell(&ada, &connector, "lent-unmade", "127.0.0.1")?;
+    s.ok(
+        "a connector that ran other code is lent nothing its owner's Vault lent it as one, and says so",
+        unmade["status"] == "held" && unmade["error"].as_str().is_some_and(|e| e.contains("was a connector")) && upstream.hits(&format!("/spell/{tg_value}")).is_empty(),
+        &unmade,
+    );
     let logs = super::vault::logs(s);
-    s.ok("no lent value is in any node log", !logs.is_empty() && !logs.contains(&lent_value), format!("{} bytes of logs", logs.len()));
+    s.ok("no lent value is in any node log", !logs.is_empty() && !logs.contains(&lent_value) && !logs.contains(&tg_value), format!("{} bytes of logs", logs.len()));
     Ok(())
 }
 

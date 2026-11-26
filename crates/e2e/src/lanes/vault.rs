@@ -160,6 +160,28 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
         format!("{b} {gone}"),
     );
 
+    // a lend: one app's name for a secret, and nothing else of it
+    let lend = |keys: &Keys, secret: &str, app: &str, key: &str| api.signed(keys, "PUT", &format!("/api/vault/{secret}/apps/{app}"), Some(&json!({ "key": key })));
+    let linear_before = held(api, "linear")?;
+    let lent = lend(&ada, "linear", "dash--k3x9", "LINEAR")?;
+    let renamed = lend(&ada, "linear", "dash--k3x9", "LINEAR_KEY")?;
+    let linear_after = held(api, "linear")?;
+    s.ok(
+        "a person lends a secret to an app: its binding alone changes (its hosts, place, agents and setAt as they were), and lent again under another name it is named once",
+        lent.status == 200
+            && lent.body["apps"] == json!([{ "app": "dash--k3x9", "key": "LINEAR" }])
+            && renamed.body["apps"] == json!([{ "app": "dash--k3x9", "key": "LINEAR_KEY" }])
+            && ["hosts", "place", "agents", "setAt"].iter().all(|f| linear_after[*f] == linear_before[*f])
+            && !lent.text.contains(&rotated),
+        format!("{lent} {renamed}"),
+    );
+    let (signer, missing, by_agent, bad_app) = (lend(&ada, "nostr-ada", "dash--k3x9", "NOSTR")?, lend(&ada, "nothing-here", "dash--k3x9", "K")?, lend(&agent, "linear", "dash--k3x9", "K")?, lend(&ada, "linear", "dash", "K")?);
+    s.ok(
+        "a lend of a key that signs is refused (400), of a secret not held 404, by their agent 403, to no app's name 400, and none writes anything",
+        signer.status == 400 && missing.status == 404 && by_agent.status == 403 && bad_app.status == 400 && held(api, "linear")? == linear_after && held(api, "nostr-ada")?["apps"].is_null(),
+        format!("{signer} {missing} {by_agent} {bad_app}"),
+    );
+
     // the limit: at most 64, a 65th refused, setting one again still fine
     for i in 0..64 {
         let r = put(api, &bob, &format!("k{i}"), &json!({ "value": "v", "hosts": ["api.example.com"], "agents": agents }))?;
