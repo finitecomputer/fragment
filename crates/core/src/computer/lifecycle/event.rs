@@ -106,6 +106,11 @@ pub enum Event {
     SaveFailed { generation: u64, seq: u64, why: String },
     /// The sleep `generation` finished: the container is gone.
     Asleep { generation: u64 },
+    /// A disk's sleep `generation` finished, its final flush not ending in
+    /// a clean head: what its guest wrote since its wait's last look may
+    /// not have shipped (FPAC's crash bound, about a second). Its life ends
+    /// unsaved, saying so (Codex on #1552).
+    AsleepUnshipped { generation: u64 },
     /// The container stopped on its own (a crash, the runtime's idle stop).
     /// Heard during a sleep's stop, which signalled it, it is nothing: that
     /// stop reports its end itself (`Asleep`).
@@ -142,6 +147,15 @@ pub enum Event {
     /// starts it. Nothing else: no start is made, and one begun since (a
     /// wake as it was chosen) restores the save chosen already.
     SaveChosen,
+    /// Its owner's export, begun at `since_ms`, asks for a save of its disk
+    /// (which keeps none of its own: docs/computers.md, "A disk"), taken
+    /// awake under the hold as any awake save; the export wakes it. Nothing
+    /// for a computer with saves of its own, nor once a save landed since
+    /// (the export's look raced it: Codex on #1552).
+    ExportAsked { since_ms: i64 },
+    /// Its owner's export stopped waiting for that save (its wait ran out):
+    /// the ask goes, so no later moment takes a save nobody waits for.
+    ExportDropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

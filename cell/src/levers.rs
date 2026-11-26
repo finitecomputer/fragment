@@ -8,7 +8,7 @@
 //!   POST /api/test/ledger   {identity, op, …}: a lever on that person's ledger
 //!   POST /api/test/keys     {fragment, op, …}: seal or open as that fragment
 //!   POST /api/test/fragment {fragment, op, …}: a lever on that fragment
-//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on, fail-restore)
+//!   POST /api/test/computer {computer, op, …}: a lever on that computer (kill, saves, fail-saves, hang-backups, alive-check, always-on, fail-restore, fpac, fpac-head)
 //!   POST /api/test/registry {…}: a lever on the registry (the whole deployment's)
 //!   POST /api/test/mail     {to, subject, text}: one message, as the platform sends it
 //!
@@ -205,7 +205,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             /// and `row` are `legacy-grants`', `provider` is `legacy-own-key`'s
             /// and `legacy-sign-in`'s, `key` is `legacy-own-key`'s,
             /// `row` and `month` `legacy-uses`', `total`, `free` and `data` are `disk`'s,
-            /// `save` is `fail-restore`'s, `path` is `damage`'s.
+            /// `save` is `fail-restore`'s, `path` is `damage`'s, `head` is
+            /// `fpac-head`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -244,6 +245,12 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 /// `damage`'s: its bridge's path whose next `times` answers come damaged.
                 #[serde(default)]
                 path: Option<String>,
+                /// `fpac-head`'s: a head its disk takes as its newest.
+                #[serde(default)]
+                head: Option<String>,
+                /// `fpac-objects`': the life whose objects it lists.
+                #[serde(default)]
+                epoch: Option<u64>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -262,7 +269,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save, "path": t.path });
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save, "path": t.path, "head": t.head, "epoch": t.epoch });
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's

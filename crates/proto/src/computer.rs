@@ -627,6 +627,9 @@ pub enum RestoreSource {
     /// Nothing: a computer never saved (its first start, or one whose saves
     /// all failed).
     Nothing,
+    /// Its disk (docs/computers.md, "A disk"): `/data` mounted as it was
+    /// at its last flush, nothing restored.
+    Disk,
 }
 
 /// How one of a computer's lives (a start that came up) ended.

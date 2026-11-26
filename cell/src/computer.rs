@@ -55,10 +55,11 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_ALIVE_MS, DISK_DRAIN_MS, DISK_EXIT_WAIT_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
-use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
+use fragment_core::computer::fpac;
+use fragment_core::computer::start_line::{self, DiskFacts, Facts, SleepFacts, Starts, Woke};
 use fragment_core::ledger::uses::{self, Used};
 use fragment_core::ledger::{Month, Spend};
 use fragment_core::own_signin;
@@ -151,6 +152,12 @@ const RESTORED_MARK: &str = "mkdir -p /run/computer && touch /run/computer/resto
 const HOLD_MARK: &str = "rm -f /run/computer/held /run/computer/unheld && mkdir -p /run/computer /data/work && touch /run/computer/hold";
 const HOLD_UNMARK: &str = "rm -f /run/computer/hold /run/computer/held /run/computer/unheld";
 const HELD_TEST: &str = "test -e /run/computer/held";
+/// A disk's daemon's status (docs/computers.md, "A disk"), within
+/// `DISK_STATUS_EXEC_MS`, every `DISK_DRAIN_EVERY_MS` while a sleep waits.
+const DISK_STATUS: &str = "/usr/local/bin/fpac status";
+const DISK_STATUS_EXEC_MS: i64 = 5_000;
+const DISK_DRAIN_EVERY_MS: u64 = 500;
+const _: () = assert!(SIZES_READ_MS + DISK_DRAIN_MS + DISK_STATUS_EXEC_MS + (DISK_DRAIN_EVERY_MS as i64) < HOLD_DEADLINE_MS, "a disk's wait, its measure and its last read too, fits a hold's deadline");
 const HELD_READ: &str = "cat /run/computer/held";
 /// A guest's word on a hold it has not answered (docs/computers.md, "The
 /// hold"), read only once the hold's wait ran out, as logged.
@@ -377,6 +384,10 @@ enum MetaKey {
     SlowTell,
     /// The test lever's wait before a start's owner is told (`slow-start-tell`), in ms.
     SlowStartTell,
+    /// Its disk's last fallback: `{generation, found, to}` (the fpac lever's).
+    DiskFell,
+    /// When its wipe first found its container gone (its disk's settle).
+    WipeGone,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -439,6 +450,8 @@ impl MetaKey {
             MetaKey::RelayDay => "relay_day",
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
+            MetaKey::DiskFell => "disk_fell",
+            MetaKey::WipeGone => "wipe_gone",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -470,6 +483,30 @@ struct Planned {
     freeze: bool,
     /// What its start's line says it restores (`start_line`).
     facts: Facts,
+}
+
+/// A head a disk's life posts (`ComputerEgress::disk_head`).
+#[derive(Deserialize)]
+struct DiskHeadAsk {
+    epoch: u64,
+    line: String,
+}
+
+/// The heads a disk's start was handed (`Computer::disk_handed`): its
+/// generation, the head and the one before it, and what its guest found of
+/// the head it could not mount.
+type Handed = (u64, Option<fpac::Head>, Option<fpac::Head>, fpac::Unopened);
+
+/// A computer's disk row (`Computer::disk`).
+#[derive(Debug, Clone, Copy)]
+struct DiskRow {
+    volume: u64,
+    head: Option<fpac::Head>,
+    back: Option<fpac::Head>,
+    slept_unshipped: Option<u64>,
+    /// A life of this disk came up (its guest ran): what it holds is
+    /// someone's, never started over.
+    came_up: bool,
 }
 
 /// Why a start did not come up.
@@ -548,6 +585,18 @@ pub struct ComputerCell {
     /// start that waits for its guest waits for (`alive`). In memory only:
     /// a start and its guest's reads are one isolate's.
     heard_ms: std::cell::Cell<Option<i64>>,
+    /// Its disk's start under way found its head would not mount, as its
+    /// guest said (`computer/disk-unusable`): that start's generation, why,
+    /// and whether its device was blank. In memory only, as `heard_ms`.
+    disk_unusable: RefCell<Option<(u64, String, fpac::Unopened)>>,
+    /// Its disk's sleep's wait, for its stop's line: the generation, what
+    /// its daemon said last, and how long it waited. In memory only.
+    disk_drained: RefCell<Option<(u64, Option<fpac::Status>, i64)>>,
+    /// The heads its disk's start was handed (the head it opens from, and
+    /// the one before it), its generation, and, once its guest found the
+    /// head would not open, whether its device was blank: what its fallback
+    /// is decided from (`fpac::fallback`). In memory only.
+    disk_handed: RefCell<Option<Handed>>,
     /// Its start under way, and the wake asked it answers, for that start's
     /// log line (`start_line`). In memory only: a line its isolate took
     /// with it is not written.
@@ -596,6 +645,9 @@ impl DurableObject for ComputerCell {
             states_told: std::cell::Cell::new(0),
             wiped: std::cell::Cell::new(wiped),
             heard_ms: std::cell::Cell::new(None),
+            disk_unusable: RefCell::new(None),
+            disk_drained: RefCell::new(None),
+            disk_handed: RefCell::new(None),
             starts: RefCell::default(),
             armed: RefCell::new(None),
             relays: RefCell::default(),
@@ -701,6 +753,18 @@ struct WakeBody {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ExportAsk {
     owner: String,
+    /// When its export began: a disk's save from before it is not its
+    /// export's (`computer/export`).
+    #[serde(default)]
+    since: Option<i64>,
+    /// Whether a disk asleep is woken for its save (its export's last look,
+    /// past its wait, wakes nothing, and drops the ask: `Event::ExportDropped`).
+    #[serde(default = "woken")]
+    wake: bool,
+}
+
+fn woken() -> bool {
+    true
 }
 
 /// `computer/export-read`: a range of one of that save's records.
@@ -799,6 +863,37 @@ struct Exited {
 struct GuestAsk {
     #[serde(default)]
     simplex: bool,
+    /// A disk's boot's numbers (`DiskFacts`'s), with its first read.
+    #[serde(default)]
+    disk: GuestDisk,
+    /// The life a disk start's guest is (its route's: `ComputerEgress::handle`).
+    #[serde(default)]
+    epoch: Option<u64>,
+}
+
+/// What a disk's boot says its mount did (`computer/guest`).
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct GuestDisk {
+    mount_ms: Option<u64>,
+    misses: Option<u64>,
+    refetches: Option<u64>,
+}
+
+/// Why a disk's boot found its head would not mount (`computer/disk-unusable`,
+/// from its disk's route: the life its start handed it, and that head;
+/// `blank`, its device was blank: nothing of it ever shipped).
+#[derive(Deserialize)]
+struct DiskUnusable {
+    epoch: u64,
+    #[allow(dead_code)]
+    head: Option<String>,
+    why: String,
+    #[serde(default)]
+    blank: bool,
+    /// its device opened, but its filesystem would not mount
+    #[serde(default)]
+    unmountable: bool,
 }
 
 /// `computer/relay-open`'s body: the host it is for (for its log).
@@ -868,6 +963,13 @@ struct TestLever {
     /// `damage-stored`'s: the save whose copy in R2 it damages.
     #[serde(default)]
     save: Option<u64>,
+    /// `fpac-head`'s: the head its disk takes as its newest, as a life that
+    /// posted one that will not open would leave it.
+    #[serde(default)]
+    head: Option<String>,
+    /// `fpac-objects`': the life whose objects it lists.
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 /// `computer/tab` (entry.mjs, `port`): a port tab opened, closed, or used
@@ -1373,7 +1475,7 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
             return Ok(Some(match life.saving() {
-                Some(Saving::Stop { .. }) => Event::Asleep { generation },
+                Some(Saving::Stop { .. }) => self.stopped(generation),
                 _ => Event::Exited { generation },
             }));
         }
@@ -1408,7 +1510,7 @@ impl ComputerCell {
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
-                        reported.push(Event::Asleep { generation });
+                        reported.push(self.stopped(generation));
                     }
                 }
                 Action::Meter { from_ms, to_ms } => {
@@ -1598,7 +1700,8 @@ impl ComputerCell {
     /// armed. False: that start was superseded.
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
-        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress()]).await?;
+        let disk = self.disk_props(id, generation)?;
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress(), disk]).await?;
         let done = armed.as_bool() == Some(true);
         if done {
             *self.armed.borrow_mut() = Some((generation, hosts));
@@ -1743,17 +1846,31 @@ impl ComputerCell {
     }
 
     /// The environment every image may rely on (docs/computers.md).
-    fn guest_env(&self, id: &str, image: &str, restoring: bool) -> Value {
+    fn guest_env(&self, id: &str, image: &str, plan: &Restore) -> Value {
         let mut env = json!({
             "FRAGMENT_COMPUTER": id,
             "FRAGMENT_API": "http://api.fragment.internal",
             "FRAGMENT_MODEL": "http://model.fragment.internal",
             "FRAGMENT_IMAGE": image,
         });
-        if restoring {
-            env["RESTORE_PENDING"] = json!("1");
+        match plan {
+            Restore::Backup => env["RESTORE_PENDING"] = json!("1"),
+            // its boot mounts /data from its disk (docs/computers.md, "A disk")
+            Restore::Disk => env["FRAGMENT_DISK"] = json!("fpac"),
+            Restore::Snapshot { .. } | Restore::Nothing => {}
         }
         env
+    }
+
+    /// What its disk's route answers start `generation`'s guest
+    /// (cell/fpac.mjs's `disk`): the only disk it reaches, the only life it
+    /// writes under (its epoch, the generation), and the head it opens
+    /// from, as stored now. Null for a computer on no disk.
+    fn disk_props(&self, id: &str, generation: u64) -> CellResult<JsValue> {
+        let Some(disk) = self.disk()? else { return Ok(JsValue::NULL) };
+        let prefix = fpac::disk_prefix(id).ok_or_else(|| CellError::host(format!("{id} names no disk")))?;
+        let name = prefix.trim_start_matches("disks/").trim_end_matches('/').to_string();
+        Ok(js::to_js(&json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) })))
     }
 
     /// One start: from the snapshot when it caches the current save for the
@@ -1794,6 +1911,11 @@ impl ComputerCell {
             }
         };
         self.starts.borrow_mut().planned(generation, planned.facts);
+        if planned.plan == Restore::Disk {
+            // what its last sleep left unshipped, the DO's own reading then
+            let slept_unshipped = self.disk().ok().flatten().and_then(|d| d.slept_unshipped);
+            self.starts.borrow_mut().disk(generation, DiskFacts { slept_unshipped, ..Default::default() });
+        }
         let from = planned.plan.source();
         let save_id = planned.save.as_ref().map(|s| s.id.clone());
         let started = self.try_start(generation, &planned).await;
@@ -1812,6 +1934,8 @@ impl ComputerCell {
         }
         match started {
             Ok(()) => {
+                // (a disk's guest that read its view kept it as come up:
+                // `computer/guest`)
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
                 match self.update_saves(came_up) {
                     // one line per start that came up (lesson 14): what it restored
@@ -1829,6 +1953,48 @@ impl ComputerCell {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Blocked);
                 console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "start": generation, "overtaken": "as it started" }));
                 Event::StartBlocked { generation }
+            }
+            Err(Unstarted::Unusable(why)) if from == RestoreSource::Disk => {
+                // its guest found its disk's head would not mount: the head
+                // before its newest life's is next, at once and no strike
+                // (that life's writes lost, and logged); with none, a strike
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
+                // decided from the heads this start was handed (its guest's
+                // own claim may have moved the stored one since: that is this
+                // start's, never another life's), while this start still runs
+                // (one after it, begun as this one awaited, is not this
+                // start's to roll back under) and the head stored is the one
+                // handed or this start's own (Codex on #1552)
+                let handed = self.disk_handed.borrow_mut().take().filter(|h| h.0 == generation);
+                let runs = self.lifecycle().ok().and_then(|l| l.running()) == Some(generation);
+                let disk = self.disk().ok().flatten();
+                let stored = disk.and_then(|d| d.head);
+                // a disk none of whose lives came up holds nothing of anyone's
+                let came_up = disk.is_none_or(|d| d.came_up);
+                let (fell, older) = match handed {
+                    Some((_, head, back, found)) if runs && (stored == head || stored.is_some_and(|s| s.epoch == generation)) => match fpac::fallback(head.as_ref(), back.as_ref(), found, came_up) {
+                        fpac::Fallback::To(b) => {
+                            let moved = self.set_disk_heads(Some(&b), None).is_ok();
+                            (Some(b.encode()), moved)
+                        }
+                        fpac::Fallback::Fresh => {
+                            // a new disk: none of its lives has come up yet
+                            let moved = self.set_disk_heads(None, None).is_ok() && self.exec("UPDATE disk SET came_up = 0 WHERE id = 0", vec![]).is_ok();
+                            (Some("none (a new disk)".to_string()), moved)
+                        }
+                        fpac::Fallback::Nowhere => (None, false),
+                    },
+                    _ => (None, false),
+                };
+                let found = handed.map_or(fpac::Unopened::Unusable, |h| h.3);
+                if let Some(to) = fell.as_ref().filter(|_| older) {
+                    if let Err(e) = self.set_meta(MetaKey::DiskFell, &json!({ "generation": generation, "found": found.name(), "to": to }).to_string()) {
+                        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "fell unkept", "error": e.message }));
+                    }
+                }
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unusable", "generation": generation, "why": why, "found": found.name(), "head": stored.map(|h| h.encode()), "fellBackTo": fell.filter(|_| older) }));
+                let _ = self.destroy(generation, "its disk would not mount").await;
+                Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Unusable(why)) => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Unusable);
@@ -1863,6 +2029,14 @@ impl ComputerCell {
                 let _ = self.destroy(generation, "the snapshot did not start").await;
                 Event::SnapshotFailed { generation, why: e.message }
             }
+            Err(Unstarted::Dead(why)) if from == RestoreSource::Disk => {
+                // its guest never read its view: its disk not mounted in
+                // time, or its boot stuck. A failed start, as any
+                self.starts.borrow_mut().failing(generation, start_line::Failed::Dead);
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "dead", "generation": generation, "why": why }));
+                let _ = self.destroy(generation, "its disk start came up dead").await;
+                Event::StartFailed { generation, why }
+            }
             Err(Unstarted::Dead(why)) => {
                 self.starts.borrow_mut().failing(generation, start_line::Failed::Dead);
                 // as a snapshot that would not start : its snapshot
@@ -1889,6 +2063,20 @@ impl ComputerCell {
         let image = self.must(MetaKey::Image)?;
         // what the start runs is what it looked at: the version it comes up on
         let reference = self.look().await?;
+        // a disk's start restores nothing: its guest mounts its disk, and
+        // the start waits for its first read of its view, made once it is
+        // mounted (the lever's `alive-check` may shorten that wait)
+        if self.disk()?.is_some() {
+            let new_image = self.update_saves(|s| {
+                let new_image = s.last_image().map(|ran| Some(ran) != reference.as_deref());
+                s.starting(generation, Restore::Disk.source());
+                new_image
+            })?;
+            let lever = self.take_alive_check()?;
+            let alive_ms = Some(lever.map_or(DISK_ALIVE_MS, |(ms, _)| ms));
+            let facts = Facts { path: Restore::Disk.source(), why: None, bytes: None, new_image };
+            return Ok(Planned { plan: Restore::Disk, image, reference, save: None, alive_ms, freeze: lever.is_some_and(|(_, freeze)| freeze), facts });
+        }
         let snapshots = reference.as_deref().filter(|_| self.cfg.computer_snapshots);
         let fell_back = self.lifecycle().is_ok_and(|l| l.fell_back());
         let (plan, save, facts) = self.update_saves(|s| {
@@ -1897,7 +2085,7 @@ impl ComputerCell {
             // (what it runs: a snapshot's own image, `Saves::plan`)
             let runs = match &plan {
                 Restore::Snapshot { image, .. } => Some(image.as_str()),
-                Restore::Backup | Restore::Nothing => reference.as_deref(),
+                Restore::Backup | Restore::Nothing | Restore::Disk => reference.as_deref(),
             };
             let (why, new_image) = (s.full_why(snapshots, fell_back), s.last_image().map(|ran| Some(ran) != runs));
             s.starting(generation, plan.source());
@@ -1911,7 +2099,7 @@ impl ComputerCell {
         // one it ran while its update waits for room (`Saves::plan`)
         let reference = match &plan {
             Restore::Snapshot { image, .. } => Some(image.clone()),
-            Restore::Backup | Restore::Nothing => reference,
+            Restore::Backup | Restore::Nothing | Restore::Disk => reference,
         };
         // a start from a snapshot waits for its guest (#362); the lever's
         // `alive-check` makes its next start wait so, whatever it restores
@@ -1919,7 +2107,7 @@ impl ComputerCell {
         let alive_ms = match (&plan, lever) {
             (_, Some((ms, _))) => Some(ms),
             (Restore::Snapshot { .. }, None) => Some(ALIVE_MS),
-            (Restore::Backup | Restore::Nothing, None) => None,
+            (Restore::Backup | Restore::Nothing | Restore::Disk, None) => None,
         };
         let freeze = lever.is_some_and(|(_, freeze)| freeze);
         Ok(Planned { plan, image, reference, save, alive_ms, freeze, facts })
@@ -1944,10 +2132,18 @@ impl ComputerCell {
     async fn try_start(&self, generation: u64, planned: &Planned) -> Result<(), Unstarted> {
         let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
-        let env = js::to_js(&self.guest_env(&id, &planned.image, planned.plan == Restore::Backup));
+        let env = js::to_js(&self.guest_env(&id, &planned.image, &planned.plan));
         let snapshot_js = match &planned.plan {
             Restore::Snapshot { id, .. } => JsValue::from_str(id),
-            Restore::Backup | Restore::Nothing => JsValue::NULL,
+            Restore::Backup | Restore::Nothing | Restore::Disk => JsValue::NULL,
+        };
+        let disk = match planned.plan {
+            Restore::Disk => {
+                let d = self.disk()?.ok_or_else(|| CellError::host("a disk start of a computer on no disk"))?;
+                *self.disk_handed.borrow_mut() = Some((generation, d.head, d.back, fpac::Unopened::Unusable));
+                self.disk_props(&id, generation)?
+            }
+            _ => JsValue::NULL,
         };
         // the size its awake time is priced at (decision 13's, by default)
         let size = fragment_core::price::instance_size(fragment_core::price::INSTANCE).map_err(CellError::host)?;
@@ -1973,7 +2169,7 @@ impl ComputerCell {
         let started_ms = js::now_ms();
         // every intercept registered before the container starts, all at
         // once: its guest's first call never races them (entry.mjs `start`)
-        let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64)];
+        let args = [g.clone(), planned.image.as_str().into(), snapshot_js, env, js::to_js(&size), id.as_str().into(), js::to_js(&hosts), self.codestorage_through_egress(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), disk];
         // as armed from its start, for a read of its view during it to add to
         *self.armed.borrow_mut() = Some((generation, hosts));
         // a guest held until the start lets it go (a restore's gate, a
@@ -2070,10 +2266,11 @@ impl ComputerCell {
                     self.mark(&g, HOLD_UNMARK, MARK_EXEC_MS).await.map_err(|e| CellError::host(format!("letting go of the snapshot's hold: {}", e.message)))?;
                 }
             }
-            Restore::Nothing => {}
+            // its boot mounts its disk and its guest runs: nothing to restore
+            Restore::Nothing | Restore::Disk => {}
         }
         if let Some(bound) = planned.alive_ms {
-            let waited = self.heard_from(started_ms, bound).await?;
+            let waited = self.heard_from(generation, started_ms, bound).await?;
             console_log!("{}", json!({ "computer": id, "alive": generation, "heardInMs": waited }));
         }
         Ok(())
@@ -2089,6 +2286,10 @@ impl ComputerCell {
     async fn read_disk(&self, generation: u64, sizes: bool) -> Option<fragment_core::computer::ComputerDisk> {
         let at = js::now_ms();
         let (read, bound, keep) = if sizes { (sizes_read(&self.left_out.borrow()), SIZES_READ_MS, fragment_core::computer::SIZES_READ_MAX_BYTES) } else { (DISK_READ.to_string(), DISK_READ_MS, 4096) };
+        // on a disk, its /data is a filesystem of its own (Codex on #1552),
+        // whose used bytes are its data: its own count, never a walk's
+        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+        let read = if on_disk { fragment_core::computer::read_on_disk(&read) } else { read };
         let argv = js::to_js(&json!(["sh", "-c", read]));
         let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(bound as f64), JsValue::from_f64(keep as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
         // a sizes read's answer is read whatever its exit (a walk that a
@@ -2100,7 +2301,7 @@ impl ComputerCell {
             // patterns name a person's files (Codex on #1426)
             Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
         };
-        let disk = if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
+        let disk = if on_disk { fragment_core::computer::disk_of_df_on_disk(&out, at, generation) } else if sizes { disk_of_sizes(&out, at, generation) } else { disk_of_df(&out, at, generation) };
         let kept = disk.map(|d| self.update_saves(|s| s.measured(d)));
         // what takes its disk, its owner's Storage: a cache of its own (paths
         // of a person's files: kept, never logged)
@@ -2125,16 +2326,48 @@ impl ComputerCell {
         disk
     }
 
+    /// A disk's Storage as it sleeps (docs/computers.md, "A disk"): one
+    /// `df` of its `/data` (`DISK_SLEEP_ARGV`, run as it is: core pins it to
+    /// that command alone, no walk beside it), its used bytes its data, kept
+    /// and told as any read's (`read_disk`'s line). Best effort, as a read is.
+    async fn measure_asleep(&self, generation: u64) {
+        let at = js::now_ms();
+        let argv = js::to_js(&fragment_core::computer::DISK_SLEEP_ARGV);
+        let read = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_READ_MS as f64), JsValue::from_f64(4096.0)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+        let (out, exit, failed) = match read {
+            Ok(o) if o["exitCode"] == 0 => (o["output"].as_str().unwrap_or_default().to_string(), o["exitCode"].clone(), None),
+            Ok(o) => (String::new(), o["exitCode"].clone(), None),
+            Err(e) => (String::new(), Value::Null, Some(format!("{:?}", e.code))),
+        };
+        let disk = fragment_core::computer::disk_of_df_on_disk(&out, at, generation);
+        match disk.map(|d| (d, self.update_saves(|s| s.measured(d)))) {
+            Some((d, Ok(_))) => {
+                let room = self.saves().ok().and_then(|s| s.disk()).map(|k| fragment_core::computer::room(&k));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": { "total": d.total, "free": d.free, "data": d.data, "room": room }, "generation": generation }))
+            }
+            _ => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "unread", "generation": generation, "exit": exit, "answerBytes": out.len(), "error": failed })),
+        }
+    }
+
     /// Waits, at most `bound_ms`, for the guest of the start made at
     /// `started_ms` to read its own view (`fragment_core::computer::alive`):
     /// a container Cloudflare restores from a snapshot can come up dead,
     /// taking the DO's execs for a moment and then nothing, its guest never
     /// heard from (#362). Answers how long it waited.
-    async fn heard_from(&self, started_ms: i64, bound_ms: i64) -> Result<i64, Unstarted> {
+    /// A disk's boot that found its head would not mount says so before
+    /// it exits (`computer/disk-unusable`): answered at once as `Unusable`.
+    async fn heard_from(&self, generation: u64, started_ms: i64, bound_ms: i64) -> Result<i64, Unstarted> {
         let waiting = js::now_ms();
         // bounded: `alive` answers `Dead` once `bound_ms` pass
         loop {
             let now = js::now_ms();
+            let unusable = self.disk_unusable.borrow_mut().take_if(|(g, _, _)| *g == generation);
+            if let Some((_, why, found)) = unusable {
+                if let Some(handed) = self.disk_handed.borrow_mut().as_mut().filter(|h| h.0 == generation) {
+                    handed.3 = found;
+                }
+                return Err(Unstarted::Unusable(format!("its disk's head: {why}")));
+            }
             match alive(self.heard_ms.get(), started_ms, waiting, now, bound_ms) {
                 Alive::Heard => return Ok(now - waiting),
                 Alive::Dead => return Err(Unstarted::Dead(format!("its guest did not read its view within {} s of its start", bound_ms / 1000))),
@@ -2240,7 +2473,9 @@ impl ComputerCell {
     /// One cancelled before it began does nothing.
     async fn hold(&self, generation: u64, sleeping: bool) -> Option<Event> {
         let asked = self.lifecycle().ok().and_then(|l| l.saving()).filter(|s| matches!(s, Saving::Hold { .. }))?;
-        let answer = self.hold_once(generation, sleeping).await;
+        // a disk's sleep waits for it to ship; its export's save is held as any
+        let drains = sleeping && self.lifecycle().is_ok_and(|l| l.disk());
+        let answer = if drains { self.drain(generation, asked).await } else { self.hold_once(generation, sleeping).await };
         let now = self.lifecycle().ok().and_then(|l| l.saving());
         (now == Some(asked) || now.is_none()).then_some(answer)
     }
@@ -2286,6 +2521,49 @@ impl ComputerCell {
         let unheld = if held { None } else { Some(self.unheld(&g).await) };
         console_log!("{}", json!({ "computer": id, "hold": generation, "held": held, "sleep": sleeping, "ms": js::now_ms() - t0, "tries": polled["tries"], "last": polled["last"], "unheld": unheld }));
         Event::Held { generation, held }
+    }
+
+    /// A disk's sleep's wait (docs/computers.md, "A disk"): its port tabs
+    /// closed, its daemon's writes shipping while its guest still runs, read
+    /// from its status until nothing is unshipped, `DISK_DRAIN_MS` pass, or
+    /// a wake cancels the sleep (`asked` is no longer under way). Nothing
+    /// is held: what is left ships in its final flush, on the stop's signal.
+    /// What it read last, and how long it waited, are the stop's line's.
+    async fn drain(&self, generation: u64, asked: Saving) -> Event {
+        let g = JsValue::from_f64(generation as f64);
+        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+        if !self.container_running().await {
+            let _ = self.destroy(generation, "asleep").await;
+            return Event::Asleep { generation };
+        }
+        let why = if matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { restarting: true, .. })) { "restarting" } else { "asleep" };
+        let _ = self.call("closeTabs", &[why.into()]).await;
+        // what takes its disk, its owner's Storage, as it sleeps: a disk is
+        // never saved, so this is its measure (Codex on #1552): its
+        // filesystem's own count, one `df`, never a walk of its files, which
+        // grows with them (nothing in a sleep may)
+        self.measure_asleep(generation).await;
+        let t0 = js::now_ms();
+        let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
+        let mut last = None;
+        // bounded: at most `DISK_DRAIN_MS`, each read within its own bound
+        loop {
+            let read = self.call("exec", &[g.clone(), argv.clone(), JsValue::from_f64(DISK_STATUS_EXEC_MS as f64)]).await.and_then(|o| js::from_js(&o).map_err(CellError::host));
+            if let Some(status) = read.ok().and_then(|o| fpac::Status::read(o["output"].as_str().unwrap_or_default())) {
+                last = Some(status);
+            }
+            let wanted = self.lifecycle().ok().and_then(|l| l.saving()) == Some(asked);
+            if last.is_some_and(|s| s.unshipped_bytes == 0) || js::now_ms() - t0 >= DISK_DRAIN_MS || !wanted {
+                break;
+            }
+            Delay::from(std::time::Duration::from_millis(DISK_DRAIN_EVERY_MS)).await;
+        }
+        let waited = js::now_ms() - t0;
+        *self.disk_drained.borrow_mut() = Some((generation, last, waited));
+        console_log!("{}", json!({ "computer": id, "drain": generation, "ms": waited, "unshipped": last.map(|s| s.unshipped_bytes) }));
+        // held only once it saw nothing left to ship: a disk never stops
+        // with writes in it unshipped (Codex on #1552)
+        Event::Held { generation, held: last.is_some_and(|s| s.unshipped_bytes == 0) }
     }
 
     /// What the guest of start `g` says of a hold it has not answered (its
@@ -2532,6 +2810,9 @@ impl ComputerCell {
     async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+        if self.lifecycle().is_ok_and(|l| l.disk()) {
+            return self.stop_disk(generation, &id).await;
+        }
         let t0 = js::now_ms();
         let mut exited = None;
         if self.container_running().await {
@@ -2561,6 +2842,58 @@ impl ComputerCell {
         // signal, whether the destroy took, and how long the stop took
         console_log!("{}", json!({ "computer": id, "stopped": generation, "saved": saved, "exited": exited, "gone": gone, "ms": js::now_ms() - t0 }));
         Event::Asleep { generation }
+    }
+
+    /// A disk's sleep's end (docs/computers.md, "A disk"): the signal, its
+    /// guest's final flush awaited (`DISK_EXIT_WAIT_MS`), the destroy. No
+    /// snapshot: its disk is what it wakes on. Its line says what its wait
+    /// left unshipped and whether its head is clean after it; what it left
+    /// is kept for its next start's line.
+    async fn stop_disk(&self, generation: u64, id: &str) -> Event {
+        let g = JsValue::from_f64(generation as f64);
+        let t0 = js::now_ms();
+        let mut exited = false;
+        if self.container_running().await {
+            let _ = self.call("signal", &[g, JsValue::from_f64(15.0)]).await;
+            exited = self.call("exited", &[JsValue::from_f64(DISK_EXIT_WAIT_MS as f64)]).await.ok().and_then(|r| r.as_bool()) == Some(true);
+        }
+        let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
+        let (status, drain_ms) = match self.disk_drained.borrow_mut().take() {
+            Some((d, status, ms)) if d == generation => (status, ms),
+            _ => (None, 0),
+        };
+        // its final flush posts a clean head of its own life
+        let clean = self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
+        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - t0, exited, clean };
+        console_log!("{}", start_line::sleep_line(id, &facts));
+        let kept = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
+        if let Err(e) = kept {
+            console_error!("{}", json!({ "computer": id, "slept": "unkept", "generation": generation, "error": e.message }));
+        }
+        if !gone {
+            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
+        }
+        // a final flush that posted no clean head: its last moments' writes
+        // may not have shipped, and its life ends unsaved, saying so
+        if clean {
+            Event::Asleep { generation }
+        } else {
+            Event::AsleepUnshipped { generation }
+        }
+    }
+
+    /// A stop of start `generation` found ended (its container gone): on a
+    /// disk, unsaved unless its final flush posted that life's clean head,
+    /// whichever path finds it (the stop's own, an isolate's adoption, an
+    /// alarm's look: Codex on #1552).
+    fn stopped(&self, generation: u64) -> Event {
+        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+        let clean = || self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
+        if on_disk && !clean() {
+            Event::AsleepUnshipped { generation }
+        } else {
+            Event::Asleep { generation }
+        }
     }
 
     /// A sleep's snapshot, taken after its save `save`: kept as that save's
@@ -2953,10 +3286,16 @@ impl ComputerCell {
             relay: None,
             relay_targets: None,
             disk: saves.disk_view(),
-            sizes: self.meta(MetaKey::Sizes)?.and_then(|j| crate::json_text::<fragment_proto::computer::ComputerSizes>(&j).ok()).map(|mut s| {
-                s.kinds = fragment_core::computer::storage_kinds(&s);
-                s
-            }),
+            // a disk's breakdown as of its last read alone: its sleep reads
+            // its total by itself (Codex on #1552)
+            sizes: self
+                .meta(MetaKey::Sizes)?
+                .and_then(|j| crate::json_text::<fragment_proto::computer::ComputerSizes>(&j).ok())
+                .filter(|s| !life.disk() || fragment_core::computer::sizes_current(s.at, saves.disk_view().map(|d| d.at)))
+                .map(|mut s| {
+                    s.kinds = fragment_core::computer::storage_kinds(&s);
+                    s
+                }),
             room_first: saves.update_waits(),
             simplex_moved: vec![],
         }))
@@ -2975,8 +3314,9 @@ impl ComputerCell {
     /// (an upload its destroy cut short), at most `WIPE_PAGES_PER_CALL`
     /// pages a call; once none is left, its tables dropped and made again
     /// empty, the snapshot's id with them. Answers `{destroyed, records,
-    /// objects, more}`: `more`, its prefix holds more (call again). Each
-    /// part is idempotent: a wipe cut anywhere is done by the next call.
+    /// objects, more, settleMs}`: `more`, its prefix holds more (call
+    /// again), or its disk still settles, `settleMs` more (`fpac::wipe_settle_left`).
+    /// Each part is idempotent: a wipe cut anywhere is done by the next call.
     async fn wipe(&self) -> CellResult<Value> {
         let id = self.meta(MetaKey::Id)?;
         if !self.wiped.get() {
@@ -2990,6 +3330,12 @@ impl ComputerCell {
         if !destroyed {
             return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
         }
+        // when its container was first seen gone: its disk's settle runs from
+        // then (no put its route takes after it). The wipe's own write, as
+        // its mark is: past `exec`, which refuses a wiped computer's writes
+        if self.meta(MetaKey::WipeGone)?.is_none() {
+            self.sql().exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![MetaKey::WipeGone.key().into(), js::now_ms().to_string().into()])?;
+        }
         let records = self.saves()?.every_record();
         // bounded: a computer's records are (Saves::every_record), each
         // delete within a pass's bound; one that passes it fails this call,
@@ -2997,14 +3343,31 @@ impl ComputerCell {
         for record in &records {
             self.call("forget", &[js::to_js(record), JsValue::from_f64(FORGET_PASS_MS as f64)]).await?;
         }
-        let (objects, more) = js::blob_delete_under(&self.env, js::BLOBS, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        let (mut objects, mut more) = js::blob_delete_under(&self.env, js::BLOBS, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        let mut settle_ms = 0;
+        // then its disk's, every life's objects (docs/computers.md, "A
+        // disk"): at most `WIPE_PAGES_PER_CALL` pages more
+        let on_disk = self.disk()?.is_some();
+        if let (false, true, Some(prefix)) = (more, on_disk, id.as_deref().and_then(fpac::disk_prefix)) {
+            // its last list is one begun once any put its route took has had
+            // `WIPE_SETTLE_MS` to land since its container was gone: one that
+            // landed after an earlier list, or whose own delete failed, goes
+            // too (Codex on #1552); until then, more (the next call lists again)
+            let gone = self.meta(MetaKey::WipeGone)?.and_then(|t| t.parse::<i64>().ok()).unwrap_or(i64::MAX);
+            let left = fpac::wipe_settle_left(gone, js::now_ms());
+            let (disk_objects, disk_more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix, WIPE_PAGES_PER_CALL).await?;
+            objects += disk_objects;
+            more = disk_more || left > 0;
+            // what its wipe's call waits out before asking again (wipe.rs)
+            settle_ms = if disk_more { 0 } else { left };
+        }
         if !more {
             // one step, no await: its record emptied, the mark kept
             crate::schema::remake(self.sql(), &fragment_core::migrate::COMPUTER)?;
             assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
         }
         console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
-        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more }))
+        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more, "settleMs": settle_ms }))
     }
 
     /// That `owner` owns it (an export's reads: anyone else finds none).
@@ -3052,7 +3415,13 @@ impl ComputerCell {
         };
         let saves = self.saves()?;
         let (keys, more) = js::blob_list(&self.env, js::BLOBS, &self.backups_prefix()).await?;
-        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.every_save().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot() }))
+        // its disk's objects, one page (`diskMore` past it)
+        // its disk's objects, a computer on one alone (Codex on #1552)
+        let disk = match self.meta(MetaKey::Id)?.as_deref().and_then(fpac::disk_prefix).filter(|_| self.disk().is_ok_and(|d| d.is_some())) {
+            Some(prefix) => Some(js::blob_list(&self.env, js::BLOBS, &prefix).await?),
+            None => None,
+        };
+        Ok(json!({ "wiped": self.wiped.get(), "made": made, "phase": phase, "saves": saves.every_save().len(), "backups": keys.len(), "more": more, "snapshot": saves.has_snapshot(), "disk": disk.as_ref().map(|(k, _)| k.len()), "diskMore": disk.is_some_and(|(_, m)| m) }))
     }
 
     /// A test fleet's lever on this computer (`POST /api/test/computer`,
@@ -3088,7 +3457,10 @@ impl ComputerCell {
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
-    /// `snapshot-bound {ms}` gives its next sleep's snapshot `ms`.
+    /// `snapshot-bound {ms}` gives its next sleep's snapshot `ms`;
+    /// `fpac` reads its disk's row; `fpac-head {head}`, asleep, makes
+    /// `head` its disk's newest, the head it had the one before, as a life
+    /// whose last head will not open leaves it.
     async fn lever(&self, b: &TestLever) -> CellResult<Value> {
         assert!(self.cfg.test_hooks, "only a test fleet pulls a computer's levers");
         if b.op == "schema" {
@@ -3299,12 +3671,21 @@ impl ComputerCell {
                 let Some(generation) = self.lifecycle()?.running() else {
                     return Err(CellError::invalid("it is not running: wake it first"));
                 };
+                // on a disk, its daemon's count as it is killed (a crash
+                // test's evidence that writes were shipping)
+                let unshipped = if self.lifecycle()?.disk() {
+                    let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
+                    let out = self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_STATUS_EXEC_MS as f64)]).await.ok().and_then(|o| js::from_js(&o).ok());
+                    out.and_then(|o| fpac::Status::read(o["output"].as_str().unwrap_or_default())).map(|s| s.unshipped_bytes)
+                } else {
+                    None
+                };
                 let sent = self.call("signal", &[JsValue::from_f64(generation as f64), JsValue::from_f64(SIGKILL)]).await?;
                 if sent.as_bool() != Some(true) {
                     return Err(CellError::host(format!("start {generation}'s container is not running here")));
                 }
-                console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
-                Ok(json!({ "computer": id, "killed": generation }))
+                console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation, "unshipped": unshipped }));
+                Ok(json!({ "computer": id, "killed": generation, "unshipped": unshipped }))
             }
             "damage-restores" => {
                 // the next `times` restores of its saves each come with one
@@ -3373,6 +3754,53 @@ impl ComputerCell {
                 v["holdSaves"] = json!(self.meta(MetaKey::HoldSaves)?.is_some());
                 v["stallUnhold"] = json!(self.meta(MetaKey::StallUnhold)?.is_some());
                 Ok(v)
+            }
+            // its disk's row (docs/computers.md, "A disk"), as stored
+            "fpac" => {
+                let disk = self.disk()?;
+                Ok(json!({
+                    "disk": self.lifecycle()?.disk(),
+                    "volume": disk.map(|d| d.volume),
+                    "head": disk.and_then(|d| d.head).map(|h| h.encode()),
+                    "back": disk.and_then(|d| d.back).map(|h| h.encode()),
+                    "sleptUnshipped": disk.and_then(|d| d.slept_unshipped),
+                    "cameUp": disk.map(|d| d.came_up),
+                    // when this isolate last heard its guest read its view
+                    "heard": self.heard_ms.get(),
+                    "fell": self.meta(MetaKey::DiskFell)?.and_then(|j| crate::json_text::<Value>(&j).ok()),
+                }))
+            }
+            // what one life of its disk put in the bucket, as the bucket
+            // lists it (a test's evidence of what shipped, apart from the
+            // head's rules): at most a page of names
+            "fpac-objects" => {
+                let epoch = b.epoch.ok_or_else(|| CellError::invalid("fpac-objects names its life's epoch"))?;
+                let prefix = fpac::disk_prefix(&id).ok_or_else(|| CellError::invalid("this computer is on no disk"))?;
+                let (names, more) = js::blob_list(&self.env, js::BLOBS, &format!("{prefix}e{epoch}/")).await?;
+                Ok(json!({ "computer": id, "epoch": epoch, "objects": names.iter().map(|n| n.rsplit('/').next().unwrap_or_default()).collect::<Vec<_>>(), "more": more }))
+            }
+            // its running daemon's own count, as its sleep's wait reads it
+            // (`fpac status`): what it holds unshipped this moment
+            "fpac-status" => {
+                let Some(generation) = self.lifecycle()?.running() else {
+                    return Err(CellError::invalid("it is not running"));
+                };
+                let argv = js::to_js(&json!(["sh", "-c", DISK_STATUS]));
+                let out = js::from_js(&self.call("exec", &[JsValue::from_f64(generation as f64), argv, JsValue::from_f64(DISK_STATUS_EXEC_MS as f64)]).await?).map_err(CellError::host)?;
+                let status = fpac::Status::read(out["output"].as_str().unwrap_or_default());
+                Ok(json!({ "computer": id, "generation": generation, "unshipped": status.map(|s| s.unshipped_bytes), "misses": status.map(|s| s.misses), "refetches": status.map(|s| s.refetches) }))
+            }
+            // a head that will not open, its newest, the one it had kept as
+            // the head before: asleep only, as a life's last post leaves it
+            "fpac-head" => {
+                let line = b.head.as_deref().ok_or_else(|| CellError::invalid("fpac-head names a head"))?;
+                let head = fpac::Head::decode(line).ok_or_else(|| CellError::invalid("fpac-head's head is not one"))?;
+                let disk = self.disk()?.ok_or_else(|| CellError::invalid("this computer is on no disk"))?;
+                if !matches!(self.lifecycle()?.phase, Phase::Asleep { .. }) {
+                    return Err(CellError::invalid("fpac-head moves the head of a computer asleep"));
+                }
+                self.set_disk_heads(Some(&head), disk.head.as_ref())?;
+                Ok(json!({ "head": head.encode(), "back": disk.head.map(|h| h.encode()) }))
             }
             "legacy-grants" => {
                 // an agent's row from before the move that its fragment had
@@ -3466,6 +3894,46 @@ impl ComputerCell {
                 // and, beside it, the newest set aside: its files may be
                 // newer, and the computer never goes back to it
                 let of = |s: &Save| json!({ "number": s.number, "id": s.id, "at": s.at_ms, "generation": s.generation, "held": s.held, "records": s.records });
+                let life = self.lifecycle()?;
+                if life.disk() {
+                    // a disk keeps no save of its own: one taken awake for this
+                    // export (docs/computers.md, "A disk"), it waking it; one
+                    // that won't wake has none to give
+                    let since = b.since.unwrap_or(0);
+                    if let Some(save) = saves.all().iter().find(|s| !s.unusable && s.at_ms >= since) {
+                        return json_response(&json!({ "save": of(save), "setAside": null }));
+                    }
+                    if matches!(life.phase, Phase::Failed { .. }) {
+                        return json_response(&json!({ "save": null, "setAside": null, "unsaved": "it would not wake" }));
+                    }
+                    // its events here make no start a request would make at once
+                    // (`drive_with`, as an alarm's): a start owed is its alarm's,
+                    // never the export's to wait for (Codex on #1552)
+                    if !b.wake {
+                        self.drive_with(Some(Event::ExportDropped), false).await?;
+                        return json_response(&json!({ "pending": true }));
+                    }
+                    // woken as its owner's wake is; one refused (no credit) or
+                    // that starts nothing has no save to give, and the export
+                    // goes on without it, saying why: never fails the archive,
+                    // and asks nothing a later wake would take (Codex on #1552)
+                    match self.wake(Wake::Owner).await {
+                        Err(e) if e.code != ErrorCode::HostFailed => {
+                            return json_response(&json!({ "save": null, "setAside": null, "unsaved": format!("it could not wake: {}", e.message) }));
+                        }
+                        r => r?,
+                    }
+                    // a save that landed as it woke is this export's: no second
+                    // (Codex on #1552); its ask names when its export began,
+                    // and asks nothing once a save landed since
+                    if let Some(save) = self.saves()?.all().iter().find(|s| !s.unusable && s.at_ms >= since) {
+                        return json_response(&json!({ "save": of(save), "setAside": null }));
+                    }
+                    // then due, its alarm takes it: this ask only looks; due for
+                    // this life alone, the export asking again while it waits
+                    self.drive_with(Some(Event::ExportAsked { since_ms: since }), false).await?;
+                    return json_response(&json!({ "pending": true }));
+                }
                 let save = saves.all().iter().find(|s| !s.unusable);
                 let set_aside = saves.aside().iter().find(|s| !s.unusable);
                 json_response(&json!({ "save": save.map(of), "setAside": set_aside.map(of) }))
@@ -3568,11 +4036,26 @@ impl ComputerCell {
                 json_response(&json!({ "session": session, "port": t["port"], "maxAgeS": SESSION_TTL_MS / 1000 }))
             }
             "computer/guest" => {
-                // its guest is alive: what a start that waits for it waits for
-                let now = js::now_ms();
-                self.heard_ms.set(Some(now));
-                log_start(self.starts.borrow_mut().heard(now));
                 let b: GuestAsk = body_json(&mut req).await?;
+                // on a disk, only the life that runs is heard: a read in
+                // flight from a start that ended names that start (Codex on
+                // #1552)
+                let on_disk = self.disk()?;
+                if fpac::read_is_running_lifes(on_disk.is_some(), b.epoch, self.lifecycle()?.running()) {
+                    // a guest that reads its view runs on its disk: what the
+                    // disk holds is someone's from here (`fpac::fallback`),
+                    // kept before the read is heard or answered, so no
+                    // isolate that goes after it leaves a disk that ran as
+                    // one never up (Codex on #1552)
+                    if on_disk.is_some_and(|d| !d.came_up) {
+                        self.exec("UPDATE disk SET came_up = 1 WHERE id = 0", vec![])?;
+                    }
+                    // its guest is alive: what a start that waits for it waits for
+                    let now = js::now_ms();
+                    self.heard_ms.set(Some(now));
+                    let disk = Some(DiskFacts { mount_ms: b.disk.mount_ms, misses: b.disk.misses, refetches: b.disk.refetches, slept_unshipped: None }).filter(|d| d.mount_ms.is_some() || d.misses.is_some() || d.refetches.is_some());
+                    log_start(self.starts.borrow_mut().heard(now, disk));
+                }
                 if b.simplex {
                     self.said_simplex().await?;
                 }
@@ -3618,6 +4101,29 @@ impl ComputerCell {
                 }
                 json_response(&json!({ "ok": true }))
             }
+            "computer/disk-unusable" => {
+                // its start under way waits for this or its guest's first
+                // read (`heard_from`): the start falls back past the head.
+                // Only the life that runs says so of itself: one heard late,
+                // from a start that ended, fails no start after it
+                let b: DiskUnusable = body_json(&mut req).await?;
+                let why: String = b.why.chars().take(fragment_core::computer::FAILED_WHY_MAX_BYTES).collect();
+                let ours = self.lifecycle()?.running() == Some(b.epoch);
+                if ours {
+                    let found = match (b.blank, b.unmountable) {
+                        (true, _) => fpac::Unopened::Blank,
+                        (_, true) => fpac::Unopened::Unmountable,
+                        _ => fpac::Unopened::Unusable,
+                    };
+                    *self.disk_unusable.borrow_mut() = Some((b.epoch, why, found));
+                }
+                json_response(&json!({ "taken": ours }))
+            }
+            "computer/disk-head" => {
+                let b: DiskHeadAsk = body_json(&mut req).await?;
+                json_response(&self.disk_head(b.epoch, &b.line)?)
+            }
+
             "computer/exited" => {
                 let b: Exited = body_json(&mut req).await?;
                 if let Some(event) = self.exit_of(b.generation)? {
@@ -3892,6 +4398,86 @@ impl ComputerCell {
 
     /// Made, for `who`, whose computer this is (`default_computer_of`):
     /// asleep on the deployment's image, its view; made again, the same.
+    /// Its disk (docs/computers.md, "A disk"; Computer step 10), when it is
+    /// on one: its volume, its head, the head before its newest life's, and
+    /// what its last sleep left unshipped. A row whose head is half there
+    /// is corruption, never read as a head.
+    fn disk(&self) -> CellResult<Option<DiskRow>> {
+        let rows = self.rows(
+            "SELECT volume_bytes, head_epoch, head_ck_epoch, head_ck_seq, head_ck_sum, head_clean, back_epoch, back_ck_epoch, back_ck_seq, back_ck_sum, back_clean, slept_unshipped, came_up FROM disk WHERE id = 0",
+            vec![],
+        )?;
+        let Some(r) = rows.first() else { return Ok(None) };
+        let head_of = |p: &str| -> CellResult<Option<fpac::Head>> {
+            let Some(epoch) = r[format!("{p}_epoch")].as_u64() else { return Ok(None) };
+            let ck = (r[format!("{p}_ck_epoch")].as_u64(), r[format!("{p}_ck_seq")].as_u64(), r[format!("{p}_ck_sum")].as_str());
+            let checkpoint = match ck {
+                (None, None, None) => None,
+                (Some(epoch), Some(seq), Some(sum)) => {
+                    let mut s = [0u8; 32];
+                    hex::decode_to_slice(sum, &mut s).map_err(|_| CellError::host(format!("its disk's {p} names a checkpoint sum that is not one")))?;
+                    Some(fpac::CheckpointRef { epoch, seq, sum: s })
+                }
+                _ => return Err(CellError::host(format!("its disk's {p} names half a checkpoint"))),
+            };
+            let head = fpac::Head { epoch, checkpoint, clean: r[format!("{p}_clean")].as_i64() == Some(1) };
+            // stored only as `decide` took it: it reads back as one spelling
+            assert_eq!(fpac::Head::decode(&head.encode()), Some(head), "a stored head is a head");
+            Ok(Some(head))
+        };
+        let volume = r["volume_bytes"].as_u64().ok_or_else(|| CellError::host("its disk names no volume"))?;
+        Ok(Some(DiskRow { volume, head: head_of("head")?, back: head_of("back")?, slept_unshipped: r["slept_unshipped"].as_u64(), came_up: r["came_up"].as_i64() == Some(1) }))
+    }
+
+    /// Its disk's head and the head before its newest life's, written.
+    fn set_disk_heads(&self, head: Option<&fpac::Head>, back: Option<&fpac::Head>) -> CellResult<()> {
+        let mut binds = Vec::with_capacity(10);
+        for h in [head, back] {
+            let ck = h.and_then(|h| h.checkpoint);
+            binds.push(h.map_or(SqlStorageValue::Null, |h| SqlStorageValue::from(h.epoch as i64)));
+            binds.push(ck.map_or(SqlStorageValue::Null, |c| SqlStorageValue::from(c.epoch as i64)));
+            binds.push(ck.map_or(SqlStorageValue::Null, |c| SqlStorageValue::from(c.seq as i64)));
+            binds.push(ck.map_or(SqlStorageValue::Null, |c| SqlStorageValue::from(hex::encode(c.sum))));
+            binds.push(SqlStorageValue::from(i64::from(h.is_some_and(|h| h.clean))));
+        }
+        self.exec(
+            "UPDATE disk SET head_epoch = ?, head_ck_epoch = ?, head_ck_seq = ?, head_ck_sum = ?, head_clean = ?, back_epoch = ?, back_ck_epoch = ?, back_ck_seq = ?, back_ck_sum = ?, back_clean = ? WHERE id = 0",
+            binds,
+        )
+    }
+
+    /// A head its disk's life `epoch` posts (cell/fpac.mjs, through
+    /// `ComputerEgress::disk_head`): taken by the head's rules against the
+    /// stored one, from the running life alone. A new life's first head
+    /// keeps the one before as `back` (what a start falls back to past a
+    /// head that will not mount); a later head of the same life moves only
+    /// the head. Answers `{answer}` or `{refused, status}`.
+    fn disk_head(&self, epoch: u64, line: &str) -> CellResult<Value> {
+        let refused = |why: &str, status: u16| Ok(json!({ "refused": why, "status": status }));
+        let Some(disk) = self.disk()? else { return refused("this computer is on no disk", 404) };
+        let Some(proposed) = fpac::Head::decode(line) else { return refused("a malformed head", 400) };
+        // the route's life is its props' (the start's), the head's its own
+        // word: both must be the life that runs now
+        let running = self.lifecycle()?.running();
+        if running != Some(epoch) || proposed.epoch != epoch {
+            return refused("only the running life posts a head", 409);
+        }
+        match fpac::decide(disk.head.as_ref(), epoch, &proposed) {
+            fpac::Decision::Take => {
+                let back = match disk.head {
+                    Some(h) if h.epoch < proposed.epoch => Some(h),
+                    Some(_) => disk.back,
+                    None => None,
+                };
+                self.set_disk_heads(Some(&proposed), back.as_ref())?;
+                assert_eq!(self.disk()?.and_then(|d| d.head), Some(proposed), "the head taken is the head stored");
+                Ok(json!({ "answer": "taken" }))
+            }
+            fpac::Decision::Same => Ok(json!({ "answer": "same" })),
+            fpac::Decision::Refuse(why) => refused(why, 409),
+        }
+    }
+
     async fn make(&self, who: &str) -> CellResult<Response> {
         let id = fragment_core::computer::default_computer_of(who);
         match self.meta(MetaKey::Owner)? {
@@ -3903,6 +4489,14 @@ impl ComputerCell {
                 self.set_meta(MetaKey::Owner, who)?;
                 self.set_meta(MetaKey::Image, &image)?;
                 self.set_meta(MetaKey::CreatedAt, &js::now_ms().to_string())?;
+                // made on a disk while its image is one the deployment puts
+                // on disks (`computers.disks`): new computers only, for good
+                if self.cfg.computer_disks.contains(&image) {
+                    let mut life = self.lifecycle()?;
+                    life.set_disk();
+                    self.exec("INSERT INTO disk (id, volume_bytes) VALUES (0, ?)", vec![SqlStorageValue::from(fpac::DISK_VOLUME_BYTES as i64)])?;
+                    self.set_meta(MetaKey::Lifecycle, &serde_json::to_string(&life).map_err(|e| CellError::host(e.to_string()))?)?;
+                }
             }
         }
         let made = self.view().await?;
@@ -3976,6 +4570,11 @@ impl ComputerCell {
         let images = js::from_js(&self.call("images", &[]).await?).map_err(CellError::host)?;
         if !images.as_array().is_some_and(|names| names.iter().any(|n| n == image)) {
             return Err(CellError::invalid(format!("no image {image:?} on this deployment (its images: {images})")));
+        }
+        // a disk's `/data` only an image that mounts it reads: never pinned
+        // to one that would start on an empty disk of its own
+        if self.disk()?.is_some() && !self.cfg.computer_disks.iter().any(|d| d == image) {
+            return Err(CellError::invalid(format!("this computer's /data is a disk, and {image:?} is not an image that mounts one")));
         }
         // a snapshot of the old image no longer matches, so it starts from
         // this one and restores /data (decision 19); awake on another, its
@@ -4749,12 +5348,62 @@ impl ComputerEgress {
         }
     }
 
-    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String) -> worker_sys::web_sys::Response {
+    /// A head the life `epoch` of `computer`'s disk posts (cell/fpac.mjs,
+    /// `POST /head`): the DO moves its head only by the head's rules
+    /// (`fragment_core::computer::fpac::decide`). Answers `{answer}`
+    /// (`taken`, `same`) or `{refused, status}`; a DO unheard is `503`,
+    /// which the guest's daemon tries again.
+    pub async fn disk_head(env: Env, computer: String, epoch: f64, line: String) -> JsValue {
+        let epoch = if epoch.is_finite() && epoch >= 1.0 { epoch as u64 } else { 0 };
+        match ask(&env, &computer, "computer/disk-head", &json!({ "epoch": epoch, "line": line })).await {
+            Ok(answer) => js::to_js(&answer),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": computer, "disk": "head unheard", "error": e.message }));
+                js::to_js(&json!({ "refused": "the platform did not answer", "status": 503 }))
+            }
+        }
+    }
+
+    /// Its boot's word, through its disk's route (cell/fpac.mjs, `POST
+    /// /unusable`), that the head start `epoch` handed it (`head`, none on
+    /// a new disk) will not open: to the Computer DO, which takes it only
+    /// from the life that runs (`computer/disk-unusable`). Answers
+    /// `{taken}`; a DO unheard, `{taken: false}`, and the start's wait for
+    /// its guest ends it as a dead start.
+    pub async fn disk_unusable(env: Env, computer: String, epoch: f64, head: Option<String>, why: String, blank: bool, unmountable: bool) -> JsValue {
+        let epoch = if epoch.is_finite() && epoch >= 1.0 { epoch as u64 } else { 0 };
+        match ask(&env, &computer, "computer/disk-unusable", &json!({ "epoch": epoch, "head": head, "why": why, "blank": blank, "unmountable": unmountable })).await {
+            Ok(answer) => js::to_js(&answer),
+            Err(e) => {
+                console_error!("{}", json!({ "computer": computer, "disk": "unusable unheard", "error": e.message }));
+                js::to_js(&json!({ "taken": false }))
+            }
+        }
+    }
+
+    /// The disk route's rules (cell/fpac.mjs), one source each: an object
+    /// name's epoch, by its grammar (none: outside it); a body's bound; a
+    /// head line's bound. Epochs are start generations, far under 2^53.
+    pub fn fpac_name_epoch(name: String) -> Option<f64> {
+        fragment_core::computer::fpac::object_epoch(&name).map(|e| e as f64)
+    }
+
+    pub fn fpac_object_bytes_max() -> f64 {
+        fragment_core::computer::fpac::OBJECT_BYTES_MAX as f64
+    }
+
+    pub fn fpac_head_line_max() -> f64 {
+        fragment_core::computer::fpac::HEAD_LINE_MAX_BYTES as f64
+    }
+
+    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String, epoch: Option<f64>) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
         let ctx = Context::new(ctx);
         let (method, path) = (req.method().to_string(), req.path());
+        // the life a disk start's route names (its props': entry.mjs)
+        let epoch = epoch.filter(|e| e.is_finite() && *e >= 1.0).map(|e| e as u64);
         let answered = match route.as_str() {
-            "api" => egress_api(req, &env, &ctx, &computer, false).await,
+            "api" => egress_api(req, &env, &ctx, &computer, epoch, false).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
             "codestorage" => egress_codestorage(req, &env).await,
@@ -4786,7 +5435,7 @@ impl ComputerEgress {
 /// Without the header, only the computer's own routes answer. A storage
 /// token names the code.storage the guest can reach: its egress's, on a
 /// local fleet (`egress_codestorage`).
-async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, model_call: bool) -> CellResult<Response> {
+async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, epoch: Option<u64>, model_call: bool) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let path = url.path().to_string();
@@ -4794,7 +5443,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         "/api/computer" => {
             // its bridge says whether its image does SimpleX (docs/bridge.md, "SimpleX")
             let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
-            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
+            // a disk's boot says what its mount did (docs/computers.md, "The
+            // start line"): each a number, or left out
+            let number = |key: &str| url.query_pairs().find(|(k, _)| k == key).and_then(|(_, v)| v.parse::<u64>().ok());
+            let disk = json!({ "mountMs": number("diskMountMs"), "misses": number("diskMisses"), "refetches": number("diskRefetches") });
+            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex, "disk": disk, "epoch": epoch })).await?);
         }
         // its bridge tells an agent's fragment which turns it runs, and whose
         // ask each is (`computer/turns`, FIN-720), as one bridge life: `PUT`
@@ -5050,7 +5703,7 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     let api = Request::new_with_init(&format!("http://api.fragment.internal{route}"), &init)?;
-    egress_api(api, env, ctx, computer, true).await
+    egress_api(api, env, ctx, computer, None, true).await
 }
 
 /// Whether `p` is its agent's person's Vault's: a key's placeholder whose

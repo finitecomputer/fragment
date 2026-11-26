@@ -95,6 +95,12 @@ pub struct Config {
     /// container snapshot and wake from their image and backup (local
     /// workerd takes no snapshots).
     pub computer_snapshots: bool,
+    /// `FRAGMENT_COMPUTER_DISKS` (the deploy config's `computers.disks`):
+    /// the images, by name, whose `/data` is an FPAC disk (docs/computers.md,
+    /// "A disk"). A computer made pinned to one of them is made on a disk;
+    /// none else, and none made before. Unset or empty: none (production
+    /// today).
+    pub computer_disks: Vec<String>,
     /// `FRAGMENT_COMPUTER_UNSAVED_MAX_MS` (the deploy config's
     /// `computers.unsaved_max_ms`): how long a computer whose sleep's save
     /// keeps failing stays awake before it sleeps unsaved. See
@@ -385,6 +391,7 @@ impl Config {
             host_label_suffix,
             computer_image: var(env, "FRAGMENT_COMPUTER_IMAGE"),
             computer_snapshots: var(env, "FRAGMENT_COMPUTER_SNAPSHOTS").as_deref() != Some("off"),
+            computer_disks: var(env, "FRAGMENT_COMPUTER_DISKS").map(|v| v.split(',').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).collect()).unwrap_or_default(),
             computer_unsaved_max_ms: var(env, "FRAGMENT_COMPUTER_UNSAVED_MAX_MS")
                 .map(|v| v.parse::<i64>().ok().filter(|ms| *ms >= 0).unwrap_or_else(|| panic!("FRAGMENT_COMPUTER_UNSAVED_MAX_MS is a whole number of ms, not {v:?}")))
                 .unwrap_or(fragment_core::computer::UNSAVED_MAX_MS_DEFAULT),

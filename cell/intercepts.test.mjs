@@ -93,6 +93,24 @@ test("every intercept is in place at the start itself, all asked at once", async
   assert.equal(seen.inFlightMax, every.length);
 });
 
+test("a start on a disk also routes its daemon's host, the disk in its props; a start on none never does", async () => {
+  const disk = { prefix: "disks/17c33cdf88c6d1d8f58b7a0f/", name: "17c33cdf88c6d1d8f58b7a0f", epoch: 7, volume: 20971520000, head: null };
+  const bound = [];
+  const props = (route, d) => {
+    bound.push([route, d]);
+    return { route };
+  };
+  const { c, seen } = container();
+  await startIntercepted(c, {}, () => intercept(c, props, [], false, disk), () => false);
+  assert.deepEqual([...seen.asked].sort(), [`http://${API} → api`, `http://${MODEL} → model`, "http://fpac.fragment.internal → fpac"].sort());
+  assert.deepEqual(bound.find(([route]) => route === "fpac"), ["fpac", disk], "its props carry the disk");
+  assert.deepEqual(bound.find(([route]) => route === "api"), ["api", disk], "so do its API's: its guest's reads name its life");
+  assert.ok(seen.atStart.has("http://fpac.fragment.internal"), "in place at the start, as every intercept is");
+  const plain = container();
+  await startIntercepted(plain.c, {}, () => intercept(plain.c, egress, [], false, null), () => false);
+  assert.ok(!plain.seen.asked.some((a) => a.includes("fpac")), "no disk, no route");
+});
+
 test("without a code.storage of its own or a swap host, the platform's two; never the backups' host, whose saves and restores grant their own", async () => {
   const { c, seen } = container();
   await startIntercepted(c, {}, () => intercept(c, egress, [], false), () => false);

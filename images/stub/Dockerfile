@@ -75,10 +75,20 @@ RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
-# busybox for the few commands the Computer DO runs in a container (`true`
-# while it polls, `touch` for the restore marker); sandbox-shim for its
-# DirectoryBackup.
-FROM busybox:1.37-musl
+# A computer's disk's daemon (docs/computers.md, "A disk"): fpac v0.1.0's
+# static x86_64 build, named by its SHA-256 (FPAC's docs/release.md), as
+# our Hermes image takes it.
+FROM alpine:3.20 AS fpac
+ADD --checksum=sha256:9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e https://github.com/finitecomputer/fpac/releases/download/v0.1.0/fpac-9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e /fpac
+
+# Alpine's busybox for the few commands the Computer DO runs in a container
+# (`true` while it polls, `touch` for the restore marker), and its mke2fs
+# for a new disk's ext4 (1.47's assume_storage_prezeroed); sandbox-shim for
+# its DirectoryBackup.
+FROM alpine:3.20
+RUN apk add --no-cache e2fsprogs \
+ && mke2fs -V 2>&1 | grep -Eq '^mke2fs 1\.(4[7-9]|[5-9][0-9])'
+COPY --from=fpac --chmod=0755 /fpac /usr/local/bin/fpac
 COPY --from=docker.io/cloudflare/sandbox:1.0.0 /usr/local/bin/sandbox-shim /usr/local/bin/sandbox-shim
 COPY --from=build /fragment-bridge /usr/local/bin/fragment-bridge
 COPY --from=cli /out/fragment /usr/local/bin/fragment
@@ -117,6 +127,7 @@ RUN echo "$STUB_VERSION" > /opt/fragment/screen/version.txt
 # read (a filling disk told to its agent, an agent's new runtime followed)
 # wait seconds, not a minute each. A read is one small call.
 ENV BRIDGE_RUNTIME=script \
+    BRIDGE_MOUNTS_DISK=1 \
     BRIDGE_COMPUTER_EVERY_MS=5000 \
     BRIDGE_HELD_LEAVE_OUT=*.scratch \
     BRIDGE_STATE_DIR=/data/bridge \
@@ -131,5 +142,7 @@ ENV BRIDGE_RUNTIME=script \
 # layer cannot be swapped for a restored one (EXDEV under overlayfs)
 RUN mkdir -p /run/computer
 EXPOSE 6080
-# PID 1 is the bridge: it handles SIGTERM itself (gone within 3 s).
+# PID 1 is the bridge: it handles SIGTERM itself (gone within 3 s), and on a
+# disk (BRIDGE_MOUNTS_DISK) mounts /data before it runs and makes its final
+# flush before it exits.
 ENTRYPOINT ["/usr/local/bin/fragment-bridge", "run"]
