@@ -178,10 +178,12 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
 /// (Codex on #1552).
 pub const WIPE_SETTLE_MS: i64 = 120_000;
 
-/// Whether a list begun at `now_ms` may be a wipe's last of its disk, its
-/// container gone at `gone_ms` (`WIPE_SETTLE_MS`).
-pub fn wipe_settled(gone_ms: i64, now_ms: i64) -> bool {
-    now_ms >= gone_ms.saturating_add(WIPE_SETTLE_MS)
+/// How long from `now_ms` until a list may be a wipe's last of its disk,
+/// its container gone at `gone_ms` (`WIPE_SETTLE_MS`): 0 once it may. The
+/// wipe's call waits that out within its own time (cell/src/wipe.rs), so
+/// an operator's wipe goes on as its disk settles.
+pub fn wipe_settle_left(gone_ms: i64, now_ms: i64) -> i64 {
+    gone_ms.saturating_add(WIPE_SETTLE_MS).saturating_sub(now_ms).max(0)
 }
 
 /// The platform's answer to a head a life posts.
@@ -430,10 +432,11 @@ mod tests {
 
     #[test]
     fn a_wipe_lists_its_disk_again_once_any_put_taken_has_landed() {
-        assert!(!wipe_settled(1_000, 1_000));
-        assert!(!wipe_settled(1_000, 1_000 + WIPE_SETTLE_MS - 1));
-        assert!(wipe_settled(1_000, 1_000 + WIPE_SETTLE_MS));
-        assert!(!wipe_settled(i64::MAX, i64::MAX - 1), "no overflow");
+        assert_eq!(wipe_settle_left(1_000, 1_000), WIPE_SETTLE_MS);
+        assert_eq!(wipe_settle_left(1_000, 1_000 + WIPE_SETTLE_MS - 1), 1);
+        assert_eq!(wipe_settle_left(1_000, 1_000 + WIPE_SETTLE_MS), 0);
+        assert_eq!(wipe_settle_left(1_000, i64::MAX), 0, "long past");
+        assert!(wipe_settle_left(i64::MAX, i64::MAX - 1) > 0, "no overflow");
     }
 
     #[test]

@@ -570,7 +570,8 @@ put on disks.
   writes since lost, and logged). With none before it, a strike as any
   failed start. A disk none of whose lives came up (its guest never ran:
   a new disk's first boot ships its format before its first read, so one
-  that came up was whole) holds nothing of anyone's: whatever its boot
+  that came up was whole; a guest's read keeps its disk as come up before
+  the read is heard or answered) holds nothing of anyone's: whatever its boot
   found (its device blank, `blank`; its filesystem unmountable, a format
   cut short, `unmountable`), it starts again as a new disk. So does a
   blank device none of whose heads names a checkpoint. A head that will
@@ -622,7 +623,9 @@ put on disks.
   with a list begun `WIPE_SETTLE_MS` (2 minutes) after its container was
   gone: a put its route took before then, landing after an earlier list,
   or one whose delete failed, goes too (R2 promises no bound for a put in
-  flight; two minutes is past what it takes in practice).
+  flight; two minutes is past what it takes in practice). Each of the
+  wipe's calls waits that out within its own time, so an operator's
+  `fragment operator wipe --yes` goes on through it.
 
 ### Saves and what a wake restores
 

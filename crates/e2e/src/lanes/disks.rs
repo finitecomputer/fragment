@@ -40,7 +40,7 @@ const CYCLES_MAX: u32 = 1_000;
 const CRASH_EVERY: u32 = 10;
 const FILL_MIB: u32 = 64;
 
-const DISK_CHECKS: [&str; 11] = [
+const DISK_CHECKS: [&str; 13] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
@@ -52,6 +52,8 @@ const DISK_CHECKS: [&str; 11] = [
     "its owner's export of it asleep wakes it and copies a save taken for that export, its files whole",
     "a sleep reads its owner's Storage with one df of its /data, its used bytes its data, no walk of its files",
     "after an export's walk and a sleep, its owner's Storage is the sleep's total at the sleep's time, the older breakdown not shown beside it",
+    "a new disk's guest that reads its view has its disk kept as come up before its read is heard: no reading of its row shows its guest heard and its disk never up",
+    "its owner's wipe from the CLI (`fragment operator wipe --yes`) finishes, its disk's settle waited out within its calls, and deletes every object of its disk's lives",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -91,6 +93,7 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     if local && std::env::var("FRAGMENT_E2E_DISK_GROWTH").is_ok() {
         sleeps_as_it_grows(s, api)?;
     }
+    came_up_as_heard(s, api)?;
     first_lives(s, api)?;
 
     // its agent, and a chat it is in: its join wakes the computer
@@ -241,6 +244,81 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let (disk_at, sizes_at) = (after["disk"]["at"].as_i64(), after["sizes"]["at"].as_i64());
     let current = after["disk"]["data"].is_u64() && disk_at > walked["disk"]["at"].as_i64() && sizes_at.is_none_or(|at| disk_at.is_some_and(|d| at >= d));
     s.ok(DISK_CHECKS[10], walked["sizes"].is_object() && slept && current, json!({ "exported": { "disk": walked["disk"], "sizesAt": walked["sizes"]["at"] }, "slept": { "disk": after["disk"], "sizesAt": sizes_at } }));
+    wiped(s, api, &owner, &id)
+}
+
+/// A new computer's first wake, its row read as often as the lever
+/// answers until its guest is heard: every reading after it heard shows
+/// its disk come up (`computer/guest` keeps it before the read is heard;
+/// a start that kept it only once it saw the read left a window in which
+/// an isolate that went left its disk never up: Codex on #1552).
+fn came_up_as_heard(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let r = api.signed(&owner, "POST", "/api/computers", Some(&json!({})))?;
+    let id = r.body["computer"].as_str().unwrap_or("").to_string();
+    anyhow::ensure!(r.status == 200 && id.starts_with("computer:"), "a computer: {r}");
+    let (readings, not_up) = std::thread::scope(|sc| {
+        let waking = sc.spawn(|| api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({}))).map(|r| r.status).ok());
+        let (mut readings, mut not_up) = (0u32, vec![]);
+        let t0 = Instant::now();
+        // bounded: until heard, or WAKE
+        while t0.elapsed() < WAKE {
+            let row = lever(api, &id, "fpac").map(|r| r.body).unwrap_or(Value::Null);
+            if row["heard"].is_i64() {
+                readings += 1;
+                if row["cameUp"] != true {
+                    not_up.push(row.clone());
+                }
+                // a few readings past its first read
+                if readings >= 20 {
+                    break;
+                }
+            }
+        }
+        let _ = waking.join();
+        (readings, not_up)
+    });
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    s.ok(DISK_CHECKS[11], readings > 0 && not_up.is_empty() && slept, json!({ "computer": id, "readingsHeard": readings, "heardNotUp": not_up, "slept": slept }));
+    Ok(())
+}
+
+/// Its owner wiped by the CLI with the run's operator key: the call goes
+/// on through its disk's settle (`fpac::WIPE_SETTLE_MS`, its container
+/// gone), each of its calls waiting it out, and finishes; locally, its
+/// wipe's lines delete at least the objects its disk's lives held.
+fn wiped(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> {
+    let Some(wiper) = s.wiper.clone().filter(|_| s.meets(Need::Operator)) else {
+        s.skip(DISK_CHECKS[12], "it needs the run's operator key (a hosted run's `--operator-key-file`)");
+        return Ok(());
+    };
+    let person = api.identity(owner)?;
+    // what its last life put in the bucket (a page at most)
+    let last = lever(api, id, "fpac").ok().and_then(|r| head_of(&r.body["head"])).map_or(0, |(epoch, _)| epoch);
+    let held = lever_with(api, id, json!({ "op": "fpac-objects", "epoch": last })).ok().and_then(|r| r.body["objects"].as_array().map(Vec::len)).unwrap_or(0) as u64;
+    let file = super::wipe::key_file(s, &wiper)?;
+    let t0 = Instant::now();
+    let cli = super::wipe::cli_wipe(s, api, &file, &[&person, "--yes"]);
+    let took_s = t0.elapsed().as_secs();
+    let w = cli.as_ref().map(Value::clone).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+    let finished = w["report"]["done"] == true && w["report"]["state"] == "wiped";
+    let r = lever(api, id, "fpac")?;
+    // its wipe's own lines (local): what each call deleted, the last done
+    let deleted = !s.hosted() || {
+        let lines: Vec<Value> = super::vault::logs(s)
+            .lines()
+            .filter_map(|l| l.find(r#"{"computer":"#).map(|at| l[at..].to_string()))
+            .filter_map(|l| serde_json::Deserializer::from_str(&l).into_iter::<Value>().next().and_then(Result::ok))
+            .filter(|v| v["computer"] == id && v["wipe"].is_string() && v["wipe"] != "marked")
+            .collect();
+        let objects: u64 = lines.iter().filter_map(|l| l["objects"].as_u64()).sum();
+        lines.last().is_some_and(|l| l["wipe"] == "done") && objects >= held
+    };
+    s.ok(
+        DISK_CHECKS[12],
+        held > 0 && finished && r.status == 404 && deleted,
+        json!({ "lastLife": last, "itsObjects": held, "cli": w, "tookS": took_s, "lever": r.status, "linesDeleted": deleted }),
+    );
     Ok(())
 }
 

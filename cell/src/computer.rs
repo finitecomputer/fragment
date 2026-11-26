@@ -1908,13 +1908,8 @@ impl ComputerCell {
         }
         match started {
             Ok(()) => {
-                // its guest ran on its disk: what it holds is someone's from
-                // here (`fpac::fallback`), never started over
-                if planned.plan == Restore::Disk {
-                    if let Err(e) = self.exec("UPDATE disk SET came_up = 1 WHERE id = 0", vec![]) {
-                        console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "disk": "came up unkept", "generation": generation, "error": e.message }));
-                    }
-                }
+                // (a disk's guest that read its view kept it as come up:
+                // `computer/guest`)
                 let came_up = |s: &mut Saves| s.came_up(generation, from, save_id.as_deref(), planned.reference.as_deref(), js::now_ms()).map(|r| (r, s.rollbacks()));
                 match self.update_saves(came_up) {
                     // one line per start that came up (lesson 14): what it restored
@@ -3290,8 +3285,9 @@ impl ComputerCell {
     /// (an upload its destroy cut short), at most `WIPE_PAGES_PER_CALL`
     /// pages a call; once none is left, its tables dropped and made again
     /// empty, the snapshot's id with them. Answers `{destroyed, records,
-    /// objects, more}`: `more`, its prefix holds more (call again). Each
-    /// part is idempotent: a wipe cut anywhere is done by the next call.
+    /// objects, more, settleMs}`: `more`, its prefix holds more (call
+    /// again), or its disk still settles, `settleMs` more (`fpac::wipe_settle_left`).
+    /// Each part is idempotent: a wipe cut anywhere is done by the next call.
     async fn wipe(&self) -> CellResult<Value> {
         let id = self.meta(MetaKey::Id)?;
         if !self.wiped.get() {
@@ -3319,6 +3315,7 @@ impl ComputerCell {
             self.call("forget", &[js::to_js(record), JsValue::from_f64(FORGET_PASS_MS as f64)]).await?;
         }
         let (mut objects, mut more) = js::blob_delete_under(&self.env, js::BLOBS, &self.backups_prefix(), WIPE_PAGES_PER_CALL).await?;
+        let mut settle_ms = 0;
         // then its disk's, every life's objects (docs/computers.md, "A
         // disk"): at most `WIPE_PAGES_PER_CALL` pages more
         let on_disk = self.disk()?.is_some();
@@ -3328,10 +3325,12 @@ impl ComputerCell {
             // landed after an earlier list, or whose own delete failed, goes
             // too (Codex on #1552); until then, more (the next call lists again)
             let gone = self.meta(MetaKey::WipeGone)?.and_then(|t| t.parse::<i64>().ok()).unwrap_or(i64::MAX);
-            let settled = fpac::wipe_settled(gone, js::now_ms());
+            let left = fpac::wipe_settle_left(gone, js::now_ms());
             let (disk_objects, disk_more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix, WIPE_PAGES_PER_CALL).await?;
             objects += disk_objects;
-            more = disk_more || !settled;
+            more = disk_more || left > 0;
+            // what its wipe's call waits out before asking again (wipe.rs)
+            settle_ms = if disk_more { 0 } else { left };
         }
         if !more {
             // one step, no await: its record emptied, the mark kept
@@ -3339,7 +3338,7 @@ impl ComputerCell {
             assert!(self.meta(MetaKey::Id)?.is_none() && self.saves()?.every_record().is_empty(), "a wiped computer keeps no record");
         }
         console_log!("{}", json!({ "computer": id, "wipe": if more { "partly" } else { "done" }, "records": records.len(), "objects": objects }));
-        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more }))
+        Ok(json!({ "destroyed": destroyed, "records": records.len(), "objects": objects, "more": more, "settleMs": settle_ms }))
     }
 
     /// That `owner` owns it (an export's reads: anyone else finds none).
@@ -3692,6 +3691,8 @@ impl ComputerCell {
                     "back": disk.and_then(|d| d.back).map(|h| h.encode()),
                     "sleptUnshipped": disk.and_then(|d| d.slept_unshipped),
                     "cameUp": disk.map(|d| d.came_up),
+                    // when this isolate last heard its guest read its view
+                    "heard": self.heard_ms.get(),
                     "fell": self.meta(MetaKey::DiskFell)?.and_then(|j| crate::json_text::<Value>(&j).ok()),
                 }))
             }
@@ -3954,10 +3955,18 @@ impl ComputerCell {
                 json_response(&json!({ "session": session, "port": t["port"], "maxAgeS": SESSION_TTL_MS / 1000 }))
             }
             "computer/guest" => {
+                let b: GuestAsk = body_json(&mut req).await?;
+                // on a disk, a guest that reads its view runs on it: what the
+                // disk holds is someone's from here (`fpac::fallback`), kept
+                // before the read is heard or answered, so no isolate that
+                // goes after it leaves a disk that ran as one never up (Codex
+                // on #1552)
+                if self.disk()?.is_some_and(|d| !d.came_up) {
+                    self.exec("UPDATE disk SET came_up = 1 WHERE id = 0", vec![])?;
+                }
                 // its guest is alive: what a start that waits for it waits for
                 let now = js::now_ms();
                 self.heard_ms.set(Some(now));
-                let b: GuestAsk = body_json(&mut req).await?;
                 let disk = Some(DiskFacts { mount_ms: b.disk.mount_ms, misses: b.disk.misses, refetches: b.disk.refetches, slept_unshipped: None }).filter(|d| d.mount_ms.is_some() || d.misses.is_some() || d.refetches.is_some());
                 log_start(self.starts.borrow_mut().heard(now, disk));
                 if b.simplex {
