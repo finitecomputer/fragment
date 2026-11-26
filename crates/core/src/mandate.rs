@@ -164,7 +164,41 @@ pub fn place_of(text: &str) -> Option<&str> {
 
 /// Until when a mandate's text holds, read from a text its place made.
 pub fn until_of(text: &str) -> Option<i64> {
-    text.strip_prefix(PREFIX)?.split('.').nth(6)?.parse().ok()
+    text.strip_prefix(PREFIX)?.split('.').nth(5)?.parse().ok()
+}
+
+/// Which of a chat's agents (in the order they joined it: the first is
+/// its lead) a record's words are to, as their bridges hear them: those
+/// its `to` names; with none, an agent's words are to no agent, and a
+/// person's to the agents they @-mention, else to the lead. A mention
+/// names its agent by its own name, which a place does not know, so
+/// words that mention anyone are to every agent (one it was not to lets
+/// its ask go as another claims it: cell/src/asks.rs).
+pub fn heard_by<'a>(body: &str, from_agent: bool, agents: &[&'a str]) -> Vec<&'a str> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let to: Vec<&str> = v.get("to").and_then(|t| t.as_array()).map(|t| t.iter().filter_map(|a| a.as_str()).collect()).unwrap_or_default();
+    if !to.is_empty() {
+        return agents.iter().copied().filter(|a| to.contains(a)).collect();
+    }
+    if from_agent {
+        return vec![];
+    }
+    let text = v.as_str().or_else(|| v.get("text").and_then(|t| t.as_str())).unwrap_or_default();
+    if mentions_anyone(text) {
+        return agents.to_vec();
+    }
+    agents.first().copied().into_iter().collect()
+}
+
+/// Whether `text` @-mentions anyone, as a bridge reads a mention: an `@`
+/// that follows no word character, before a word (`[A-Za-z0-9_-]`), so an
+/// email address is none.
+fn mentions_anyone(text: &str) -> bool {
+    let b = text.as_bytes();
+    (0..b.len()).any(|i| {
+        let after_word = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        b[i] == b'@' && !after_word && b.get(i + 1).is_some_and(|c| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-')
+    })
 }
 
 /// Whose ask a record of a place hands its agents (FIN-720), as its place
@@ -375,6 +409,27 @@ mod tests {
         assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"hello"}"#), Some(Asked::Unproven(juniper.clone())), "an agent's words in no turn: its own, unproven");
         assert_eq!(asked_of(&juniper, Some(Author::Code), None, r#"{"text":"hi"}"#), None, "app code's words are no one's");
         assert_eq!(asked_of("anon:x", Some(Author::Person), None, r#"{"text":"hi"}"#), None, "an anonymous visitor asks no one");
+        let agents = ["npub1lead", "npub1maple"];
+        assert_eq!(heard_by(r#"{"text":"hi"}"#, false, &agents), vec!["npub1lead"], "a person's words naming no one are the lead's");
+        assert_eq!(heard_by(r#"{"text":"hi","to":["npub1maple"]}"#, false, &agents), vec!["npub1maple"], "`to` names whom");
+        assert_eq!(heard_by(r#"{"text":"@maple hi"}"#, false, &agents), agents.to_vec(), "a mention: every agent, the place knowing no names");
+        assert_eq!(heard_by(r#"{"text":"mail a@b.com"}"#, false, &agents), vec!["npub1lead"], "an email address is no mention");
+        assert_eq!(heard_by(r#"{"text":"over to you"}"#, true, &agents), Vec::<&str>::new(), "an agent's words are to whom `to` names alone");
+        assert_eq!(heard_by(r#"{"text":"over","to":["npub1maple"]}"#, true, &agents), vec!["npub1maple"]);
+        assert_eq!(heard_by(r#""hi""#, false, &[]), Vec::<&str>::new(), "no agents, no one");
+    }
+
+    /// Goal (FIN-720): a mandate's own day is read back from its text, as
+    /// an agent fragment holds it for an open turn.
+    #[test]
+    fn a_mandates_text_says_its_place_and_its_day() {
+        let key = MandateKey::derive(&"s".repeat(crate::seal::HOST_SECRET_MIN_BYTES));
+        let (asker, agent, place) = (crate::npub::display(&"b".repeat(64)), crate::npub::display(&"a".repeat(64)), crate::npub::display(&"c".repeat(64)));
+        let m = Mandate::of_record(&asker, &agent, &place, "chat", 4, 1_000).unwrap();
+        let text = m.text(&key);
+        assert_eq!(until_of(&text), Some(1_000 + limits::MANDATE_LIFE_MS));
+        assert_eq!(place_of(&text), Some(place.as_str()));
+        assert_eq!(until_of("not a mandate"), None);
     }
 
     /// Goal (FIN-720): one list says what of an agent's calls is its

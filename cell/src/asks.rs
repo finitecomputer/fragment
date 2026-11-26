@@ -8,7 +8,8 @@
 //!   (`mandate::starts_turn`), someone's (`mandate::asked_of`: their own;
 //!   an agent's in a turn of its own, to another of its owner's agents, the
 //!   ask that turn carries on here), to an agent member there since before
-//!   they were said (`mandate::addressed`), open that agent's ask of them
+//!   they were said (`mandate::heard_by`: as its bridge hears them), open
+//!   that agent's ask of them
 //!   as they first reach it: sent on its socket that follows `chat` (in
 //!   the append's own step, `asks_noted`), or read forward past its newest
 //!   (a page after its cursor, a subscribe's catch-up). Each is handed
@@ -16,7 +17,8 @@
 //!   given yet (it sleeps) hold it to nothing.
 //! - **A claim** (`claim_noted`, before its append): the agent's
 //!   `turn.start` on `work` for a record here opens that record's ask
-//!   again, as the record says whose it is, and names the turn.
+//!   again, as the record says whose it is, and names the turn; the other
+//!   agents' asks of it that they never claimed close.
 //! - **An end** (in the append's step): its `turn.end` closes that turn's
 //!   ask and every one it never claimed, each held until its ask's hold
 //!   passed (`limits::TURN_HOLD_MS`); a turn it claims later opens again.
@@ -151,12 +153,18 @@ impl FragmentCell {
                 from.max(0)
             }
         };
+        let agents: Vec<String> = members.iter().map(|m| npub::display(&m.principal)).collect();
+        let agents: Vec<&str> = agents.iter().map(String::as_str).collect();
         let (mut newest, mut opened, mut others, now) = (handed, false, false, js::now_ms());
         for r in records.iter().filter(|r| r.channel == CHAT && r.seq > handed) {
             newest = newest.max(r.seq);
             // words older than a mandate's life start nothing new (its claim of them opens them all the same)
             let old = r.at.saturating_add(limits::MANDATE_LIFE_MS) < now;
-            if old || r.principal == agent || r.at < m.added_at || !mandate::starts_turn(r.body.get()) || !mandate::addressed(r.body.get(), &agent) {
+            if old || r.principal == agent || r.at < m.added_at || !mandate::starts_turn(r.body.get()) {
+                continue;
+            }
+            // to it, as its bridge hears whom words are to
+            if !mandate::heard_by(r.body.get(), r.author == Some(Author::Agent), &agents).contains(&agent.as_str()) {
                 continue;
             }
             let Some(asked) = mandate::asked_of(&r.principal, r.author, r.asker.as_deref(), r.body.get()) else { continue };
@@ -239,6 +247,20 @@ impl FragmentCell {
         if changed {
             self.asks_changed(&agent, !is_owner(m, &asker))?;
         }
+        // the other agents it was handed to and never claimed let it go
+        // (words that mention anyone go to every agent: `heard_by`); one
+        // that claims it after opens it again
+        #[derive(Deserialize)]
+        struct Let {
+            agent: String,
+        }
+        let let_go: Vec<Let> = self.typed(
+            "UPDATE asks SET until = MAX(?, at + ?) WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL RETURNING agent",
+            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(limits::TURN_HOLD_MS), CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
+        )?;
+        for other in let_go {
+            self.asks_changed(&other.agent, false)?;
+        }
         self.asks_settled(&agent).await
     }
 
@@ -263,8 +285,10 @@ impl FragmentCell {
         })
     }
 
+    /// The agent members, in the order they joined (the first is the
+    /// chat's lead), as their bridges read them.
     fn agent_members(&self) -> CellResult<Vec<Member>> {
-        self.typed("SELECT principal, owner, added_at FROM members WHERE kind = 'agent' OR owner IS NOT NULL", vec![])
+        self.typed("SELECT principal, owner, added_at FROM members WHERE kind = 'agent' OR owner IS NOT NULL ORDER BY added_at, principal", vec![])
     }
 
     /// A new version of `agent`'s asks here, due now: `gate`, one that

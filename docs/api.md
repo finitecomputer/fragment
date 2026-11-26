@@ -204,12 +204,15 @@ host secret.
 **A place opens its agents' turns** (FIN-720; cell/src/asks.rs). Whose
 ask an agent's turn is is the word of the chat it was asked in, from its
 own records, never its computer's. Words on `chat` that start a turn,
-someone's (`mandate::asked_of`) and to an agent member (`addressed`),
-open that agent's ask as they first reach it: sent on its socket that
+someone's (`mandate::asked_of`), to an agent member as its bridge hears
+them (`mandate::heard_by`: whom `to` names, else whom a person
+@-mentions, any mention being every agent, else the chat's lead), open
+that agent's ask as they first reach it: sent on its socket that
 follows `chat`, or read forward past the newest it was handed (a page
 after its cursor, a subscribe's catch-up); each is handed once, and a
 read back hands nothing. Its claim of a record there (its `turn.start`
-on `work`) opens that record's ask again; its `turn.end` closes that
+on `work`) opens that record's ask again, and the other agents' asks of
+it they never claimed close; its `turn.end` closes that
 turn's ask and each it never claimed, each held at least
 `TURN_HOLD_MS` from its words. Each change is a new version, and the
 agent's fragment is told all its open asks there (one turn an asker,
