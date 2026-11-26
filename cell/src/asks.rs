@@ -243,7 +243,7 @@ impl FragmentCell {
         // the record it claims, which may be trimmed since it was handed:
         // its ask, kept, opens all the same
         let said: Option<Said> = self.typed("SELECT principal, author, asker, at, body FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?.into_iter().next();
-        let named = said.as_ref().map(|s| mandate::named(&s.body)).unwrap_or_default();
+        let (named, said_kept) = (said.as_ref().map(|s| mandate::named(&s.body)).unwrap_or_default(), said.is_some());
         let rows: Vec<Claimed> = self.typed("SELECT asker, turn, until FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(seq)])?;
         let (asker, changed) = match rows.into_iter().next() {
             Some(c) if c.turn.as_deref() == Some(turn) && c.until.is_none() => (c.asker, false),
@@ -278,10 +278,16 @@ impl FragmentCell {
         struct Let {
             agent: String,
         }
-        let open: Vec<Let> = self.typed(
-            "SELECT agent FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL",
-            vec![CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
-        )?;
+        // whom its `to` named is read from the record: one trimmed since
+        // lets no one else's go (it is not known whom it named)
+        let open: Vec<Let> = if said_kept {
+            self.typed(
+                "SELECT agent FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL",
+                vec![CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
+            )?
+        } else {
+            vec![]
+        };
         for other in open.into_iter().filter(|o| !named.contains(&o.agent)) {
             self.exec(
                 "UPDATE asks SET until = MAX(?, at + ?) WHERE channel = ? AND seq = ? AND agent = ?",
