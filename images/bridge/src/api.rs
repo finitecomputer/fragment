@@ -621,9 +621,16 @@ impl Api {
     /// SimpleX (it names its core), which the read says
     /// (`?simplex=1`), so its owner's Settings offer it (docs/bridge.md,
     /// "SimpleX").
+    /// A computer on a disk says what its mount did with it, until one read
+    /// has (`disk::query`: the start line's numbers).
     pub async fn computer(&self, simplex: bool) -> Result<Computer, ApiError> {
-        let path = if simplex { "/api/computer?simplex=1" } else { "/api/computer" };
-        let c: Computer = self.json(Method::GET, path, None, None).await?;
+        let disk = crate::disk::query();
+        let query: Vec<&str> = [if simplex { "simplex=1" } else { "" }, disk.as_str()].into_iter().filter(|q| !q.is_empty()).collect();
+        let path = if query.is_empty() { "/api/computer".to_string() } else { format!("/api/computer?{}", query.join("&")) };
+        let c: Computer = self.json(Method::GET, &path, None, None).await?;
+        if !disk.is_empty() {
+            crate::disk::said();
+        }
         if c.agents.len() > limits::AGENTS_MAX {
             return Err(ApiError::Decode(format!("{} agents; a computer runs at most {}", c.agents.len(), limits::AGENTS_MAX)));
         }
@@ -639,6 +646,17 @@ impl Api {
             }
         }
         Ok(c)
+    }
+
+    /// `POST /unusable {why}` on its disk's route (an `Api` of
+    /// `disk::ROUTE`): its boot found the head it was handed would not
+    /// mount (`disk::Unmounted::Unusable`), so that start falls back past it
+    /// (docs/computers.md, "A disk"). The route names its life and the head,
+    /// so the word fails that start alone. Whether the platform took it.
+    pub async fn disk_unusable(&self, why: &str, blank: bool, unmountable: bool) -> Result<bool, ApiError> {
+        let why: String = why.chars().take(500).collect();
+        let v: Value = self.json(Method::POST, "/unusable", None, Some(json!({ "why": why, "blank": blank, "unmountable": unmountable }))).await?;
+        Ok(v["taken"] == true)
     }
 
     /// `PUT /api/computer/turns {life, generation, turn, place, asker?, mandate?}`, as the

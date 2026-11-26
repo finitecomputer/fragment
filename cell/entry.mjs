@@ -9,6 +9,7 @@ import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
 import { readAgain, restoreChecked } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
+import { fpacRoute } from "./fpac.mjs";
 import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
 // A SimpleX door's object and its container's egress: JavaScript of its
@@ -441,7 +442,7 @@ class ContainerHost {
   // overtaken meanwhile (a start after it, or a destroy begun: a sleep's
   // or a wipe's) starts nothing, answering false, and one overtaken by the
   // time its idle stop is set answers false too (that destroy ends it).
-  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
+  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs, disk) {
     this.#generation = generation;
     const destroys = this.#destroys;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
@@ -452,7 +453,7 @@ class ContainerHost {
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
-    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage), overtaken))) return false;
+    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage, disk), overtaken))) return false;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
@@ -477,20 +478,23 @@ class ContainerHost {
   // intercept, which a computer has none of. One registered late (a
   // start's that was overtaken) would replace the grant of a restore under
   // way.
-  #intercept(computer, swapHosts, codestorage) {
-    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
+  // A start on a disk (`disk`: its prefix, name, epoch, volume and the
+  // head it opens from) also routes fpac.fragment.internal, with the disk
+  // in its props (fpac.mjs).
+  #intercept(computer, swapHosts, codestorage, disk) {
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, disk);
   }
 
   #egress(computer) {
-    return (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+    return (route, disk) => this.#ctx.exports.ComputerEgress({ props: disk ? { computer, route, disk } : { computer, route } });
   }
 
   // Its running start `generation`'s intercepts again (a new isolate's),
   // and the runtime's idle stop, the safety net under the Computer DO's
   // own sleep.
-  async arm(generation, computer, idleMs, swapHosts, codestorage) {
+  async arm(generation, computer, idleMs, swapHosts, codestorage, disk) {
     if (generation !== this.#generation) return false;
-    await this.#intercept(computer, swapHosts, codestorage);
+    await this.#intercept(computer, swapHosts, codestorage, disk);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
     return generation === this.#generation;
   }
@@ -824,10 +828,25 @@ export class Computer extends DurableObject {
 export class ComputerEgress extends WorkerEntrypoint {
   async fetch(request) {
     const { computer, route } = this.ctx.props;
+    // a disk's own route (fpac.mjs): its bytes R2's, streamed through, its
+    // head the Computer DO's (Rust carries the post to it)
+    if (route === "fpac") {
+      const E = rs.ComputerEgress;
+      const rules = { nameEpoch: (n) => E.fpac_name_epoch(n) ?? null, objectBytesMax: E.fpac_object_bytes_max(), headLineMax: E.fpac_head_line_max() };
+      return fpacRoute(
+        request,
+        this.env.BLOBS,
+        this.ctx.props.disk,
+        rules,
+        (epoch, line) => E.disk_head(this.env, computer, epoch, line),
+        (epoch, head, why, blank, unmountable) => E.disk_unusable(this.env, computer, epoch, head, why, blank, unmountable),
+      );
+    }
     // a relay only where one was asked for: its route, a GET that upgrades
     // (Rust strips the relay's headers from every other answer besides)
     const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
-    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
+    // a disk start's API names its life (`disk.epoch`): its guest's reads say whose
+    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route, this.ctx.props.disk?.epoch ?? null);
     const lease = asked ? answer.headers.get("x-fragment-relay") : null;
     if (!lease) return answer;
     const h = answer.headers;

@@ -664,6 +664,11 @@ impl Api {
     /// sign-in (`POST /api/test/signin`): a seat whose paid calls (model
     /// calls and AI steps) are capped at `paid_calls`, lent from the run's
     /// budget. Their identity joins the run's people (its spend is theirs).
+    /// The paid calls the run may still lend (`--max-paid-calls`).
+    pub fn paid_calls_left(&self) -> u64 {
+        self.run.paid_calls_left()
+    }
+
     pub fn e2e_sign_in(&self, email: &str, paid_calls: u64) -> Result<(String, String)> {
         self.run.lend(paid_calls)?;
         self.levers_sign_in(email, Some(paid_calls))

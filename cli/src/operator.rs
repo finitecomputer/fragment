@@ -25,6 +25,9 @@ const WIPE_CALLS_MAX: u32 = 60;
 /// Calls in a row that may finish no step before the wipe stops, saying
 /// what it waits for: it is run again later, where it stopped.
 const WIPE_STALLED_MAX: u32 = 15;
+// a disk's settle is waited out within the platform's calls (each its
+// whole budget then): those calls in a row outlast it (Codex on #1552)
+const _: () = assert!(WIPE_STALLED_MAX as i64 * fragment_core::wipe::CALL_BUDGET_MS > 2 * fragment_core::computer::fpac::WIPE_SETTLE_MS, "a wipe's stalled calls outlast its disk's settle");
 /// The pause between two calls that finished no step.
 const WIPE_PAUSE: Duration = Duration::from_secs(2);
 

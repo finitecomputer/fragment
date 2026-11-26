@@ -133,6 +133,19 @@ pub fn reads_disk_after(event: &Event, life: &Lifecycle) -> Option<u64> {
 /// BusyBox's both print.
 pub const DISK_READ: &str = "df -P -B1 /";
 
+/// `DISK_READ` on a computer's disk (docs/computers.md, "A disk"): its
+/// `/data` is a filesystem of its own, not the container's.
+pub const DISK_READ_ON_DISK: &str = "df -P -B1 /data";
+
+/// A read (`DISK_READ`, or `sizes_read`'s, which runs it first) of a
+/// computer on a disk: its `df` of `/data`, the rest the same.
+pub fn read_on_disk(read: &str) -> String {
+    let at = read.find(DISK_READ).expect("a disk read runs its df");
+    let after = &read[at + DISK_READ.len()..];
+    assert!(after.is_empty() || after.starts_with(';'), "its df's path ends there");
+    format!("{}{DISK_READ_ON_DISK}{after}", &read[..at])
+}
+
 /// What reads a computer's disk and what its `/data` restores to after an
 /// awake save, run in its container (`disk_of_sizes` reads its answer):
 /// `DISK_READ`, then a line for each record its save takes, measured as
@@ -377,6 +390,34 @@ pub fn disk_of_df(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk
     (total > 0 && free <= total).then_some(ComputerDisk { total, free, at: at_ms, generation, data: None })
 }
 
+/// What a disk's sleep runs in its container to read its owner's Storage
+/// (cell `measure_asleep`, which runs this and nothing else): one `df` of
+/// its `/data`, through `sh -c` as every exec of the DO's is; read by
+/// `disk_of_df_on_disk`.
+pub const DISK_SLEEP_ARGV: [&str; 3] = ["sh", "-c", DISK_READ_ON_DISK];
+
+/// A computer's disk on a disk (docs/computers.md, "A disk") from its
+/// `df` of `/data` (`DISK_READ_ON_DISK`, alone or a sizes read's first
+/// lines): its `/data` is a filesystem of its own, so what takes it is that
+/// filesystem's used bytes, its own count (one `statvfs`), read at once
+/// however many files it holds, where a walk of them grows with them: a
+/// sleep's measure never walks. None for an answer it cannot read.
+pub fn disk_of_df_on_disk(out: &str, at_ms: i64, generation: u64) -> Option<ComputerDisk> {
+    let disk = disk_of_df(out, at_ms, generation)?;
+    let row = out.lines().filter(|l| !l.trim().is_empty()).skip_while(|l| !l.starts_with("Filesystem")).nth(1)?;
+    let used = row.split_whitespace().nth(2)?.parse::<u64>().ok()?;
+    (used <= disk.total).then_some(ComputerDisk { data: Some(used), ..disk })
+}
+
+/// Whether a disk computer's breakdown (its last walk's, `sizes_of`: an
+/// export's save or a file's delete) is as of its last read (`disk_at`):
+/// its sleep reads its total alone (`disk_of_df_on_disk`), so a breakdown
+/// older than that read says less than its total does, and its owner's
+/// Storage shows the total and its time without it.
+pub fn sizes_current(sizes_at: i64, disk_at: Option<i64>) -> bool {
+    disk_at.is_none_or(|at| sizes_at >= at)
+}
+
 /// A computer's disk from `sizes_read`'s answer: its `df` (`disk_of_df`),
 /// and what a restore of its `/data` writes (`data`): for each record, the
 /// larger of its allocated and its apparent size (a restore writes each
@@ -581,6 +622,49 @@ mod tests {
         }
     }
 
+    /// Goal: a disk's data is its own filesystem's used bytes, from its
+    /// `df` of `/data` alone or a sizes read's first lines (GNU's and
+    /// BusyBox's), the walk's records never counted. Invalid: no `df`, used
+    /// past its size, not a number.
+    #[test]
+    fn a_disks_data_is_its_filesystems_used_bytes() {
+        let gnu = "Filesystem     1-blocks      Used   Available Capacity Mounted on\n/dev/loop0  20618805248 141561856 20477243392       1% /data\n";
+        let busybox = "Filesystem           1-blocks       Used Available Capacity Mounted on\n/dev/loop0           20618805248  141561856 20477243392   1% /data\n";
+        let want = ComputerDisk { total: 20_618_805_248, free: 20_477_243_392, at: T, generation: 4, data: Some(141_561_856) };
+        assert_eq!(disk_of_df_on_disk(gnu, T, 4), Some(want));
+        assert_eq!(disk_of_df_on_disk(busybox, T, 4), Some(want));
+        // a sizes read's answer: its df first, its records never the data
+        let sized = format!("{gnu}home 99999999 102399998976\nwork 1 1024\nfolders\n");
+        assert_eq!(disk_of_df_on_disk(&sized, T, 4), Some(want));
+        for bad in ["", "Filesystem x\n/dev/loop0 10 11 0 100% /data", "Filesystem x\n/dev/loop0 10 lots 5 50% /data", "Filesystem x\n/dev/loop0 10 5"] {
+            assert_eq!(disk_of_df_on_disk(bad, T, 4), None, "{bad:?}");
+        }
+    }
+
+    /// Goal: a disk's sleep runs one `df` of its `/data` (its filesystem's
+    /// own count), never a walk of its files, which grows with them, and
+    /// nothing beside it (cell `measure_asleep` runs this argv alone).
+    #[test]
+    fn a_disks_sleep_reads_one_df_and_walks_nothing() {
+        assert_eq!(DISK_SLEEP_ARGV, ["sh", "-c", "df -P -B1 /data"]);
+        assert_eq!(read_on_disk(DISK_READ), DISK_READ_ON_DISK);
+        // one command: nothing rides along in its shell
+        let script = DISK_SLEEP_ARGV[2];
+        assert!(!script.contains([';', '&', '|', '$', '`', '\n']) && !script.split_whitespace().any(|w| ["du", "find", "ls"].contains(&w)), "{script:?}");
+    }
+
+    /// Goal: a disk's breakdown is shown only as of its last read: the one
+    /// taken with it (an export's walk, its df the same moment) or after it
+    /// (none read since). Invalid: a sleep's read after it, which says a
+    /// total the breakdown does not.
+    #[test]
+    fn a_disks_breakdown_older_than_its_last_read_is_not_shown() {
+        assert!(sizes_current(T, Some(T)));
+        assert!(sizes_current(T, None));
+        assert!(sizes_current(T + 5, Some(T)));
+        assert!(!sizes_current(T, Some(T + 1)));
+    }
+
     /// Goal: what a restore of `/data` writes, read after a save as the
     /// Hermes image's GNU `du` and the stub's BusyBox `du` answer it (both
     /// answers the images' own, 2026-11-20, for an 8 MiB file hard-linked
@@ -621,6 +705,11 @@ mod tests {
             format!("s=$(date +%s); df -P -B1 /; if du -s --exclude=x /dev/null > /dev/null 2>&1; then {m}; cd /data && echo \"home $(m{home})\"; {{ cd /data/work && echo \"work $(m{work})\"; }} || echo work; else cd /data && echo \"all $(du -sxk . 2>/dev/null | cut -f1) $(du -sxb . 2>/dev/null | cut -f1)\"; fi; {LISTING}")
         };
         assert_eq!(sizes_read(&[]), read(" ./work", ""));
+        // on a disk, its df is of its /data, and the rest is the same
+        let read_all = sizes_read(&[]);
+        assert_eq!(read_on_disk(&read_all), read_all.replacen("df -P -B1 /;", "df -P -B1 /data;", 1));
+        assert!(read_on_disk(&read_all).contains("s=$(date +%s); df -P -B1 /data; if du"));
+        assert_eq!(read_on_disk(DISK_READ), "df -P -B1 /data");
         assert_eq!(
             sizes_read(&["/work/*/home/.cache/uv/".into(), "/hermes/state.db".into(), "/../etc/".into(), "/a b/".into(), "/x;rm/".into(), "/x'y/".into(), "/x$(id)/".into(), String::new()]),
             read(" ./work ./hermes/state.db", " ./*/home/.cache/uv"),

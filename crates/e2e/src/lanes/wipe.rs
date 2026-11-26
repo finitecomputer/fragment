@@ -36,7 +36,7 @@ const PNG: &[u8] = b"\x89PNG\r\n\x1a\n-a-wiped-picture";
 
 /// The operator key's file, as `fragment operator key` writes one: its
 /// secret's 64 hex, readable by its owner only.
-fn key_file(s: &Suite, keys: &Keys) -> Result<std::path::PathBuf> {
+pub(super) fn key_file(s: &Suite, keys: &Keys) -> Result<std::path::PathBuf> {
     let dir = s.dir("wipe-operator");
     let path = dir.join("operator.key");
     std::fs::write(&path, format!("{}\n", keys.secret_hex()))?;
@@ -50,7 +50,7 @@ fn key_file(s: &Suite, keys: &Keys) -> Result<std::path::PathBuf> {
 
 /// The `data` of `fragment operator wipe …` signed with the operator key's
 /// file, or why it failed.
-fn cli_wipe(s: &Suite, api: &Api, file: &std::path::Path, args: &[&str]) -> Result<Value> {
+pub(super) fn cli_wipe(s: &Suite, api: &Api, file: &std::path::Path, args: &[&str]) -> Result<Value> {
     let home = s.dir("wipe-cli");
     let path = file.to_string_lossy().to_string();
     let mut all = vec!["operator", "wipe"];

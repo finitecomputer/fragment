@@ -432,6 +432,7 @@ fn dev(args: &[String]) -> Result<()> {
         computer_internet: true,
         door_internet: true,
         computer_unsaved_max_ms: None,
+        computer_disks: None,
         // with the WorkOS fake (dev's default), its stand-in provider; a real
         // WorkOS environment has no such provider, so then none
         providers: Some(dev_providers(workos_fake.as_ref().map(|f| f.connection_oauth()))),
