@@ -34,21 +34,29 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   let writing = Promise.resolve();
   // What went wrong for a secret is said in the newest sheet drawn for it
   // (a redraw replaces a sheet while a write queued from the old one is
-  // still on its way), and Add's in the newest Add form (`ADD`). With none
-  // showing (the page mid-redraw), it waits for the next one drawn, or,
-  // the secret gone, for the section's next drawing: only in the Settings
-  // visit its write began in (`visit`), never a later one.
+  // still on its way), and Add's in the newest Add form (`ADD`), which
+  // opens to say it. With none showing (the page mid-redraw), it waits for
+  // the next one drawn, or, the secret gone, for the section's next
+  // drawing: only in the Settings visit its write began in (`visit`),
+  // never a later one. A sheet's message stays until that sheet closes.
   const ADD = "";
   const sayers = new Map();
   const pending = new Map();
   function say(name, text, visit) {
-    const said = sayers.get(name);
-    if (said?.isConnected) {
-      said.textContent = text;
-      said.hidden = false;
-    } else {
-      pending.set(name, { text, visit });
-    }
+    if (!asks.current(visit)) return;
+    const { said, sheet } = sayers.get(name) ?? {};
+    if (!said?.isConnected) return pending.set(name, { text, visit });
+    said.textContent = text;
+    said.hidden = false;
+    reveal(sheet, name);
+  }
+  // open the sheet a message was said in, unless Settings was left or
+  // another sheet is open (it then waits there, to be read when opened)
+  function reveal(sheet, name) {
+    if (sheet.open || !isOpen() || document.querySelector("dialog[open]")) return;
+    if (name !== ADD) openSheet = { secret: name, visit: asks.now("settings") };
+    sheet.showModal();
+    sheet.focus();
   }
   // what waits for `name` in this visit, taken (one from another visit is dropped)
   function waiting(name) {
@@ -148,7 +156,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     const before = waiting(sec.name);
     said.hidden = !before;
     said.textContent = before ?? "";
-    sayers.set(sec.name, said);
+    sayers.set(sec.name, { said, sheet });
     const path = `/api/vault/${encodeURIComponent(sec.name)}`;
     function written(write) {
       const run = writing.then(async () => {
@@ -341,6 +349,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     closeOnOutsidePress(sheet);
     sheet.onclose = () => {
       valueInput.value = "";
+      said.hidden = true;
       if (openSheet?.secret === sec.name) openSheet = null;
     };
     open.onclick = () => {
@@ -503,23 +512,20 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     closeOnOutsidePress(dialog);
     dialog.onclose = () => {
       valueInput.value = "";
+      said.hidden = true;
     };
     button.onclick = () => {
-      said.hidden = true;
       dialog.showModal();
       nameInput.focus();
     };
     // a failure that came as the page was drawn again: this form says it, open
-    sayers.set(ADD, said);
+    sayers.set(ADD, { said, sheet: dialog });
     const before = waiting(ADD);
     if (before) {
       said.textContent = before;
       said.hidden = false;
       queueMicrotask(() => {
-        if (dialog.isConnected && !dialog.open && isOpen()) {
-          dialog.showModal();
-          nameInput.focus();
-        }
+        if (dialog.isConnected) reveal(dialog, ADD);
       });
     }
     return { button, dialog };

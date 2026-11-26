@@ -70,11 +70,18 @@ function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { f
     observe() {}
     disconnect() {}
   };
+  // every node drawn, so `dialog[open]` finds a sheet left open
+  const made = [];
+  const make = (tag, cls, text) => {
+    const n = new Node(tag, cls, text);
+    made.push(n);
+    return n;
+  };
   globalThis.document = {
-    createElementNS: (_, tag) => new Node(tag),
-    createElement: (tag) => new Node(tag),
+    createElementNS: (_, tag) => make(tag),
+    createElement: (tag) => make(tag),
     getElementById: () => null,
-    querySelector: () => null,
+    querySelector: (q) => (q === "dialog[open]" ? (made.find((n) => n.tag === "dialog" && n.open && n.isConnected) ?? null) : null),
     addEventListener() {},
     removeEventListener() {},
   };
@@ -87,7 +94,7 @@ function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { f
   });
   const ui = createSecrets({
     api,
-    el: (tag, cls, text) => new Node(tag, cls, typeof text === "string" ? text : ""),
+    el: (tag, cls, text) => make(tag, cls, typeof text === "string" ? text : ""),
     section: (title) => new Node("section", null, title),
     named: (node, fragment, make = (t) => t, attr = "text") => {
       const val = make(fragment);
@@ -312,6 +319,108 @@ test("Add's failure as the page is drawn again is said in the Add form drawn nex
   await added;
   const next = walk(secretsSection({ secrets: [] })).find((x) => x.dataset?.addSecret === "1");
   assert.match(walk(next).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+});
+
+test("Add's failure after the page was drawn again opens the Add form drawn since, saying it", async () => {
+  let fail;
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [] };
+    await new Promise((r) => (fail = r));
+    throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
+  };
+  const { secretsSection } = setup(null, undefined, vaultApi);
+  const first = secretsSection({ secrets: [] });
+  const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
+  walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
+  walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
+  const added = form.onsubmit({ preventDefault() {} });
+  while (!fail) await new Promise((r) => setTimeout(r, 1));
+  // another write's redraw is done before Add's answer comes
+  for (const x of walk(first)) x.isConnected = false;
+  const next = secretsSection({ secrets: [] });
+  fail();
+  await added;
+  const dialog = walk(next).find((x) => x.dataset?.addSecret === "1");
+  const said = () => walk(dialog).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "";
+  assert.equal(dialog.open, true, "the Add form drawn since opens to say it");
+  assert.match(said(), /at most 8 hosts/);
+  dialog.close();
+  walk(next).find((x) => x.dataset?.action === "add-secret").onclick();
+  assert.equal(said(), "", "said once: closing it puts it away");
+});
+
+test("a failure that comes after Settings was left says nothing on a later visit, and a sheet's message goes when it closes", async () => {
+  let visit = 1;
+  const asks = { now: () => visit, current: (v) => v === visit };
+  let answer;
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [github()] };
+    await new Promise((r) => (answer = r));
+    throw new ApiError(503, "the Vault could not be reached");
+  };
+  const { secretsSection } = setup(null, undefined, vaultApi, null, asks);
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  const toggled = walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  while (!answer) await new Promise((r) => setTimeout(r, 1));
+  visit = 2;
+  const later = secretsSection({ secrets: [github()] });
+  answer();
+  await toggled;
+  assert.equal(walk(later).some((x) => x.className.includes("secret-said") && !x.hidden), false);
+  assert.equal(walk(later).some((x) => x.open), false);
+
+  // in its own visit, the sheet says it until it closes
+  const now = walk(later).find((x) => x.dataset?.secret === "github");
+  const toggledNow = walk(now).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  answer = null;
+  while (!answer) await new Promise((r) => setTimeout(r, 1));
+  answer();
+  await toggledNow;
+  const sheet = walk(now).find((x) => x.dataset?.secretSheet === "github");
+  const said = () => walk(sheet).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "";
+  assert.match(said(), /could not be reached/);
+  sheet.close();
+  assert.equal(said(), "");
+});
+
+test("a secret's refusal and Add's failure in one redraw open one sheet, and Add's waits in its form", async () => {
+  let held = github();
+  let gone;
+  const away = new Promise((r) => (gone = r));
+  const vaultApi = async (method, path) => {
+    if (method === "GET") return { secrets: [structuredClone(held)] };
+    if (path.endsWith("/github")) {
+      held = { ...held, revision: "rev9" };
+      throw new ApiError(409, "github changed since you read it: look at it again");
+    }
+    await away;
+    throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
+  };
+  const drawn = [];
+  let first;
+  let add;
+  const { secretsSection } = setup(null, undefined, vaultApi, async (ui) => {
+    // Add fails while the page is away
+    for (const x of walk(first)) x.isConnected = false;
+    gone();
+    await add;
+    drawn.push(ui.secretsSection({ secrets: [structuredClone(held)] }));
+    await new Promise((r) => setTimeout(r, 0));
+  });
+  first = secretsSection({ secrets: [github()] });
+  const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
+  walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
+  walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
+  const card = walk(first).find((x) => x.dataset?.secret === "github");
+  const toggled = walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  add = form.onsubmit({ preventDefault() {} });
+  await toggled;
+  const page = drawn[0];
+  const sheet = walk(page).find((x) => x.dataset?.secretSheet === "github");
+  const dialog = walk(page).find((x) => x.dataset?.addSecret === "1");
+  assert.equal(sheet.open, true, "the refused secret's sheet opens");
+  assert.equal(dialog.open, false, "Add's form waits beneath no other sheet");
+  assert.match(walk(dialog).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
 });
 
 test("two edits at once go one after the other, each onto what the last left", async () => {
