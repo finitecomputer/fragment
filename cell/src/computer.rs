@@ -568,8 +568,8 @@ pub struct ComputerCell {
     /// only, shared with the task that hands them over.
     uses_due_ms: Rc<std::cell::Cell<i64>>,
     /// The e2e's lever `fail-read`: how many more reads of its SimpleX
-    /// move records fail, as an unreachable computer's would. In memory
-    /// only.
+    /// move records marked moved fail, as a computer gone unreachable once
+    /// its core stopped would. In memory only.
     failing_reads: std::cell::Cell<u32>,
 }
 
@@ -3272,9 +3272,11 @@ impl ComputerCell {
                 Ok(json!({ "computer": id, "op": b.op, "path": path, "times": times }))
             }
             "fail-read" => {
-                // the next `times` reads of its SimpleX move records fail,
-                // as a computer gone unavailable would (simplex_move.rs's
-                // failure handler, unable to read its mark)
+                // the next `times` reads of its SimpleX move records marked
+                // moved fail, as a computer gone unavailable once its core
+                // stopped would (simplex_move.rs's failure handler, unable
+                // to read its mark); a move's first read, before its
+                // handover, reads as ever
                 let times = b.times.unwrap_or(1);
                 self.failing_reads.set(times);
                 Ok(json!({ "computer": id, "op": b.op, "times": times }))
@@ -4253,7 +4255,7 @@ impl ComputerCell {
         }
         let mut moves = self.simplex_moves()?;
         match b["op"].as_str().unwrap_or("") {
-            "read" if self.failing_reads.get() > 0 => {
+            "read" if self.failing_reads.get() > 0 && moves.get(agent).is_some_and(|r| r["moved"] == true) => {
                 self.failing_reads.set(self.failing_reads.get() - 1);
                 Err(CellError::host("the test lever's failed read"))
             }
