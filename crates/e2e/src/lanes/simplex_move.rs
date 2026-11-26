@@ -66,7 +66,9 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     members_only(api, &owner, &agent)?;
     let r = api.signed(&owner, "PUT", &format!("/api/computers/{id}/agents/{agent}"), Some(&json!({})))?;
     anyhow::ensure!(r.status == 200, "its agent assigned: {r}");
-    let r = lever_with(api, &id, json!({ "op": "always-on", "on": true }))?;
+    // it starts its computer, and answers once that is up: as patient as
+    // a wake (a new image's first start on a preview passed a minute)
+    let r = lever_with(&api.patient(WAKE), &id, json!({ "op": "always-on", "on": true }))?;
     anyhow::ensure!(r.status == 200, "always on: {r}");
     let woke = api.patient(WAKE).signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})))?;
     let awake = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
