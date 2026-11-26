@@ -463,7 +463,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     // a hand-off's turn, as its bridge starts one (FIN-615, PR 16a): the
     // agent that said the words its `asker`, whose ask they were on
     // `carried`; its line names both
-    let (juniper, ben) = (super::delegation::agent_of(api, owner)?.1, api.identity(&api.person()?)?);
+    let (juniper, ben) = (super::super::delegation::agent_of(api, owner)?.1, api.identity(&api.person()?)?);
     let both = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": "awake" }, { "identity": juniper, "name": "juniper", "title": "Juniper", "phase": "awake" }] });
     chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({both}, location.origin); return true; }})()"))?;
     for (id, body) in [
