@@ -151,14 +151,15 @@ impl Move<'_> {
         Ok(json!({ "agent": self.agent, "computer": self.computer, "awake": read["awake"], "link": read["link"]["said"], "record": read["record"], "blocked": self.blocked(&read) }))
     }
 
-    /// Why a move that has not begun may not: its computer asleep (its
-    /// handover wakes it), or its link not one its computer holds bound.
+    /// Why a move that has not begun may not: its computer asleep (an
+    /// always-on one wakes by itself), or its link not one its computer
+    /// holds bound.
     fn blocked(&self, read: &Value) -> Option<String> {
         if !read["record"].is_null() {
             return None;
         }
         if read["awake"] != true {
-            return Some("its computer is asleep: `go` wakes it, then ask again".into());
+            return Some("its computer is asleep: ask again once it wakes (an always-on one wakes by itself)".into());
         }
         let said = &read["link"]["said"];
         let movable = said["phase"] == "linked" || (said["phase"] == "off" && said["staged"] == true);
@@ -168,11 +169,6 @@ impl Move<'_> {
     async fn go(&self) -> CellResult<Value> {
         let mut read = self.read().await?;
         if read["record"].is_null() {
-            if read["awake"] != true {
-                // its handover's call wakes it: asked so, it says it is waking
-                let woke = self.hand("handover", None, false, "").await;
-                return Err(woke.err().unwrap_or_else(|| CellError::new(ErrorCode::Conflict, "its computer was asleep: ask again")));
-            }
             if let Some(why) = self.blocked(&read) {
                 return Err(CellError::new(ErrorCode::Conflict, why));
             }
