@@ -536,7 +536,54 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     inbox_hmac(s, api, &owner)?;
     launched_across_lives(s, api, &owner)?;
     queued_before_a_card(s, api, &owner)?;
-    channel_run_inputs(s, api, &owner)
+    channel_run_inputs(s, api, &owner)?;
+    reads_as_owner(s, api)
+}
+
+/// Goal (FIN-615, PR 16b): an app reads another fragment's query as its
+/// viewer, its owner, while it is theirs alone (`Sharing::only_you`): what
+/// its owner may read there, a query alone. Method: Ana's dashboard and her
+/// notes (both members only, no one else in them) and Carl's own app.
+/// Valid: the dashboard's job reads her notes' items, as hers. Invalid: a
+/// mutation of her notes is refused (queries alone), and Carl's app (hers to
+/// read nowhere) refuses her; once Ben is in her dashboard, it reads none of
+/// her apps, saying why in plain words.
+fn reads_as_owner(s: &mut Suite, api: &Api) -> Result<()> {
+    let long = Duration::from_secs(40);
+    let (ana, ben, carl) = (api.person()?, api.person()?, api.person()?);
+    let ((dash, _), (notes, _), (carls, _)) = (jobs_fragment(s, api, &ana, "dash", |_| {})?, jobs_fragment(s, api, &ana, "notes", |_| {})?, jobs_fragment(s, api, &carl, "carls", |_| {})?);
+    for (keys, name) in [(&ana, &dash), (&ana, &notes), (&carl, &carls)] {
+        let r = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(r.status == 200, "{name} members only: {r}");
+    }
+    let saved = api.op(&ana, &notes, "save", "s1", json!({ "texts": ["alpha"], "source": "notes" }))?;
+    anyhow::ensure!(saved.status == 200, "a note saved: {saved}");
+    let read = |id: &str, target: &str, op: &str| -> Result<Value> {
+        let r = api.op(&ana, &dash, "reads", id, json!({ "fragment": target, "op": op, "input": {} }))?;
+        anyhow::ensure!(r.status == 200, "the read started: {r}");
+        Ok(settle(api, &ana, &dash, started(&r), &["succeeded", "held"], long))
+    };
+    let hers = read("r1", &notes, "items")?;
+    s.ok(
+        "her app, hers alone, reads her other app's query as her: its result whole",
+        hers["status"] == "succeeded" && hers["output"] == json!([{ "text": "alpha", "source": "notes" }]),
+        &hers,
+    );
+    let (mutation, theirs) = (read("r2", &notes, "save")?, read("r3", &carls, "items")?);
+    s.ok(
+        "a mutation is refused (it reads queries alone), and an app she can't read refuses her",
+        mutation["status"] == "held" && mutation["error"].as_str().is_some_and(|e| e.contains("is no query")) && theirs["status"] == "held" && api.op(&ana, &notes, "items", "q2", json!({}))?.body["result"] == json!([{ "text": "alpha", "source": "notes" }]),
+        json!({ "mutation": mutation, "theirs": theirs }),
+    );
+    let joined = api.share(&dash, &api.identity(&ben)?, "viewer")?;
+    anyhow::ensure!(joined.status == 200, "Ben in her dashboard: {joined}");
+    let shared = read("r4", &notes, "items")?;
+    s.ok(
+        "once someone else is in it, it reads none of her apps, and says why",
+        shared["status"] == "held" && shared["error"].as_str().is_some_and(|e| e.contains("This app can read your other apps only while it's yours alone.")),
+        &shared,
+    );
+    Ok(())
 }
 
 /// Goal: a run queued while the alarm's pass works starts before that

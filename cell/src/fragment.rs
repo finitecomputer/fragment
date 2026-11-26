@@ -1332,6 +1332,11 @@ impl FragmentCell {
                 let op = op.to_string();
                 self.api_op(&caller, &op, body).await
             }
+            (Method::Post, ["api", "reads", op]) => {
+                let body = body_json(&mut req).await?;
+                let op = op.to_string();
+                self.api_read(&caller, &op, body).await
+            }
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
                 self.put_blob(&caller, &sha, &req).await

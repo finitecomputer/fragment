@@ -24,6 +24,11 @@ export class App extends DurableObject {
     return this.ctx.storage.sql.exec("SELECT text, source FROM items ORDER BY id").toArray();
   }
 
+  // Another app's query, as this app's owner (`job.read`): its result whole.
+  async reads({ fragment, op, input }, job) {
+    return await job.read(fragment, op, input ?? {});
+  }
+
   // An inbox's answer (`inbox.answer`, where a test declares it): a URL
   // check's challenge said back, else the platform's own answer.
   handshake({ record }) {

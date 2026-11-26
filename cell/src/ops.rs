@@ -257,6 +257,16 @@ impl FragmentCell {
         json_response(&result)
     }
 
+    /// `POST /api/f/<name>/reads/<op>`: `api_op` for a query alone (FIN-615,
+    /// PR 16b: what another app's `job.read` asks as its owner); any other
+    /// kind is refused before anything runs, in the same turn as the call.
+    pub(crate) async fn api_read(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
+        if self.declared(op)?.kind != OpKind::Query {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{op} is no query: an app reads another app's queries alone")));
+        }
+        self.api_op(caller, op, body).await
+    }
+
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link. The caller's standing is read once and

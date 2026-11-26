@@ -950,6 +950,7 @@ impl FragmentCell {
             // what the fragment's own page reads, read for its code: who is
             // in it, their names, and who is here
             Step::Members {} => self.member_list().map(|l| json!(l)).map_err(|e| StepFail::Retry(e.message)),
+            Step::Read { fragment, op, input } => self.step_read(run, index, &fragment, &op, input).await,
             Step::People { ids } => {
                 if ids.len() > fragment_core::steps::PEOPLE_MAX {
                     return Err(permanent(format!("job.people names at most {} identities at once", fragment_core::steps::PEOPLE_MAX)));
@@ -1023,6 +1024,40 @@ impl FragmentCell {
         fragment_core::secrets::may_fill(&stored.hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
         let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
         String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))
+    }
+
+    /// `job.read(fragment, op, input)` (FIN-615, PR 16b): `fragment`'s query
+    /// `op`, asked as this app's viewer, and only where that is its owner
+    /// (whose call started the run, or their own agent's for them) while the
+    /// app is theirs alone (`Sharing::only_you`): no one else reads it or
+    /// changes its code, so nothing it reads goes past its owner (SHIP IT,
+    /// 2026-11-26; anyone else's view waits on the one ask, PR 10). The
+    /// fragment read decides what its owner may read there, and answers a
+    /// query alone (`api_read`). Its `result`; a refusal fails the step.
+    async fn step_read(&self, run: &RunRow, index: u32, fragment: &str, op: &str, input: Value) -> Result<Value, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        if !fragment_proto::valid_fragment_name(fragment) || !fragment_proto::valid_op_name(op) {
+            return Err(permanent("job.read names a fragment (label--suffix) and one of its queries"));
+        }
+        let owner = self.must(MetaKey::Owner).map_err(retry)?;
+        let viewer = run.acting_for().unwrap_or(&run.principal);
+        if npub::display(viewer) != npub::display(&owner) || !self.sharing_counts().map_err(retry)?.only_you() {
+            return Err(permanent("This app can read your other apps only while it's yours alone."));
+        }
+        let cfg = &self.cfg;
+        let identity = fragment_proto::Identity { id: owner, kind: fragment_proto::IdentityKind::Person, owner: None, held: None };
+        let url = Url::parse(&format!("{}/api/f/{fragment}/reads/{op}", cfg.platform())).map_err(|e| permanent(e.to_string()))?;
+        let routed = crate::routed::Routed { name: fragment.to_string(), url, signed: Some(crate::routed::Signed::new(identity, None)), credential: None };
+        let body = json!({ "id": format!("read:{}:{index}", run.id), "input": input }).to_string();
+        let mut resp = routed.ask(&self.env, Method::Post, &format!("/api/reads/{op}"), Some(&body), None).await.map_err(retry)?;
+        let status = resp.status_code();
+        let text = resp.text().await.map_err(|e| StepFail::Retry(e.to_string()))?;
+        let answer: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        match status {
+            200..=299 => Ok(answer["result"].clone()),
+            429 | 500.. => Err(StepFail::Retry(format!("{fragment} answered {status}"))),
+            _ => Err(permanent(format!("{fragment}: {}", answer["message"].as_str().unwrap_or("refused")))),
+        }
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {

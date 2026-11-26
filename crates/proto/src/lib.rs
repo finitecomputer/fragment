@@ -1496,6 +1496,15 @@ impl Sharing {
     pub fn beyond(&self) -> bool {
         self.visibility != Visibility::Members
     }
+
+    /// Whether it is its owner's alone ("Only you", FIN-615: the label PR
+    /// 18 shows): no link opens it and no one else is in it or invited, so
+    /// no one but its owner and their own agents reads it or changes its
+    /// code. What an app must be to read its owner's other apps as them
+    /// (PR 16b, `job.read`).
+    pub fn only_you(&self) -> bool {
+        !self.beyond() && !self.with_others()
+    }
 }
 
 /// `GET /api/access` (a person): who has access to each fragment they own
@@ -2704,6 +2713,17 @@ mod tests {
     /// Goal: a storage token says whether it writes, add-only. Method: a
     /// host before `?access=read` names no `write` (it minted writers'
     /// alone), a read token says false; `access` is read or left out.
+    #[test]
+    fn only_you_is_members_only_with_no_one_else_in_or_invited() {
+        let alone = Sharing { visibility: Visibility::Members, members: 3, guests: 0, invites: Some(0), reach: false };
+        assert!(alone.only_you(), "its owner and their own agents alone");
+        assert!(!Sharing { guests: 1, ..alone }.only_you(), "someone else in it");
+        assert!(!Sharing { invites: Some(1), ..alone }.only_you(), "someone invited");
+        assert!(!Sharing { invites: None, ..alone }.only_you(), "a row from before invites were counted");
+        assert!(!Sharing { visibility: Visibility::Link, ..alone }.only_you(), "its link opens it");
+        assert!(!Sharing { visibility: Visibility::Public, ..alone }.only_you(), "public");
+    }
+
     #[test]
     fn a_storage_token_says_whether_it_writes() {
         let older: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1}"#).unwrap();

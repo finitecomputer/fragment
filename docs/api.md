@@ -1867,6 +1867,15 @@ steps:
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.
+- `job.read(fragment, op, input)` (FIN-615, PR 16b): another fragment's
+  query `op`, asked as this app's viewer, its owner (whose call started
+  the run, or their own agent's for them), and only while the app is
+  theirs alone (`Sharing::only_you`, the label "Only you": members only,
+  no one else in it or invited), so nothing it reads goes past its owner;
+  else the step fails: "This app can read your other apps only while it's
+  yours alone." The fragment read decides what its owner may read there,
+  and answers a query alone (`POST /api/f/{name}/reads/{op}`, `api_op` for
+  a query; any other kind 403). Its `result`.
 
 `job.principal`, `job.agent`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
 `job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which
