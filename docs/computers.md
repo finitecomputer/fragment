@@ -604,7 +604,9 @@ put on disks.
   (`fpac::flush_kept_ms`: never under its exit wait, at most five
   hours). Its boot waits longer still (`FRAGMENT_DISK_FLUSH_MS`), so the
   platform's destroy, not the guest, ends one that never lands; a destroy
-  that fails keeps the stop on within that bound. That one, or any final
+  that fails keeps the stop on while its guest's own wait lasts, then its
+  life ends and the next start waits for that container to go, as any
+  start after a failed destroy does. That one, or any final
   flush that posted no clean head, ends its life unsaved, saying its last
   moments' writes may not have shipped. A wake meanwhile starts once the
   stop has ended. A disk's stop is never its owner's time: its awake

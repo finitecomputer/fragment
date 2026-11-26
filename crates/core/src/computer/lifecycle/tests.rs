@@ -1422,7 +1422,7 @@ fn a_disks_stop_kept_for_its_final_flush_is_never_its_owners_time() {
     let stop = slept.expect("it sleeps once idle") + 500;
     let s = l.apply(Event::Held { generation: g, held: true }, stop);
     assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: true, .. })).count(), 1, "{s:?}");
-    assert!(15 * 60_000 < ALARM_LATE_MS, "looked at under the late rule's span");
+    const { assert!(15 * 60_000 < ALARM_LATE_MS, "looked at under the late rule's span") };
     let mut all = meters(&s.actions);
     all.extend(through(&mut l, stop, 15, Event::Asleep { generation: g }));
     assert!(all.iter().all(|(_, to)| *to <= stop), "nothing metered past its stop's beginning: {all:?}");

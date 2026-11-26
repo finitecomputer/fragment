@@ -2937,12 +2937,18 @@ impl ComputerCell {
         }
         let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
         if !gone {
-            // still there: its stop goes on, its destroy asked again at each
-            // look, until the runtime says it is gone (Codex on #1567): a
-            // life never ends with its container running. The runtime's idle
-            // stop (moved to its guest's wait, or `RUNTIME_IDLE_MS`) ends it
             console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
-            return None;
+            // still there: while its guest's own wait lasts from its signal
+            // (`fpac::guest_flush_ms`, past which it exits by itself), its
+            // stop goes on, its destroy asked again at each look (Codex on
+            // #1567). Past it, or with no signal sent, its life ends and the
+            // next start waits for the container to go, as any start after a
+            // destroy that failed does (`earlier_runs`, `StartBlocked`: no
+            // strike at first, and nothing starts beside it): bounded, its
+            // queued wake kept
+            if signalled.is_some_and(|since| js::now_ms() < since.saturating_add(fpac::guest_flush_ms(kept))) {
+                return None;
+            }
         }
         let _ = self.delete_meta(MetaKey::DiskFlushing);
         let (status, drain_ms) = match self.disk_drained.borrow_mut().take() {
