@@ -358,6 +358,15 @@ Each says who writes it: the cell (out: a client reads it), a client
 (in: the cell reads it), or both. An open one's readers read past a
 value they do not know; a closed object refuses a field it does not know.
 
+### `AppUse`
+
+both, closed. An app of its person's that may use a secret, and the name its code fills it by: `{{KEY}}` in a job's fetch, which an app's own secret of that name fills first (docs/secrets.md, "A person's Vault").
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `app` | `string` | required | The app's fragment name. |
+| `key` | `string` | required | The secret's name in its code (`^[A-Z][A-Z0-9_]{0,63}$`). |
+
 ### `Archived`
 
 out. Its answer: the fragment, and whether it is archived now.
@@ -1038,7 +1047,8 @@ in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only 
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name (Paul, 2026-11-09: per agent). With `apps`, at least one between them. |
+| `apps` | `array` of [`AppUse`](#appuse) | optional | The apps that may use it, each under the name its code fills (FIN-615, PR 12: per app, as per agent). |
 | `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
 | `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
 | `value` | `string` or `null` | optional | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. None, the value it holds is kept: a secret it does not hold yet, or one that would go from signing to filling or back, is refused (400). |
@@ -1142,6 +1152,7 @@ out. A secret as its person reads it: everything but its value.
 | field | type | | |
 | --- | --- | --- | --- |
 | `agents` | `array` of `string` | required |  |
+| `apps` | `array` of [`AppUse`](#appuse) | optional |  |
 | `hosts` | `array` of `string` | required |  |
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |

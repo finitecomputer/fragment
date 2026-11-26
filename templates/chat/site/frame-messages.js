@@ -137,11 +137,11 @@ export const MESSAGES = Object.freeze({
     fields: "to the page: {agent, name}; asked: {agent, want: link | unlink, home?}; answered: {agent, for, ticket?, error?, home?, homeError?}",
     says: "The agent's name as the page loads and on a rename; a door ticket for a link (docs/api.md, An agent's doors), a link's `home` setting its home and an unlink's taking it back.",
   },
-  vaultMove: {
-    kind: "vault-move",
+  vaultLend: {
+    kind: "vault-lend",
     from: "a Telegram connector's setup page (Settings framed it, offering a bot of its owner's Vault) → the shell, and the shell's answer",
     fields: "asked: {nonce}; answered: {nonce, ok, status?, error?}",
-    says: "Use it: the shell moves the Vault secret it offered that frame into that connector as its `TELEGRAM_BOT_TOKEN`, toward the Vault's own hosts (`PUT /api/f/{name}/secrets/{KEY}` `{fromVault}`), the move a page may not ask itself (docs/secrets.md). The page names nothing: only the frame's own offer moves. `status` is the API's refusal's (404: moved already).",
+    says: "Use it: the shell lends the Vault secret it offered that frame to that connector as its `TELEGRAM_BOT_TOKEN` (`PUT /api/vault/{secret}`, no value, the connector in its `apps`; its hosts, place and agents as they were), and removes the connector's own token of that name, which would fill first: a Vault write a page may not ask itself (docs/secrets.md). The secret stays in the Vault. The page names nothing: only the frame's own offer is lent. `status` is the API's refusal's.",
   },
   // ---- an answer for the computer (docs/bridge.md, "An answer for the computer") ----
   cardToComputer: {

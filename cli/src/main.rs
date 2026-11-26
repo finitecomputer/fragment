@@ -1064,16 +1064,22 @@ enum SecretCmd {
 #[derive(Subcommand)]
 enum VaultCmd {
     /// Set a secret, whole: its value (from a hidden prompt, or stdin),
-    /// the agents that may use it, the hosts it may go to, and where it
-    /// goes on a request (`Authorization: Bearer` unless named). With
-    /// `--keep-value`, all but its value: one already in your Vault goes
-    /// where this says, its value kept
+    /// the agents and apps that may use it, the hosts it may go to, and
+    /// where it goes on an agent's request (`Authorization: Bearer` unless
+    /// named; an app's code places it itself). With `--keep-value`, all but
+    /// its value: one already in your Vault goes where this says, its value
+    /// kept
     Set {
         #[arg(value_parser = vault_name)]
         name: String,
         /// An agent that may use it, by its fragment's name (repeat for more)
-        #[arg(long = "agent", required = true, value_name = "AGENT")]
+        #[arg(long = "agent", required_unless_present = "apps", value_name = "AGENT")]
         agents: Vec<String>,
+        /// An app of yours that may use it, as `<fragment>=<KEY>`: its code
+        /// fills it as `{{KEY}}` where it holds no secret of its own by that
+        /// name (repeat for more)
+        #[arg(long = "app", value_name = "APP=KEY", value_parser = app_use)]
+        apps: Vec<fragment_proto::vault::AppUse>,
         /// A host it may be sent to (repeat for more): `api.example.com`,
         /// no scheme, port, or path. None: kept, and sent nowhere
         #[arg(long = "to", value_name = "HOST")]
@@ -1162,6 +1168,12 @@ enum ConnectionCmd {
 /// before it goes in any URL: none chooses another route (`../…`).
 fn vault_name(name: &str) -> Result<String, String> {
     fragment_core::vault::name_form(name).map(|()| name.to_string()).map_err(|e| e.to_string())
+}
+
+/// An app's use of a Vault secret, as `--app <fragment>=<KEY>` names it.
+fn app_use(given: &str) -> Result<fragment_proto::vault::AppUse, String> {
+    let (app, key) = given.split_once('=').ok_or_else(|| format!("{given:?}: an app is <fragment>=<KEY>, KEY the name its code fills"))?;
+    Ok(fragment_proto::vault::AppUse { app: app.to_string(), key: key.to_string() })
 }
 
 /// A Vault secret's value: from a hidden prompt at a terminal, else stdin
@@ -2663,17 +2675,22 @@ fn run(cli: Cli) -> Result<()> {
             }
         },
         Cmd::Vault { sub } => match sub {
-            VaultCmd::Set { name, agents, hosts, header, format, query, basic, sign, keep_value } => {
+            VaultCmd::Set { name, agents, apps, hosts, header, format, query, basic, sign, keep_value } => {
                 use fragment_proto::vault::{Place, PutSecret as PutVault, Secret};
                 let place = Place { header, format, query, basic, sign };
                 let value = if keep_value { None } else { Some(vault_value(&name)?) };
-                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents })?)?;
+                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents, apps })?)?;
                 // what was set, never the value
                 json_exit(j, &set);
                 let kept = if keep_value { ", its value kept" } else { "" };
+                let users = set.agents.iter().cloned().chain(set.apps.iter().map(|a| format!("{} as {}", a.app, a.key))).collect::<Vec<_>>().join(", ");
                 match set.hosts.is_empty() {
-                    true => println!("secret {name} set for {}{kept}: parked, sent to no host", set.agents.join(", ")),
-                    false => println!("secret {name} set for {}{kept}, toward {}", set.agents.join(", "), set.hosts.join(", ")),
+                    true => println!("secret {name} set for {users}{kept}: parked, sent to no host"),
+                    false => println!("secret {name} set for {users}{kept}, toward {}", set.hosts.join(", ")),
+                }
+                // an app's code is its editors' (SHIP IT, 2026-11-26: say so where it is bound)
+                for a in &set.apps {
+                    println!("Anyone who can edit {} can make it use this key.", a.app);
                 }
             }
             VaultCmd::List => {
@@ -2681,7 +2698,8 @@ fn run(cli: Cli) -> Result<()> {
                 json_exit(j, &v);
                 for s in &v.secrets {
                     let to = if s.hosts.is_empty() { "(parked)".to_string() } else { s.hosts.join(" ") };
-                    println!("{}  {}  for {}", s.name, to, s.agents.join(" "));
+                    let users = s.agents.iter().cloned().chain(s.apps.iter().map(|a| format!("{}={}", a.app, a.key))).collect::<Vec<_>>().join(" ");
+                    println!("{}  {}  for {}", s.name, to, users);
                 }
             }
             VaultCmd::Rm { name } => {
@@ -3503,7 +3521,10 @@ mod tests {
         assert!(!parses(&["fragment", "secret", "set", "x--k3x9", "API_KEY", "sk-live-value"]));
         assert!(parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--to", "api.linear.app"]));
         assert!(parses(&["fragment", "vault", "set", "nostr-ada", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98"]));
-        assert!(!parses(&["fragment", "vault", "set", "linear", "--to", "api.linear.app"]), "a Vault secret names its agents");
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--to", "api.linear.app"]), "a Vault secret names its agents or apps");
+        assert!(parses(&["fragment", "vault", "set", "telegram-ada", "--app", "tg--k3x9=TELEGRAM_BOT_TOKEN", "--to", "api.telegram.org", "--keep-value"]), "an app alone");
+        assert!(parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--app", "dash--k3x9=LINEAR_KEY", "--to", "api.linear.app"]));
+        assert!(!parses(&["fragment", "vault", "set", "linear", "--app", "dash--k3x9", "--to", "api.linear.app"]), "an app names the key its code fills");
         assert!(!parses(&["fragment", "vault", "set", "linear", "lin_api_value", "--agent", "ada--k3x9"]), "no value on argv");
         // a value kept takes a flag of its own, and still names its agents
         assert!(parses(&["fragment", "vault", "set", "nostr-ada--k3x9", "--agent", "ada--k3x9", "--to", "finite.site", "--sign", "nip98", "--keep-value"]));

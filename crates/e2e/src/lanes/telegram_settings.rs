@@ -17,7 +17,8 @@
 //! - `from_settings`: an agent with no Telegram chat, Set up makes one,
 //!   bound as its door, and its setup in the dialog, step by step: the bot
 //!   its owner's Vault holds for it (moved from finite.computer, FIN-463
-//!   F11) offered and used, connected, the pairing link, the account that answered it
+//!   F11) offered and lent to it, the Vault keeping it (FIN-615, PR 12),
+//!   connected, the pairing link, the account that answered it
 //!   confirmed, done; its row then Open; its owner's message from Telegram
 //!   reaches the agent.
 //! - `set_up_offered`: the chat lane's Claude Code agent, its row and its
@@ -386,27 +387,38 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     shoot(&mut b, &page, &shots, "b2-vault-dark", None)?;
     b.color_scheme(&page, "light")?;
 
-    // Use it, its move's answer lost: Settings moved it (the page may not:
-    // members.rs `put_secret`), and its answer reaches the page as a
-    // failure. The token is kept in the chat, gone from the Vault, and the
-    // page knows only that it failed
-    let lose = r#"(() => { const lose = (e) => { if (e.data?.fragment !== "vault-move" || !e.data.ok) return; e.stopImmediatePropagation(); removeEventListener("message", lose, true); dispatchEvent(new MessageEvent("message", { data: { ...e.data, ok: false, error: "Failed to fetch" }, origin: e.origin, source: e.source })); }; addEventListener("message", lose, true); return true; })()"#;
+    // Use it, its lend's answer lost: Settings lent it (the page may not
+    // write a Vault: docs/secrets.md), and its answer reaches the page as a
+    // failure. The token stays in the Vault, bound to this chat as its
+    // TELEGRAM_BOT_TOKEN, the chat holds no token of its own, and the page
+    // knows only that it failed
+    let lose = r#"(() => { const lose = (e) => { if (e.data?.fragment !== "vault-lend" || !e.data.ok) return; e.stopImmediatePropagation(); removeEventListener("message", lose, true); dispatchEvent(new MessageEvent("message", { data: { ...e.data, ok: false, error: "Failed to fetch" }, origin: e.origin, source: e.source })); }; addEventListener("message", lose, true); return true; })()"#;
     let lost = to_fake(&mut b, &c.tg.url) && framed(&mut b, lose) == true && press(&mut b, "Use it");
     let failed = until_line(s, &mut b, "Failed to fetch");
-    let vault_now = || -> Vec<String> { api.signed(c.owner, "GET", "/api/vault", None).ok().and_then(|r| r.body["secrets"].as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect())).unwrap_or_default() };
-    let moved_out = vault_now();
+    let vault_now = || -> Value { api.signed(c.owner, "GET", "/api/vault", None).map(|r| r.body["secrets"].clone()).unwrap_or_default() };
+    let names_of = |v: &Value| -> Vec<String> { v.as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect()).unwrap_or_default() };
+    let lent_to = |v: &Value| v.as_array().and_then(|l| l.iter().find(|s| s["name"] == "telegram-moved")).map(|s| s["apps"].clone()).unwrap_or_default();
+    let bound = json!([{ "app": name, "key": "TELEGRAM_BOT_TOKEN" }]);
+    let held = vault_now();
     let kept = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a Use it whose move's answer is lost says it failed, and still offers that bot: the token is kept in the chat, gone from the Vault, not connected",
-        lost && failed && framed(&mut b, SAID)["buttons"] == json!(["Use it", "Use another bot"]) && moved_out == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN") && state(api, c, &name)["bot"].is_null() && state(api, c, &name)["held"] == true,
-        json!({ "said": framed(&mut b, SAID), "vault": moved_out, "secrets": kept.body, "state": state(api, c, &name) }),
+        "a Use it whose lend's answer is lost says it failed, and still offers that bot: the token stays in the Vault, lent to this chat as its TELEGRAM_BOT_TOKEN, none of the chat's own, not connected",
+        lost && failed
+            && framed(&mut b, SAID)["buttons"] == json!(["Use it", "Use another bot"])
+            && names_of(&held) == ["telegram-moved", "telegram-other"]
+            && lent_to(&held) == bound
+            && !kept.text.contains("TELEGRAM_BOT_TOKEN")
+            && state(api, c, &name)["bot"].is_null()
+            && state(api, c, &name)["held"] == true,
+        json!({ "said": framed(&mut b, SAID), "vault": held, "secrets": kept.body, "state": state(api, c, &name) }),
     );
-    // Settings moved it toward the Vault's own host (api.telegram.org),
+    // Settings lent it toward the Vault's own host (api.telegram.org),
     // which no fetch of the page's goes through, so `to_fake` cannot point
     // it at the fake Telegram as it does the page's own secrets: its owner
-    // sets it again here, the same token toward the fake's host
-    let pointed = api.signed(c.owner, "PUT", &format!("/api/f/{name}/secrets/TELEGRAM_BOT_TOKEN"), Some(&json!({ "value": c.token, "hosts": ["127.0.0.1"] })))?;
-    anyhow::ensure!(pointed.status == 200, "the kept token pointed at the fake Telegram: {pointed}");
+    // sets it again here with no value, toward the fake's host and for this
+    // chat alone (an agent's computer would catch the fake's address)
+    let pointed = api.signed(c.owner, "PUT", "/api/vault/telegram-moved", Some(&json!({ "hosts": ["127.0.0.1"], "agents": [], "apps": bound })))?;
+    anyhow::ensure!(pointed.status == 200, "the lent token pointed at the fake Telegram: {pointed}");
     // closed and opened again: Settings names no Vault secret now, and the
     // chat's own word offers that bot; Use it goes on from the token kept
     b.eval(&page, "([...document.querySelectorAll('dialog.connector-setup .rename-actions button')].find((x) => x.textContent === 'Done')?.click(), true)")?;
@@ -422,11 +434,11 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, c: &Connector<'_>, dir: &s
     let inbox = format!("{}/api/f/{name}/inbox", api.base);
     let webhook = c.tg.webhook();
     let secret = webhook.as_ref().filter(|(url, _)| *url == inbox).map(|(_, secret)| secret.clone()).unwrap_or_default();
-    let left: Vec<String> = api.signed(c.owner, "GET", "/api/vault", None)?.body["secrets"].as_array().map(|l| l.iter().filter_map(|v| v["name"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let left = vault_now();
     let kept = api.signed(c.owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "Use it then connects the bot kept in this chat (gone from the Vault, kept here): its webhook is this chat's inbox, with a secret of the page's making",
-        used && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64 && left == ["telegram-other"] && kept.text.contains("TELEGRAM_BOT_TOKEN"),
+        "Use it then connects the bot lent to this chat (in the Vault still, none of the chat's own): its webhook is this chat's inbox, with a secret of the page's making",
+        used && connected && said["buttons"] == json!(["Pair your Telegram", "New token"]) && secret.len() == 64 && names_of(&left) == ["telegram-moved", "telegram-other"] && lent_to(&left) == bound && !kept.text.contains("TELEGRAM_BOT_TOKEN") && kept.text.contains("TELEGRAM_WEBHOOK_SECRET"),
         json!({ "said": said, "webhook": webhook, "vault": left, "secrets": kept.body }),
     );
     shoot(&mut b, &page, &shots, "b3-connected", None)?;

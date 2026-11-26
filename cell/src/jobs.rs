@@ -1009,20 +1009,47 @@ impl FragmentCell {
     /// `Idempotency-Key`, the same on every try and replay, unless the job
     /// named its own: a vendor that honours the header acts on it once.
     /// Secret `name`'s value, for a fetch to `url`: a secret's name, set,
-    /// for that host.
+    /// for that host; its own first, else one its owner lends it (`lent`).
     async fn fill(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
         if !valid_secret_name(name) {
             return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
         }
         // its hosts and its sealed value read in one statement, so the value
         // opened is the one those hosts were set with
-        let stored = self
-            .stored_secret(name)
-            .map_err(|e| StepFail::Retry(e.message))?
-            .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
+        let Some(stored) = self.stored_secret(name).map_err(|e| StepFail::Retry(e.message))? else {
+            return self.lent(name, url).await;
+        };
         fragment_core::secrets::may_fill(&stored.hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
         let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
         String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))
+    }
+
+    /// Secret `name` lent by its owner's Vault (FIN-615, PR 12; docs/
+    /// secrets.md, "A person's Vault"), for a fetch to `url`, where it holds
+    /// none of its own by that name: the one its owner bound to this app as
+    /// `name`, toward one of its hosts, and checked against them as its own
+    /// is. Asked only then, so an app that holds its keys waits on no hop.
+    /// An owner who is no person (an org's app) has no Vault, and while its
+    /// link opens it, it is lent nothing (a key is reach: reach.rs).
+    async fn lent(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let needs = || permanent(format!("This app needs {name}. Its owner can lend it from their Vault, or an editor can set the app's own."));
+        let Some(owner) = self.meta(MetaKey::Owner).map_err(retry)?.filter(|o| npub::is_identity(o)) else {
+            return Err(needs());
+        };
+        if self.visibility().map_err(retry)? != fragment_proto::Visibility::Members {
+            return Err(permanent(format!("{name} would come from its owner's Vault, which lends nothing to an app shared by link or public: make it members only first")));
+        }
+        let host = url.host_str().unwrap_or_default().trim_end_matches('.');
+        match crate::vault::lent(&self.env, &owner, &self.name().map_err(retry)?, name, host).await {
+            Ok(crate::vault::Lent(value, hosts)) => {
+                fragment_core::secrets::may_fill(&hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
+                Ok(value)
+            }
+            Err(e) if e.code == ErrorCode::NotConnected => Err(needs()),
+            Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::InvalidRequest) => Err(permanent(e.message)),
+            Err(e) => Err(retry(e)),
+        }
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {

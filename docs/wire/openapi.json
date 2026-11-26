@@ -1,6 +1,26 @@
 {
   "components": {
     "schemas": {
+      "AppUse": {
+        "additionalProperties": false,
+        "description": "An app of its person's that may use a secret, and the name its code\nfills it by: `{{KEY}}` in a job's fetch, which an app's own secret of\nthat name fills first (docs/secrets.md, \"A person's Vault\").",
+        "properties": {
+          "app": {
+            "description": "The app's fragment name.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The secret's name in its code (`^[A-Z][A-Z0-9_]{0,63}$`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app",
+          "key"
+        ],
+        "type": "object",
+        "x-fragment-direction": "both"
+      },
       "Archived": {
         "description": "Its answer: the fragment, and whether it is archived now.",
         "properties": {
@@ -2519,9 +2539,17 @@
         "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its\nperson sets one, so only they say where its value goes; set again with\nno value, it keeps the one it holds and goes where this says. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
         "properties": {
           "agents": {
-            "description": "The agents that may use it, each by its fragment's name: at least\none (Paul, 2026-11-09: per agent).",
+            "description": "The agents that may use it, each by its fragment's name (Paul,\n2026-11-09: per agent). With `apps`, at least one between them.",
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "apps": {
+            "default": [],
+            "description": "The apps that may use it, each under the name its code fills\n(FIN-615, PR 12: per app, as per agent).",
+            "items": {
+              "$ref": "#/components/schemas/AppUse"
             },
             "type": "array"
           },
@@ -2862,6 +2890,13 @@
           "agents": {
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "apps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AppUse"
             },
             "type": "array"
           },

@@ -4,10 +4,10 @@
 // tab of its own. Its owner's alone, one action a step:
 // 1. the bot: its token, from its owner's Vault when Settings found one
 //    there for this agent (`?vault=<name>`: a bot moved from
-//    finite.computer, FIN-463 F11), moved into this fragment as its secret
-//    by Settings itself (`vault-move`: a page may not move a Vault secret,
-//    docs/secrets.md; gone from the Vault, kept here), or pasted (from
-//    @BotFather); and, the first time, a
+//    finite.computer, FIN-463 F11), lent to this fragment by Settings
+//    itself (`vault-lend`: a page may not write a Vault, docs/secrets.md;
+//    it stays in the Vault, and fills this fragment's `TELEGRAM_BOT_TOKEN`),
+//    or pasted (from @BotFather) as this fragment's own; and, the first time, a
 //    webhook secret this browser makes, each set as this fragment's secret
 //    toward api.telegram.org (`__secrets`: written, never read back, never
 //    through code or a model); `connect` checks the token and points the
@@ -35,10 +35,10 @@ const JSON_TYPE = { "content-type": "application/json" };
 // one of this fragment's secrets, its value never read back
 const secret = (name, value) => platformJson(`./__secrets/${name}`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ ...value, hosts: [TELEGRAM_HOST] }) });
 // the bot token in its owner's Vault that Settings found for this agent,
-// which only Settings moves: offered in its frame alone (in a tab of its
+// which only Settings lends: offered in its frame alone (in a tab of its
 // own there is no Settings to ask, so a token is pasted)
 const VAULT = framed ? new URLSearchParams(location.search).get("vault") : null;
-// how long Use it waits for Settings to move the Vault's bot
+// how long Use it waits for Settings to lend the Vault's bot
 const MOVE_WAIT_MS = 30_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -86,8 +86,8 @@ export async function setup(root) {
     return;
   }
 
-  // the Vault's bot moved here by Settings, which framed this page with
-  // its offer (`vault-move`, frame-messages.js): the page asks, naming
+  // the Vault's bot lent here by Settings, which framed this page with
+  // its offer (`vault-lend`, frame-messages.js): the page asks, naming
   // nothing, and hears its answer from its parent at the platform's origin
   function fromVault() {
     const nonce = randomHex(16);
@@ -98,13 +98,13 @@ export async function setup(root) {
         fn(v);
       };
       const heard = (e) => {
-        if (e.source !== window.parent || e.origin !== platform || e.data?.fragment !== KIND.vaultMove || e.data.nonce !== nonce) return;
+        if (e.source !== window.parent || e.origin !== platform || e.data?.fragment !== KIND.vaultLend || e.data.nonce !== nonce) return;
         if (e.data.ok) done(resolve);
-        else done(reject, Object.assign(new Error(e.data.error || "Settings couldn't move the bot."), { status: e.data.status }));
+        else done(reject, Object.assign(new Error(e.data.error || "Settings couldn't use the bot."), { status: e.data.status }));
       };
       const timer = setTimeout(() => done(reject, new Error("Settings didn't answer. Try again.")), MOVE_WAIT_MS);
       addEventListener("message", heard);
-      window.parent.postMessage({ fragment: KIND.vaultMove, nonce }, platform);
+      window.parent.postMessage({ fragment: KIND.vaultLend, nonce }, platform);
     });
   }
 
@@ -144,12 +144,10 @@ export async function setup(root) {
         go.textContent = "Connecting…";
         // said here first, so a try cut short anywhere is offered again
         await fragment.call("hold");
+        // lent again, it is lent as before (its answer lost); with no
+        // offer here, the one lent already (`held`) fills it
         await connect(async () => {
-          if (!VAULT) return;
-          // none in the Vault: moved here already (its answer lost)
-          await fromVault().catch((e) => {
-            if (e.status !== 404) throw e;
-          });
+          if (VAULT) await fromVault();
         });
       }));
       const other = button("Use another bot", "quiet", () => {

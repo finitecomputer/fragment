@@ -78,11 +78,12 @@ function world({ refuse = new Set(), listed = true, link = (name, body, doors) =
       if (doors[door]) server.find((f) => f.name === door).sharing = { reach: true };
       return answer;
     }
-    const key = path.match(/^\/api\/f\/([^/]+)\/secrets\/([A-Z_]+)$/);
-    if (method === "PUT" && key) {
-      if (at.moveRefused) throw Object.assign(new Error("no secret in your vault"), { status: 404 });
-      return { ok: true, name: key[2], hosts: body.hosts };
+    const lent = path.match(/^\/api\/vault\/([a-z0-9-]+)$/);
+    if (method === "PUT" && lent) {
+      if (at.lendRefused) throw Object.assign(new Error("a secret's value: it is no secret of yours yet"), { status: 400 });
+      return { name: lent[1], ...body, setAt: 1 };
     }
+    if (method === "DELETE" && /^\/api\/f\/[^/]+\/secrets\/[A-Z_]+$/.test(path)) return { ok: true, removed: false };
     if (method === "DELETE") {
       const name = path.split("/")[3];
       delete doors[name];
@@ -326,11 +327,12 @@ test("a binding whose answer was lost is read: bound to its agent, it opens; to 
   assert.deepEqual(t.notices, [["Telegram was not set up", "It was linked to another agent meanwhile."]]);
 });
 
-// Use it: the page asks Settings to move the Vault's bot (`vault-move`),
-// since a page may not move one itself (members.rs `put_secret`). Settings
-// moves only what it offered that frame, into that connector, toward the
-// Vault's own hosts, and answers that frame alone.
-const OFFERED = [{ name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], agents: ["maple--a1b2"] }];
+// Use it: the page asks Settings to lend the Vault's bot (`vault-lend`),
+// since a page may not write a Vault (FIN-615, PR 12). Settings lends only
+// what it offered that frame, to that connector, the rest of the secret as
+// it was, and answers that frame alone.
+const PLACE = { header: "authorization", format: "Bearer {}" };
+const OFFERED = [{ name: "telegram-maple--a1b2", hosts: ["api.telegram.org"], place: PLACE, agents: ["maple--a1b2"], apps: [{ app: "old--x1y2", key: "BOT" }] }];
 async function offered(opts = {}) {
   const w = world({ vault: OFFERED, ...opts });
   await w.telegram.readConnectors();
@@ -341,27 +343,35 @@ async function offered(opts = {}) {
   return { w, frame, from };
 }
 
-test("Use it: Settings moves the bot it offered that frame into its connector, toward the Vault's hosts, and answers it", async () => {
+test("Use it: Settings lends the bot it offered that frame to its connector, the Vault keeping it as it was, and answers it", async () => {
   const { w, frame, from } = await offered();
-  await from({ fragment: "vault-move", nonce: "n1", vault: "another-secret", hosts: ["evil.example.com"], name: "elsewhere--x1y2" });
-  assert.deepEqual(w.asked.filter((a) => a.startsWith("PUT")), ["PUT /api/f/maple-telegram--e5f6/secrets/TELEGRAM_BOT_TOKEN"]);
-  assert.deepEqual(w.bodies.at(-1), { fromVault: "telegram-maple--a1b2", hosts: ["api.telegram.org"] }, "what it offered, never what the page names");
-  assert.deepEqual(frame.posted, [[{ fragment: "vault-move", nonce: "n1", ok: true }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+  await from({ fragment: "vault-lend", nonce: "n1", vault: "another-secret", hosts: ["evil.example.com"], name: "elsewhere--x1y2" });
+  assert.deepEqual(w.asked.filter((a) => !a.startsWith("GET")).slice(-2), ["PUT /api/vault/telegram-maple--a1b2", "DELETE /api/f/maple-telegram--e5f6/secrets/TELEGRAM_BOT_TOKEN"]);
+  assert.deepEqual(
+    w.bodies.at(-2),
+    { hosts: ["api.telegram.org"], place: PLACE, agents: ["maple--a1b2"], apps: [{ app: "old--x1y2", key: "BOT" }, { app: "maple-telegram--e5f6", key: "TELEGRAM_BOT_TOKEN" }] },
+    "what it offered, no value, its own apps kept beside: never what the page names",
+  );
+  assert.deepEqual(frame.posted, [[{ fragment: "vault-lend", nonce: "n1", ok: true }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+  // again (its answer lost): lent as before, once
+  await from({ fragment: "vault-lend", nonce: "n1b" });
+  assert.deepEqual(w.bodies.at(-2).apps, [{ app: "old--x1y2", key: "BOT" }, { app: "maple-telegram--e5f6", key: "TELEGRAM_BOT_TOKEN" }]);
 });
 
-test("a move refused is said to that frame with its status (404: moved already)", async () => {
+test("a lend refused is said to that frame with its status, and the connector's own token is left be", async () => {
   const { w, frame, from } = await offered();
-  w.at.moveRefused = true;
-  await from({ fragment: "vault-move", nonce: "n2" });
-  assert.deepEqual(frame.posted, [[{ fragment: "vault-move", nonce: "n2", ok: false, status: 404, error: "no secret in your vault" }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+  w.at.lendRefused = true;
+  await from({ fragment: "vault-lend", nonce: "n2" });
+  assert.deepEqual(frame.posted, [[{ fragment: "vault-lend", nonce: "n2", ok: false, status: 400, error: "a secret's value: it is no secret of yours yet" }, "http://maple-telegram--e5f6.fragment.localhost"]]);
+  assert.ok(!w.asked.some((a) => a.startsWith("DELETE")));
 });
 
-test("no move for a frame at another origin, another window, a frame offered nothing, or once its dialog closed", async () => {
+test("no lend for a frame at another origin, another window, a frame offered nothing, or once its dialog closed", async () => {
   const { w, frame, from } = await offered();
   // its frame sent elsewhere, at another origin
-  await from({ fragment: "vault-move", nonce: "a" }, { origin: "https://evil.example.com" });
+  await from({ fragment: "vault-lend", nonce: "a" }, { origin: "https://evil.example.com" });
   // a window of no frame of Settings'
-  await from({ fragment: "vault-move", nonce: "b" }, { source: { postMessage: () => {} } });
+  await from({ fragment: "vault-lend", nonce: "b" }, { source: { postMessage: () => {} } });
   assert.ok(!w.asked.some((a) => a.startsWith("PUT")));
   assert.deepEqual(frame.posted, []);
   // with no bot in the Vault for its agent, its frame is offered nothing
@@ -369,11 +379,11 @@ test("no move for a frame at another origin, another window, a frame offered not
   await none.telegram.readConnectors();
   none.draw();
   await none.press(0, "Set up");
-  await none.message({ data: { fragment: "vault-move", nonce: "c" }, source: none.frames[0].contentWindow, origin: none.originAt("maple-telegram--e5f6") });
+  await none.message({ data: { fragment: "vault-lend", nonce: "c" }, source: none.frames[0].contentWindow, origin: none.originAt("maple-telegram--e5f6") });
   assert.ok(!none.asked.some((a) => a.startsWith("PUT")));
   // its dialog closed: its offer is gone
   w.opened[0].onClose();
-  await from({ fragment: "vault-move", nonce: "d" });
+  await from({ fragment: "vault-lend", nonce: "d" });
   assert.ok(!w.asked.some((a) => a.startsWith("PUT")));
 });
 
@@ -397,7 +407,7 @@ test("SimpleX's row makes its agent's connector, bound as its door, and opens it
   assert.deepEqual(w.doors[name], { door: "simplex", agent: "wren--c3d4" }, "bound as Wren's SimpleX door");
   assert.equal(w.opened.length, 1);
   assert.deepEqual([w.opened[0].title, w.opened[0].tall, w.opened[0].src], ["SimpleX", true, `/auth/frame?name=${name}&return=/setup.html?name=Wren`]);
-  assert.ok(!w.asked.includes("GET /api/vault"), "no Vault offer: SimpleX has no bot to move");
+  assert.ok(!w.asked.includes("GET /api/vault"), "no Vault offer: SimpleX has no bot to lend");
   assert.deepEqual(w.notices, []);
   w.draw("simplex");
   assert.deepEqual(w.shown(), [["Set up"], ["Open", "Set up"]], "its chat, to open");
