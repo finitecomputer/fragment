@@ -293,6 +293,8 @@ fn wiped(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> 
         return Ok(());
     };
     let person = api.identity(owner)?;
+    // lent no paid call (the stub's): the run's spend reads no ledger of theirs once wiped
+    api.wiped(&person);
     // what its last life put in the bucket (a page at most)
     let last = lever(api, id, "fpac").ok().and_then(|r| head_of(&r.body["head"])).map_or(0, |(epoch, _)| epoch);
     let held = lever_with(api, id, json!({ "op": "fpac-objects", "epoch": last })).ok().and_then(|r| r.body["objects"].as_array().map(Vec::len)).unwrap_or(0) as u64;
@@ -303,8 +305,9 @@ fn wiped(s: &mut Suite, api: &Api, owner: &crate::Keys, id: &str) -> Result<()> 
     let w = cli.as_ref().map(Value::clone).unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
     let finished = w["report"]["done"] == true && w["report"]["state"] == "wiped";
     let r = lever(api, id, "fpac")?;
-    // its wipe's own lines (local): what each call deleted, the last done
-    let deleted = !s.hosted() || {
+    // its wipe's own lines (local; a hosted run's are its Workers Logs):
+    // what each call deleted, the last done
+    let deleted = s.hosted() || {
         let lines: Vec<Value> = super::vault::logs(s)
             .lines()
             .filter_map(|l| l.find(r#"{"computer":"#).map(|at| l[at..].to_string()))
@@ -464,9 +467,15 @@ fn killed_and_back(s: &Suite, api: &Api, owner: &crate::Keys, id: &str) -> Value
     let woke = s.eventually(WAKE * 3, || view()["restored"]["generation"].as_u64().is_some_and(|g| g > generation) && phase(api, owner, id) == "awake");
     let up = view();
     let now = up["restored"]["generation"].as_u64().unwrap_or(0);
-    let now_row = row();
+    // its life's first head lands from its daemon's flusher beside its
+    // mount (a replay's checkpoint shipped first: FPAC's `first_head`), so
+    // its guest can be up before it: looked for within SHIPPED_WITHIN
+    let mut now_row = row();
+    let own = s.eventually(SHIPPED_WITHIN, || {
+        now_row = row();
+        head_of(&now_row["head"]).is_some_and(|(e, _)| e == now)
+    });
     let (head, back, fell_record) = (now_row["head"].clone(), now_row["back"].clone(), now_row["fell"].clone());
-    let own = head_of(&head).is_some_and(|(e, _)| e == now);
     json!({ "computer": id, "sent": sent, "killMs": kill_ms, "killed": generation, "left": left, "cameUp": came_up, "shipped": shipped, "woke": woke, "from": up["restored"]["from"], "generation": now, "head": head, "back": back, "fellRecord": fell_record, "own": own })
 }
 
