@@ -621,10 +621,19 @@ pub const ROUTES: &[Route] = &[
         path: "/api/vault/{secret}",
         summary: "Removes a secret: its agents' next use of it is refused.",
         auth: SIGNED,
-        params: &[SECRET],
+        params: &[
+            SECRET,
+            Param {
+                name: "held",
+                at: ParamAt::Query,
+                required: false,
+                schema: shape::<String>,
+                doc: "The secret as its remover last read it (`Secret::revision`): one that changed since is refused (409) and nothing is removed. None, it is removed whatever is held.",
+            },
+        ],
         request: None,
         answer: Answer::Json(ty::<SecretRemoved>()),
-        errors: &[Unauthenticated, Forbidden],
+        errors: &[Unauthenticated, Forbidden, Conflict],
     },
     Route {
         operation: "vault.ask",

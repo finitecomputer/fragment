@@ -29,21 +29,13 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   // Keep the open detail sheet across reloads in the same settings visit
   // (leaving Settings closes it: connections.js closes every provider-sheet).
   let openSheet = null;
-  // An edit of `name`, made to the secret as the Vault holds it now and
-  // only onto that one (`held`: a change since, an agent's Allow or another
-  // tab's edit, is refused, never written back over). This page's edits go
-  // one at a time, so each reads what the last one left.
+  // This page's writes go one at a time, so each names the revision the
+  // one before it left (`written`, below).
   let writing = Promise.resolve();
-  function edit(name, change) {
-    const run = writing.then(async () => {
-      const now = (await api("GET", "/api/vault")).secrets?.find((x) => x.name === name);
-      if (!now) throw new Error(`${name} is no longer saved.`);
-      const body = change(now);
-      await api("PUT", `/api/vault/${encodeURIComponent(name)}`, { ...body, held: now.revision });
-    });
-    writing = run.catch(() => {});
-    return run;
-  }
+  // Where a secret's sheet says what went wrong: the newest one drawn for
+  // it, since a redraw replaces a sheet while a write queued from the old
+  // one is still on its way.
+  const sayers = new Map();
 
   function secretsSection(vault) {
     const s = section("Secrets");
@@ -117,6 +109,35 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
 
     const inner = el("div", "provider-sheet-body");
 
+    // The secret as this sheet shows it. Every write is onto that one
+    // (`held`): a change since (an agent's Allow, another tab, the CLI) is
+    // refused (409), never taken in or written over, and the sheet is drawn
+    // again from what the Vault now holds. A write's answer is the secret as
+    // it now is, which the next one builds on.
+    let shown = sec;
+    const said = el("p", "form-error secret-said");
+    said.hidden = true;
+    sayers.set(sec.name, (text) => {
+      said.textContent = text;
+      said.hidden = false;
+    });
+    const path = `/api/vault/${encodeURIComponent(sec.name)}`;
+    function written(write) {
+      const run = writing.then(async () => {
+        const saved = await write(shown);
+        if (saved?.revision) shown = saved;
+      });
+      writing = run.catch(() => {});
+      return run;
+    }
+    async function failed(e, fallback) {
+      if (e?.status === 409) {
+        openSheet = { secret: sec.name, visit: asks.now("settings") };
+        await reopenSettings();
+      }
+      sayers.get(sec.name)?.(e?.message || fallback);
+    }
+
     // Status + two-step remove
     const status = el("div", "provider-status");
     const words = el("span", "provider-status-text");
@@ -124,8 +145,6 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     const when = formatDate(sec.setAt);
     if (when) words.append(el("span", "provider-account", `Value set ${when}`));
     const actions = el("div", "settings-actions");
-    const removeSaid = el("p", "form-error secret-said");
-    removeSaid.hidden = true;
     function renderRemove(confirming) {
       actions.replaceChildren();
       if (!confirming) {
@@ -142,30 +161,29 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       const cancel = el("button", "quiet", "Cancel");
       cancel.type = "button";
       cancel.onclick = () => {
-        removeSaid.hidden = true;
+        said.hidden = true;
         renderRemove(false);
       };
       yes.onclick = async () => {
         yes.disabled = true;
         cancel.disabled = true;
-        removeSaid.hidden = true;
-        openSheet = null;
+        said.hidden = true;
         try {
-          await api("DELETE", `/api/vault/${encodeURIComponent(sec.name)}`);
+          await written((now) => api("DELETE", now.revision ? `${path}?held=${encodeURIComponent(now.revision)}` : path));
+          openSheet = null;
           sheet.close();
           await reopenSettings();
         } catch (e) {
-          removeSaid.textContent = e.message || "Could not remove secret";
-          removeSaid.hidden = false;
           yes.disabled = false;
           cancel.disabled = false;
+          await failed(e, "Could not remove secret");
         }
       };
       actions.append(yes, cancel);
     }
     renderRemove(false);
     status.append(light(), words, actions);
-    inner.append(status, removeSaid);
+    inner.append(status, said);
 
     // Which agents may use it
     const knownFragments = new Set(agents.map((a) => a.fragment));
@@ -176,8 +194,6 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     if (listedAgents.length) {
       const who = el("div", "provider-block provider-agents");
       who.append(el("h4", null, "Which agents may use it"));
-      const agentSaid = el("p", "form-error secret-said");
-      agentSaid.hidden = true;
       for (const fragment of listedAgents) {
         const allowed = (sec.agents ?? []).includes(fragment);
         const row = el("div", "provider-agent");
@@ -189,32 +205,30 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         flip.setAttribute("aria-pressed", String(allowed));
         named(flip, fragment, (t) => `${t} may use ${sec.name}`, "aria-label");
         flip.onclick = async () => {
-          agentSaid.hidden = true;
+          said.hidden = true;
           if (allowed && (sec.agents ?? []).length === 1) {
-            agentSaid.textContent = "Keep at least one agent, or remove the secret instead.";
-            agentSaid.hidden = false;
+            said.textContent = "Keep at least one agent, or remove the secret instead.";
+            said.hidden = false;
             return;
           }
           const visit = asks.now("settings");
           flip.disabled = true;
           openSheet = { secret: sec.name, visit };
           try {
-            await edit(sec.name, (now) => {
+            await written((now) => {
               const next = allowed ? now.agents.filter((x) => x !== fragment) : [...new Set([...now.agents, fragment])];
               if (!next.length) throw new Error("Keep at least one agent, or remove the secret instead.");
-              return { hosts: now.hosts, place: now.place, agents: next };
+              return api("PUT", path, { hosts: now.hosts, place: now.place, agents: next, held: now.revision });
             });
             await reopenSettings();
           } catch (e) {
-            agentSaid.textContent = e.message || "That was not changed";
-            agentSaid.hidden = false;
             flip.disabled = false;
+            await failed(e, "That was not changed");
           }
         };
         row.append(face, flip);
         who.append(row);
       }
-      who.append(agentSaid);
       inner.append(who);
     }
 
@@ -231,25 +245,23 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     hostsInput.setAttribute("aria-label", `Allowed hosts for ${sec.name}`);
     const hostsSave = el("button", "quiet", "Save hosts");
     hostsSave.type = "submit";
-    const hostsSaid = el("p", "form-error secret-said");
-    hostsSaid.hidden = true;
     hostsForm.append(hostsInput, hostsSave);
     hostsForm.onsubmit = async (e) => {
       e.preventDefault();
-      hostsSaid.hidden = true;
+      said.hidden = true;
       const visit = asks.now("settings");
+      const hosts = parseHosts(hostsInput.value);
       hostsSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        await edit(sec.name, (now) => ({ hosts: parseHosts(hostsInput.value), place: now.place, agents: now.agents }));
+        await written((now) => api("PUT", path, { hosts, place: now.place, agents: now.agents, held: now.revision }));
         await reopenSettings();
       } catch (err) {
-        hostsSaid.textContent = err.message || "Could not update hosts";
-        hostsSaid.hidden = false;
         hostsSave.disabled = false;
+        await failed(err, "Could not update hosts");
       }
     };
-    hostsBlock.append(hostsForm, el("p", "muted provider-detail", "Exact public DNS names, comma-separated (up to 8). Leave empty to park."), hostsSaid);
+    hostsBlock.append(hostsForm, el("p", "muted provider-detail", "Exact public DNS names, comma-separated (up to 8). Leave empty to park."));
     inner.append(hostsBlock);
 
     // Replace value (masked; never shows existing value)
@@ -265,16 +277,14 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     valueInput.setAttribute("aria-label", `New value for ${sec.name}`);
     const replaceSave = el("button", "quiet", "Replace");
     replaceSave.type = "submit";
-    const replaceSaid = el("p", "form-error secret-said");
-    replaceSaid.hidden = true;
     replaceForm.append(valueInput, replaceSave);
     replaceForm.onsubmit = async (e) => {
       e.preventDefault();
-      replaceSaid.hidden = true;
+      said.hidden = true;
       const val = valueInput.value.trim();
       if (!val) {
-        replaceSaid.textContent = "Paste a new value first.";
-        replaceSaid.hidden = false;
+        said.textContent = "Paste a new value first.";
+        said.hidden = false;
         valueInput.focus();
         return;
       }
@@ -282,16 +292,17 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       replaceSave.disabled = true;
       openSheet = { secret: sec.name, visit };
       try {
-        await edit(sec.name, (now) => ({ value: val, hosts: now.hosts, place: now.place, agents: now.agents }));
+        await written((now) => api("PUT", path, { value: val, hosts: now.hosts, place: now.place, agents: now.agents, held: now.revision }));
         valueInput.value = "";
         await reopenSettings();
       } catch (err) {
-        replaceSaid.textContent = err.message || "Could not replace value";
-        replaceSaid.hidden = false;
         replaceSave.disabled = false;
+        // refused as stale, it is pasted again onto what the sheet then shows
+        if (err?.status === 409) valueInput.value = "";
+        await failed(err, "Could not replace value");
       }
     };
-    replaceBlock.append(replaceForm, replaceSaid);
+    replaceBlock.append(replaceForm);
     inner.append(replaceBlock);
 
     sheet.append(top, inner);

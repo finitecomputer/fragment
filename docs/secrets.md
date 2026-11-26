@@ -212,8 +212,9 @@ way T3 Code's secret prompt does: the agent never sees what they give.
   full, or that it keeps a name: an ask reaches only the asking agent's
   own person's Vault, and their agents may see everything they have
   (decision 44), never a value. The person changes or removes a secret in
-  Settings → Secrets, each change made only onto the secret as they read
-  it (`held`, 409 otherwise), or with `fragment vault set|list|rm`.
+  Settings → Secrets, each change or removal made only onto the secret as
+  its sheet shows it (`held`, 409 otherwise, and the sheet is drawn again
+  from what the Vault holds), or with `fragment vault set|list|rm`.
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
   and their Vault keeps at most 64, ended ones an hour.

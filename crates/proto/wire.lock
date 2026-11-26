@@ -575,6 +575,7 @@ field vault.asked.path.ask required string
 field vault.decline.path.ask required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
+field vault.remove.query.held optional string
 other Author other
 other FragmentKind other
 route channels.draft PUT /api/f/{name}/channels/{channel}/draft

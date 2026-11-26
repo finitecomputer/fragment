@@ -384,8 +384,9 @@ A person's secrets, which their agents use without holding: set and listed by th
 `DELETE /api/vault/{secret}`: Removes a secret: its agents' next use of it is refused.
 
 - Credentials: NIP-98, the shell's session
+- Query `held` (`string`, optional): The secret as its remover last read it (`Secret::revision`): one that changed since is refused (409) and nothing is removed. None, it is removed whatever is held.
 - Answer: [`SecretRemoved`](#secretremoved)
-- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 ## Shapes
 

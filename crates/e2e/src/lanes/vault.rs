@@ -155,7 +155,7 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let widened = held(api, "linear")?;
     let fresh = put(api, &ada, "k-held", &json!({ "value": "v", "hosts": [], "agents": agents, "held": "none" }))?;
     s.ok(
-        "a put that names the revision it read lands only on that one: a stale one, or `none` for a name kept, is refused (409) and nothing is written; `none` makes a new one",
+        "a put that names the revision it read lands only on that one: a stale one, or `none` for a name kept, is refused (409) and nothing is written; `none` makes a new one; its answer names the revision a list then reads",
         rev.as_str().is_some_and(|r| r.len() == 64)
             && stale.status == 409
             && taken.status == 409
@@ -164,12 +164,22 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
             && behind.status == 409
             && widened["hosts"] == json!(["api.linear.app", "uploads.linear.app"])
             && widened["revision"] != rev
+            && onto.body["revision"] == widened["revision"]
             && fresh.status == 200,
         format!("{stale} {taken} {onto} {behind} {fresh}"),
     );
     // as it was, for the checks after
     put(api, &ada, "linear", &json!({ "hosts": ["api.linear.app"], "place": place, "agents": agents, "held": widened["revision"] }))?;
-    api.signed(&ada, "DELETE", "/api/vault/k-held", None)?;
+    // a removal that names the revision it read the same
+    let k_rev = held(api, "k-held")?["revision"].as_str().unwrap_or_default().to_string();
+    let stale_rm = api.signed(&ada, "DELETE", &format!("/api/vault/k-held?held={}", "0".repeat(64)), None)?;
+    let kept = names(api, &ada)?.1.iter().any(|n| n == "k-held");
+    let removed = api.signed(&ada, "DELETE", &format!("/api/vault/k-held?held={k_rev}"), None)?;
+    s.ok(
+        "a removal that names the revision it read removes only that one: a stale one is refused (409) and the secret stays",
+        stale_rm.status == 409 && kept && removed.status == 200 && removed.body["removed"] == true && !names(api, &ada)?.1.iter().any(|n| n == "k-held"),
+        format!("{stale_rm} {removed}"),
+    );
 
     // who: their own agent, and another person
     let a = api.signed(&agent, "GET", "/api/vault", None)?;

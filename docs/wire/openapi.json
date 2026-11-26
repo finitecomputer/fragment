@@ -8014,6 +8014,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The secret as its remover last read it (`Secret::revision`): one that changed since is refused (409) and nothing is removed. None, it is removed whatever is held.",
+            "in": "query",
+            "name": "held",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8051,6 +8060,19 @@
             "description": "`forbidden`",
             "x-fragment-codes": [
               "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
             ]
           },
           "500": {

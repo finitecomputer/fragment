@@ -320,15 +320,23 @@ pub(crate) async fn moved(env: &Env, person: &str, name: &str, to: &str, revisio
 }
 
 /// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
-pub(crate) async fn delete(env: &Env, person: &str, name: &str) -> CellResult<Vec<u8>> {
-    ask(env, person, &op_path("delete", name)?, None).await
+pub(crate) async fn delete(env: &Env, person: &str, name: &str, held: Option<&str>) -> CellResult<Vec<u8>> {
+    let held = held.map(|h| serde_json::value::to_raw_value(&Held { held: h.to_string() })).transpose().map_err(|e| CellError::host(e.to_string()))?;
+    ask(env, person, &op_path("delete", name)?, held.as_deref()).await
+}
+
+/// A removal's precondition: the secret as its remover last read it
+/// (`Secret::revision`). On the wire between the Worker and the Vault.
+#[derive(Serialize, Deserialize)]
+struct Held {
+    held: String,
 }
 
 /// `/api/vault[/{name}]`, signed by `signed`: the person's own, never an
 /// agent's (their agents use its secrets, never set or list them). The
 /// router finds their Vault, hands it the body as it came, and passes its
 /// answer on.
-pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
+pub(crate) async fn route(env: &Env, url: &Url, signed: &Signed, method: Method, rest: &[&str], body: &[u8]) -> CellResult<Response> {
     // an ask's routes are a POST, or under an id: `PUT` and `DELETE
     // /api/vault/asks` stay a secret named `asks`'
     if rest.first() == Some(&"asks") && (method == Method::Post || rest.len() > 1) {
@@ -344,7 +352,10 @@ pub(crate) async fn route(env: &Env, signed: &Signed, method: Method, rest: &[&s
             let raw: Box<RawValue> = crate::json_body(body)?;
             put(env, person, name, &raw).await?
         }
-        (Method::Delete, [name]) => delete(env, person, name).await?,
+        (Method::Delete, [name]) => {
+            let held = url.query_pairs().find(|(k, _)| k == "held").map(|(_, v)| v.into_owned());
+            delete(env, person, name, held.as_deref()).await?
+        }
         (m, _) => return Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/vault/{}", m.as_ref(), rest.join("/")))),
     };
     // set or removed: a waiting ask's card may change with it (Save, or Decline alone)
@@ -516,7 +527,10 @@ impl VaultCell {
                 self.put(name, &put, Some(&receipt), None).await?
             }
             ["vault", "list"] => self.list()?,
-            ["vault", "delete", name] => self.delete(name)?,
+            ["vault", "delete", name] => {
+                let held: Option<Held> = crate::json_body(&req.bytes().await?)?;
+                self.delete(name, held.map(|h| h.held).as_deref())?
+            }
             ["vault", "take", name] => {
                 let Take(to, hosts) = crate::json_body(&req.bytes().await?)?;
                 self.take(name, &to, &hosts).await?
@@ -938,7 +952,12 @@ impl VaultCell {
     }
 
     /// `name` removed: `SecretRemoved`'s JSON.
-    fn delete(&self, name: &str) -> CellResult<String> {
+    fn delete(&self, name: &str, held: Option<&str>) -> CellResult<String> {
+        if let Some(read) = held {
+            if self.held_at(name)?.1 != read {
+                return Err(CellError::new(ErrorCode::Conflict, format!("{name} changed since you read it: look at it again")));
+            }
+        }
         let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
         self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
         serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))

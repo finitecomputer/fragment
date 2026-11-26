@@ -1,9 +1,9 @@
 // cell/shell/secrets.js's Settings → Secrets section: lists Vault secrets
 // without values, toggles per-agent access (refusing to remove the last
-// agent) from the secret as it is now, edits allowed hosts keeping the
-// sealed value, replaces a value through a masked input cleared once
-// saved, adds a secret (never over one already kept), and removes one via
-// two-step confirmation.
+// agent), edits allowed hosts keeping the sealed value, replaces a value
+// through a masked input cleared once saved, adds a secret (never over one
+// already kept), and removes one via two-step confirmation. Every write is
+// onto the secret as its sheet shows it (`held`), one at a time.
 // Run by `cargo xtask check` on the pinned Node (xtask/src/js_syntax.rs).
 
 import { test } from "node:test";
@@ -65,7 +65,7 @@ const walk = (n) => (n && typeof n === "object" ? [n, ...(n.children ?? []).flat
 
 // `vault`: what `GET /api/vault` answers (the secret as it is now); `vaultApi`,
 // in its place, a Vault of the test's own
-function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }], vaultApi = null) {
+function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }], vaultApi = null, onReopen = null) {
   globalThis.MutationObserver ??= class {
     observe() {}
     disconnect() {}
@@ -100,9 +100,17 @@ function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { f
     isOpen: () => true,
     reopenSettings: async () => {
       reopened++;
+      await onReopen?.(ui);
     },
   });
   return { ...ui, calls, reopened: () => reopened };
+}
+
+class ApiError extends Error {
+  constructor(status, message) {
+    super(message);
+    this.status = status;
+  }
 }
 
 test("placeLabel and parseHosts format placements and normalize host lists", () => {
@@ -144,15 +152,72 @@ test("toggling per-agent access sends PUT without value and refuses removing the
   assert.equal(reopened(), 1);
 });
 
-test("an edit writes the secret as it is now: an agent's Allow since the sheet was drawn is kept", async () => {
-  const now = { ...github(), hosts: ["api.github.com", "uploads.github.com"], agents: ["ada--k3x9", "cy--k3x9"] };
-  const { secretsSection, calls } = setup({ secrets: [now] });
+test("an edit is onto the secret as its sheet shows it: a change since is refused, never taken in or written over", async () => {
+  // the Vault: an agent's Allow since the sheet was drawn added a host and an agent
+  const now = { ...github(), hosts: ["api.github.com", "uploads.github.com"], agents: ["ada--k3x9", "cy--k3x9"], revision: "rev2" };
+  const sent = [];
+  const vaultApi = async (method, path, body) => {
+    if (method === "GET") return { secrets: [now] };
+    sent.push({ method, path, body });
+    throw new ApiError(409, "github changed since you read it: look at it again");
+  };
+  const { secretsSection, reopened } = setup(null, undefined, vaultApi);
   const card = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.secret === "github");
-  const bea = walk(card).find((n) => n.dataset?.agent === "bea--k3x9");
-  await bea.onclick();
-  assert.deepEqual(calls[0].body.agents, ["ada--k3x9", "cy--k3x9", "bea--k3x9"]);
-  assert.deepEqual(calls[0].body.hosts, ["api.github.com", "uploads.github.com"]);
-  assert.equal(calls[0].body.held, "rev1", "only onto the secret it read");
+  await walk(card).find((n) => n.dataset?.agent === "bea--k3x9").onclick();
+  // hosts and agents as the sheet showed them, onto the revision it showed
+  assert.deepEqual(sent[0].body, { hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9", "bea--k3x9"], held: "rev1" });
+  // Replace and Save hosts the same: nothing taken from what changed since
+  const replaceForm = walk(card).find((n) => n.className.includes("secret-replace-form"));
+  const valueInput = walk(replaceForm).find((n) => n.tag === "input");
+  valueInput.value = "ghp_new";
+  await replaceForm.onsubmit({ preventDefault() {} });
+  assert.deepEqual(sent[1].body, { value: "ghp_new", hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], held: "rev1" });
+  assert.equal(valueInput.value, "", "a refused paste is not kept");
+  const hostsForm = walk(card).find((n) => n.className.includes("secret-hosts-form"));
+  walk(hostsForm).find((n) => n.tag === "input").value = "api.github.com";
+  await hostsForm.onsubmit({ preventDefault() {} });
+  assert.deepEqual(sent[2].body, { hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], held: "rev1" });
+  // each refusal draws the page again from the Vault, and says why
+  assert.equal(reopened(), 3);
+  const said = walk(card).find((n) => n.className.includes("secret-said") && !n.hidden);
+  assert.match(said.textContent, /changed since you read it/);
+});
+
+test("remove names the revision its sheet showed, and a change since is refused", async () => {
+  const sent = [];
+  const vaultApi = async (method, path) => {
+    if (method === "GET") return { secrets: [github()] };
+    sent.push({ method, path });
+    throw new ApiError(409, "github changed since you read it: look at it again");
+  };
+  const { secretsSection, reopened } = setup(null, undefined, vaultApi);
+  const card = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.secret === "github");
+  walk(card).find((n) => n.dataset?.action === "remove-secret").onclick();
+  await walk(card).find((n) => n.dataset?.action === "confirm-remove-secret").onclick();
+  assert.deepEqual(sent, [{ method: "DELETE", path: "/api/vault/github?held=rev1" }]);
+  assert.equal(reopened(), 1);
+  assert.match(walk(card).find((n) => n.className.includes("secret-said") && !n.hidden).textContent, /changed since/);
+});
+
+test("a write queued behind one that redrew the page says what went wrong in the sheet drawn since", async () => {
+  let held = github();
+  let n = 1;
+  const vaultApi = async (method, _path, body) => {
+    if (method === "GET") return { secrets: [structuredClone(held)] };
+    await new Promise((r) => setTimeout(r, 5));
+    if (body.hosts.length > 8) throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
+    held = { ...held, agents: body.agents, revision: `rev${++n}` };
+    return structuredClone(held);
+  };
+  const drawn = [];
+  const { secretsSection } = setup(null, undefined, vaultApi, (ui) => drawn.push(ui.secretsSection({ secrets: [structuredClone(held)] })));
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  const hostsForm = walk(card).find((x) => x.className.includes("secret-hosts-form"));
+  walk(hostsForm).find((x) => x.tag === "input").value = Array.from({ length: 9 }, (_, i) => `h${i}.example.com`).join(", ");
+  await Promise.all([walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick(), hostsForm.onsubmit({ preventDefault() {} })]);
+  assert.equal(drawn.length, 1, "the toggle landed and drew the page again");
+  const newest = walk(drawn[0]).find((x) => x.dataset?.secret === "github");
+  assert.match(walk(newest).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
 });
 
 test("two edits at once go one after the other, each onto what the last left", async () => {
@@ -168,7 +233,7 @@ test("two edits at once go one after the other, each onto what the last left", a
       throw new Error("changed");
     }
     held = { ...held, agents: body.agents, revision: `rev${++n}` };
-    return {};
+    return structuredClone(held);
   };
   const { secretsSection } = setup(null, [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }, { fragment: "cy--k3x9" }], vaultApi);
   const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
@@ -210,7 +275,7 @@ test("updating hosts keeps value, replacing value clears masked input, and remov
   assert.ok(confirm, "confirm button appeared");
   await confirm.onclick();
   assert.equal(calls[2].method, "DELETE");
-  assert.equal(calls[2].path, "/api/vault/github");
+  assert.equal(calls[2].path, "/api/vault/github?held=rev1");
 });
 
 test("Add secret submits name, masked value, hosts, and selected agents, then clears password input", async () => {
