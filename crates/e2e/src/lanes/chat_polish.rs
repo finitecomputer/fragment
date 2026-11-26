@@ -479,11 +479,14 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
         super::shows(chrome, &page, &format!("window.__frame.contentDocument.querySelector('.working')?.textContent === {}", super::js(&carried_line))),
         chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null),
     );
-    for (w, h, phone, scheme, file) in [(1280, 860, false, "light", "carried-desktop.png"), (1280, 860, false, "dark", "carried-desktop-dark.png"), (390, 844, true, "light", "carried-phone.png"), (390, 844, true, "dark", "carried-phone-dark.png")] {
+    // a folder of their own: a later check makes `chat-polish` again
+    let carried_shots = s.dir("carried-line");
+    for (w, h, phone, scheme, file) in [(1280, 860, false, "light", "desktop.png"), (1280, 860, false, "dark", "desktop-dark.png"), (390, 844, true, "light", "phone.png"), (390, 844, true, "dark", "phone-dark.png")] {
         super::fit(chrome, &page, w, h, phone)?;
         chrome.color_scheme(&page, scheme)?;
-        chrome.screenshot(&page, &shots.join(file))?;
+        chrome.screenshot(&page, &carried_shots.join(file))?;
     }
+    println!("      (the carried line's screenshots in {})", carried_shots.display());
     chrome.color_scheme(&page, "light")?;
     super::fit(chrome, &page, 1280, 860, false)?;
     println!("      (polish screenshots in {})", shots.display());
