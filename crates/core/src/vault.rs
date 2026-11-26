@@ -205,6 +205,27 @@ pub fn check(name: &str, put: &PutSecret, held: Option<&Place>, catalog: &Catalo
     Ok(Checked { hosts, place, placing, agents })
 }
 
+/// Whether a secret going to `hosts` keeps its person's Vault within
+/// `egress::VAULT_HOSTS_MAX` distinct hosts, the catalog's counted like any
+/// other (a computer registers each Vault host as its own, so a catalog's
+/// change never moves a Vault over its share: `computer::egress`).
+/// `others`: the hosts the Vault's other secrets go to; `held`: every host
+/// it goes to now, this secret's too. A Vault over the cap from before it
+/// is refused only a host it does not go to yet, so each secret may still
+/// be set again as it is, and fewer hosts are always fine.
+pub fn room(hosts: &[String], others: &[String], held: &[String]) -> Result<(), VaultError> {
+    use crate::computer::egress::VAULT_HOSTS_MAX;
+    let after: std::collections::BTreeSet<&String> = others.iter().chain(hosts).collect();
+    let new = hosts.iter().any(|h| !held.contains(h));
+    if after.len() <= VAULT_HOSTS_MAX || !new {
+        return Ok(());
+    }
+    Err(VaultError::Hosts(format!(
+        "your vault sends secrets to at most {VAULT_HOSTS_MAX} hosts, and this would make {}: take a host off another secret, or remove one, first",
+        after.len()
+    )))
+}
+
 /// May `name`, set again with no value, keep the one it holds (placed as
 /// `held`) and go as `placing` says? Only a secret it holds, and only as
 /// the same kind of place: a fill's value is a token, a signature's a
@@ -307,6 +328,30 @@ mod tests {
 
     fn catalog() -> Catalog {
         Catalog::parse(r#"[{"name": "openrouter", "kind": "own", "hosts": ["openrouter.ai"], "placements": [{"header": "authorization", "format": "Bearer {}"}], "env": ["OPENROUTER_API_KEY"]}]"#).expect("a catalog")
+    }
+
+    fn strings(l: &[&str]) -> Vec<String> {
+        l.iter().map(|h| h.to_string()).collect()
+    }
+
+    #[test]
+    fn a_vault_sends_to_at_most_eight_hosts() {
+        use crate::computer::egress::VAULT_HOSTS_MAX;
+        let eight: Vec<String> = (0..VAULT_HOSTS_MAX).map(|i| format!("h{i}.example.com")).collect();
+        let ninth = strings(&["h8.example.com"]);
+        // eight across its other secrets: a ninth host is refused, and says why
+        let refused = room(&ninth, &eight, &eight).expect_err("a ninth host");
+        assert!(refused.to_string().contains("at most 8 hosts") && refused.to_string().contains("would make 9"), "{refused}");
+        // one it goes to already costs nothing more; a catalog's host counts as any other
+        assert_eq!(room(&strings(&["h0.example.com", "h1.example.com"]), &eight, &eight), Ok(()));
+        assert!(room(&strings(&["openrouter.ai"]), &eight, &eight).is_err(), "a catalog's host is one of the eight");
+        // the secret that went to h7 moved to h8: still eight
+        assert_eq!(room(&ninth, &eight[..7], &eight), Ok(()));
+        // a Vault over the cap from before it: set again as it is, or with fewer, is fine
+        let twelve: Vec<String> = (0..12).map(|i| format!("h{i}.example.com")).collect();
+        assert_eq!(room(&twelve[..2], &twelve[2..], &twelve), Ok(()));
+        assert_eq!(room(&twelve[..1], &twelve[2..], &twelve), Ok(()));
+        assert!(room(&strings(&["new.example.com"]), &twelve[2..], &twelve).is_err(), "a host it does not go to yet");
     }
 
     fn put(value: &str, hosts: &[&str], place: Place, agents: &[&str]) -> PutSecret {

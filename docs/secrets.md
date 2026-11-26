@@ -103,6 +103,17 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   that secret's row beside the catalog (`Catalog::with`). A request to
   those hosts carrying no placeholder goes on as it came, its own
   `Authorization` (a git remote's basic auth) untouched.
+- **At most 8 hosts** (`fragment_core::vault::room`): a computer's egress
+  takes 128 intercept entries, each host 4 (HTTP and HTTPS), so the
+  platform's own, the catalog's (at most 21) and a Vault within its 8
+  always fit at a start (`fragment_core::computer::egress`). A secret that
+  would send the Vault to a ninth distinct host is refused (400), with a
+  value or without, in words that say so; a host another secret goes to
+  costs nothing more. A catalog's host counts as any other, since a
+  computer registers each Vault host as its own, so a deploy that changes
+  the catalog never moves a Vault over its share. A Vault over the cap from
+  before it is refused only a host it does not go to yet, so each secret
+  may still be set again as it is, or narrowed.
 - **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
   Vault answers a fresh NIP-98 event over the request as it goes (its
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and

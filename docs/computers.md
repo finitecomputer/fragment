@@ -442,7 +442,17 @@ its owner's Vault: beside the container's start when the start holds its
 guest until it lets it go (a restore's gate; a snapshot's hold, when its
 save was held), and caught before that; before the start when its guest
 runs at once (a fresh start, or a snapshot whose sleep's hold failed), so
-no guest runs with one uncaught. HTTPS to an intercepted host is
+no guest runs with one uncaught. A container takes 128 intercept entries, a host
+on HTTP and HTTPS 4: the platform's own (up to 10), at most 21 catalog
+hosts (a deploy refuses more) and a Vault within its 8 (a put refuses
+more: docs/secrets.md) fit together, so its start has room
+(`fragment_core::computer::egress`). A Vault over the cap from before it
+may not. An intercept is never taken back while its container runs, so a
+Vault host set since its start, then moved, still holds its entries until
+the next start (FIN-612), and so does a catalog host a deploy replaced: a
+takeover adds the new beside the old, so a container near full can run
+out of room there until its next start.
+HTTPS to an intercepted host is
 signed by Cloudflare's containers CA, which the runtime puts at
 `/etc/cloudflare/certs/cloudflare-containers-ca.crt`: an image trusts it
 wherever its tools read trust (our Hermes image: the system bundle,
