@@ -1542,6 +1542,7 @@ pub(super) const VAULT_ASK_CHECKS: &[&str] = &[
     "a card answered after a secret of its name was set meanwhile grants nothing: 409, and the secret stays as set",
     "`fragment vault ask --no-wait` returns immediately with a deep link URL and `fragment vault wait <id>` receives the stand-in once answered",
     "an ask that would take its person's Vault past 8 hosts is refused as the agent asks, in the cap's words, and no card is drawn: no one is asked to paste what Save would refuse",
+    "an ask for a new secret in a Vault that keeps 64 already is refused as the agent asks, in the Vault's words, and no card is drawn",
 ];
 
 /// The person's waiting card for `name` (a `vault_ask` notice), once
@@ -1752,6 +1753,29 @@ pub(super) fn vault_ask_checks(
         json!({ "full": full, "filled": filled.len(), "reply": ninth, "drawn": drawn }),
     );
 
+    // the Vault's secrets full (parked ones: no hosts), a new name's ask is refused before any card
+    let kept = api.signed(w.owner, "GET", "/api/vault", None)?.body["secrets"].as_array().map_or(0, Vec::len);
+    let mut parked = vec![];
+    for i in kept..64 {
+        let fill = format!("e2e-full-{i}");
+        let r = api.signed(w.owner, "PUT", &format!("/api/vault/{fill}"), Some(&json!({ "value": "v", "hosts": [], "agents": [w.agent] })))?;
+        anyhow::ensure!(r.status == 200, "a put toward the Vault's 64: {r}");
+        parked.push(fill);
+    }
+    let turn = start(709, "vault-ask e2e-sixty-fifth full.vault.test One secret too many")?;
+    let sixty_fifth = replied(s, &turn)?;
+    said.push(sixty_fifth.clone());
+    let told = api.signed(w.owner, "GET", "/api/notices?field=1", None)?;
+    let drawn = told.body["notices"].as_array().is_some_and(|l| l.iter().any(|n| n["kind"] == "vault_ask" && n["title"].as_str().is_some_and(|t| t.ends_with(" e2e-sixty-fifth"))));
+    for fill in &parked {
+        api.signed(w.owner, "DELETE", &format!("/api/vault/{fill}"), None)?;
+    }
+    s.ok(
+        VAULT_ASK_CHECKS[13],
+        sixty_fifth.starts_with("vault-ask refused:") && sixty_fifth.contains("at most 64 secrets") && told.status == 200 && !drawn,
+        json!({ "kept": kept, "parked": parked.len(), "reply": sixty_fifth, "drawn": drawn }),
+    );
+
     let view = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?;
     let logs = super::vault::logs(s);
     s.ok(VAULT_ASK_CHECKS[8], !said.iter().any(|t| t.contains(&value)) && !view.text.contains(&value) && !logs.contains(&value), json!({ "said": said }));
@@ -1761,5 +1785,5 @@ pub(super) fn vault_ask_checks(
     let set = api.signed(w.owner, "PUT", "/api/vault/asks", Some(&json!({ "value": "asks-e2e", "hosts": [], "agents": [w.agent] })))?;
     let gone = api.signed(w.owner, "DELETE", "/api/vault/asks", None)?;
     s.ok(VAULT_ASK_CHECKS[9], set.status == 200 && gone.status == 200 && gone.body["removed"] == true, json!({ "set": set.body, "removed": gone.body }));
-    Ok(8)
+    Ok(9)
 }

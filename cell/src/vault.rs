@@ -600,10 +600,8 @@ impl VaultCell {
                 }
             }
         }
-        let exists = !existing.is_empty();
-        let held = self.rows("SELECT COUNT(*) AS n FROM secrets", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
-        if !exists && held >= rules::SECRETS_MAX as u64 {
-            return Err(CellError::invalid(format!("a vault keeps at most {} secrets: remove one first", rules::SECRETS_MAX)));
+        if existing.is_empty() {
+            self.room_for_one_more()?;
         }
         self.room(name, &checked.hosts)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, set_at: js::now_ms() };
@@ -633,6 +631,15 @@ impl VaultCell {
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
         self.sql().exec("UPDATE secrets SET secret = ? WHERE name = ?", vec![text.as_str().into(), name.into()])?;
         Ok(text)
+    }
+
+    /// Whether the Vault has room for one more secret (`rules::SECRETS_MAX`).
+    fn room_for_one_more(&self) -> CellResult<()> {
+        let held = self.rows("SELECT COUNT(*) AS n FROM secrets", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);
+        if held >= rules::SECRETS_MAX as u64 {
+            return Err(CellError::invalid(format!("a vault keeps at most {} secrets: remove one first", rules::SECRETS_MAX)));
+        }
+        Ok(())
     }
 
     /// Whether `name`, going to `hosts`, keeps the Vault within its hosts
@@ -971,9 +978,18 @@ impl VaultCell {
         }
         let Asked(agent, _, _, a) = &asked;
         rules::ask_ok(a, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))?;
-        // held to the Vault's hosts now, as its answer will be, so its
-        // person is never asked to paste what Save would refuse
-        self.room(&a.name, &rules::ask_hosts(a, self.held_at(&a.name)?.0.as_ref()))?;
+        // held to the Vault as it is now, as its answer's write will be, so
+        // its person is never asked to answer what that write would refuse:
+        // a new secret's room among the Vault's, an Allow's own limits
+        let held = self.held_at(&a.name)?.0;
+        match &held {
+            None => self.room_for_one_more()?,
+            Some(h) => {
+                let allow = AnswerAsk { held: String::new(), value: None, allow: true };
+                rules::answered(a, agent, Some(h), &allow).map_err(|e| CellError::invalid(e.to_string()))?;
+            }
+        }
+        self.room(&a.name, &rules::ask_hosts(a, held.as_ref()))?;
         let now = js::now_ms();
         self.expire(now)?;
         let kept = self.rows("SELECT COUNT(*) AS n FROM asks", vec![])?.first().and_then(|r| r["n"].as_u64()).unwrap_or(0);

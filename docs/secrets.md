@@ -203,11 +203,15 @@ way T3 Code's secret prompt does: the agent never sees what they give.
   there too): Allow keeps the sealed value and its place. Either answer
   carries the secret's revision as the card showed it (`held`); one that
   changed since is refused (409), checked again after a seal. An ask is
-  taken the same either way, so an agent learns nothing of secrets it is
-  not given. An ask whose answer would take the Vault past its 8 hosts
-  (above: every distinct one, the catalog's too) is refused as the agent
-  asks, in the same words, and no card is drawn: no one is asked to paste
-  what Save would refuse. The person changes or removes a secret with `fragment vault
+  checked as its answer's write will be, and refused as the agent asks,
+  in the same words, with no card drawn, when that write would be: a new
+  secret in a Vault that keeps 64, an Allow past a secret's own 8 hosts or
+  16 agents, or either taking the Vault past its 8 hosts (above: every
+  distinct one, the catalog's too). No one is asked to answer what the
+  write would refuse. So a refusal can tell an agent its person's Vault is
+  full, or that it keeps a name: an ask reaches only the asking agent's
+  own person's Vault, and their agents may see everything they have
+  (decision 44), never a value. The person changes or removes a secret with `fragment vault
   set|list|rm`.
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
