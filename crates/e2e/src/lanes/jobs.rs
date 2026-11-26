@@ -755,6 +755,14 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
     let (ada, bob, ben) = (api.person()?, api.person()?, api.person()?);
     let lent_value = format!("sk-lent-{}", &Keys::generate().pubkey_hex()[..20]);
     let (name, _) = jobs_fragment(s, api, &ada, "lent", |_| {})?;
+    // a key is lent only where its owner and the people named are, as one
+    // of its own is held (FIN-352)
+    let private = |keys: &Keys, app: &str| -> Result<()> {
+        let r = api.signed(keys, "PUT", &format!("/api/f/{app}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(r.status == 200, "{app} made members only: {r}");
+        Ok(())
+    };
+    private(&ada, &name)?;
     let spell = |keys: &Keys, app: &str, id: &str, host: &str| -> Result<Value> {
         let url = upstream.url("/spell/{{API_KEY}}").replace("127.0.0.1", host);
         let r = api.op(keys, app, "spell", id, json!({ "url": url }))?;
@@ -773,17 +781,17 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
         &set,
     );
     let ran = spell(&ada, &name, "lent-ada", "127.0.0.1")?;
-    let text = ran["output"]["text"].as_str().unwrap_or("");
+    // the vendor wrote the value back in each spelling (`spellings`): the
+    // app's code reads each as its placeholder, and none of them
     let forms = spellings(&[&lent_value, &format!("Bearer {lent_value}")]);
+    let unread = |run: &Value| {
+        let text = run["output"]["text"].as_str().unwrap_or("");
+        run["status"] == "succeeded" && text.lines().count() == forms.len() && text.lines().all(|l| l.contains("{{API_KEY}}")) && forms.iter().all(|f| !text.contains(f.as_str())) && !run.to_string().contains(&lent_value)
+    };
     let hit = upstream.hits(&format!("/spell/{lent_value}"));
     s.ok(
         "its fetch is filled from her Vault, and a vendor that writes the value back (each spelling) reaches the app's code as {{API_KEY}}, never the value",
-        ran["status"] == "succeeded"
-            && hit.len() == 1
-            && hit[0].authorization == format!("Bearer {lent_value}")
-            && text.lines().count() == forms.len()
-            && text.lines().all(|l| l.contains("{{API_KEY}}"))
-            && !ran.to_string().contains(&lent_value),
+        unread(&ran) && hit.len() == 1 && hit[0].authorization == format!("Bearer {lent_value}"),
         json!({ "run": ran, "hits": hit.len() }),
     );
     let ben_id = api.identity(&ben)?;
@@ -792,7 +800,7 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
     let by_ben = spell(&ben, &name, "lent-ben", "127.0.0.1")?;
     s.ok(
         "an editor who isn't its owner runs it with the key she lent it (her grant to the app), never seeing the value",
-        by_ben["status"] == "succeeded" && upstream.hits(&format!("/spell/{lent_value}")).len() == 2 && !by_ben.to_string().contains(&lent_value),
+        unread(&by_ben) && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
         &by_ben,
     );
     let elsewhere = spell(&ada, &name, "lent-elsewhere", "localhost")?;
@@ -806,6 +814,7 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
 
     // another person's app, named in her Vault: it asks its own owner's
     let (bobs, _) = jobs_fragment(s, api, &bob, "lent-bob", |_| {})?;
+    private(&bob, &bobs)?;
     let named = vault(&ada, "for-bob", json!({ "value": "not-bobs", "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&bobs) }))?;
     anyhow::ensure!(named.status == 200, "her Vault names his app: {named}");
     let bob_ran = spell(&bob, &bobs, "lent-bob", "127.0.0.1")?;
@@ -822,12 +831,13 @@ fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
         &linked,
     );
     // its own comes first
-    let own = set_secret(api, &ada, &name, SECRET, &["127.0.0.1"])?;
+    let own_value = format!("sk-own-{}", &Keys::generate().pubkey_hex()[..20]);
+    let own = set_secret(api, &ada, &name, &own_value, &["127.0.0.1"])?;
     anyhow::ensure!(own.status == 200, "its own API_KEY: {own}");
     let mine = spell(&ada, &name, "lent-own", "127.0.0.1")?;
     s.ok(
         "an API_KEY of the app's own fills first, and her Vault is not asked",
-        mine["status"] == "succeeded" && upstream.hits(&format!("/spell/{SECRET}")).len() == 1 && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
+        mine["status"] == "succeeded" && upstream.hits(&format!("/spell/{own_value}")).len() == 1 && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
         &mine,
     );
     let logs = super::vault::logs(s);
