@@ -257,8 +257,10 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
 
 /// `internal_request`, its body a stream (or none) and its `headers` the
 /// caller's: a SimpleX door's import, a computer's handover answer passed
-/// on as it came (simplex_move.rs).
+/// on (simplex_move.rs), always through a stream of its own
+/// (`js::passed_on`, Cloudflare's reorder).
 pub(crate) fn internal_stream(path: &str, method: Method, headers: &[(&str, &str)], body: Option<worker::wasm_bindgen::JsValue>) -> CellResult<Request> {
+    let body = body.map(crate::js::passed_on).transpose()?;
     let h = Headers::new();
     for (k, v) in headers {
         h.set(k, v)?;

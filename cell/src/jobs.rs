@@ -1106,7 +1106,13 @@ impl FragmentCell {
             init.with_body(Some(JsValue::from_str(&body)));
         }
         if let Some(body) = blob {
-            init.with_body(Some(body.into()));
+            // to its door, another object, through a stream of its own
+            // (`js::passed_on`, Cloudflare's reorder)
+            let body = match door {
+                Some(_) => js::passed_on(body.into()).map_err(|e| StepFail::Retry(e.message))?,
+                None => body.into(),
+            };
+            init.with_body(Some(body));
         }
         let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
         let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
