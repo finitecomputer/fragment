@@ -9,6 +9,8 @@
 // (`x-fragment-shell`, same-origin only). It knows nothing of Hermes:
 // everything in a frame is a fragment. Design: Skyler's handoff
 // (2026-10-02); what it did not draw is the older prototype's, in its look.
+// first, so the root says light or dark before anything is drawn
+import { THEMES, chooseTheme, themeChoice, themeMode, onThemeChange } from "./theme.js";
 import "./tooltips.js";
 import { avatar } from "./agent-identity.js";
 import { colorOf } from "./agent-color.js";
@@ -407,8 +409,8 @@ addEventListener("focus", () => {
     go(frame, frame.dataset.src);
   }
 });
-// The frames follow this page's light or dark (they may not see its media).
-const dark = matchMedia("(prefers-color-scheme: dark)");
+// The frames follow this page's light or dark (theme.js: the person's choice,
+// or the system's), which they may not see for themselves.
 const mobileChat = matchMedia("(max-width: 760px)");
 // Load and decode both landscapes once. Hold the current one until its
 // replacement is ready; a failed load keeps it, and a rapid theme reversal
@@ -422,20 +424,20 @@ const wallpapers = {
   light: loadWallpaper("wallpaper.jpg"),
   dark: loadWallpaper("wallpaper-dark.jpg"),
 };
-document.documentElement.style.setProperty("--wallpaper-dark-opacity", dark.matches ? "1" : "0");
+document.documentElement.style.setProperty("--wallpaper-dark-opacity", themeMode() === "dark" ? "1" : "0");
 async function updateWallpaper() {
-  const mode = dark.matches ? "dark" : "light";
+  const mode = themeMode();
   const image = await wallpapers[mode];
-  if (image && mode === (dark.matches ? "dark" : "light")) {
+  if (image && mode === themeMode()) {
     document.documentElement.style.setProperty("--wallpaper-dark-opacity", mode === "dark" ? "1" : "0");
   }
 }
 function theme(frame) {
   try {
-    frame.contentWindow?.postMessage({ fragment: KIND.theme, mode: dark.matches ? "dark" : "light", mobile: mobileChat.matches }, "*");
+    frame.contentWindow?.postMessage({ fragment: KIND.theme, mode: themeMode(), mobile: mobileChat.matches }, "*");
   } catch {}
 }
-dark.addEventListener("change", () => {
+onThemeChange(() => {
   void updateWallpaper();
   for (const f of document.querySelectorAll("iframe")) theme(f);
 });
@@ -2169,6 +2171,7 @@ const settings = createSettings({
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
+  theme: { themes: THEMES, choice: themeChoice, choose: chooseTheme },
 });
 function openSettings(push = true, failed = null) { return settings.openSettings(push, failed); }
 function reopenSettings(failed = null) { return settings.reopenSettings(failed); }

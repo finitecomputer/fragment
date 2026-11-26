@@ -70,7 +70,7 @@ person's fragment so labelled.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?, head?, epoch?}` (`fpac` reads a disk's row and its last fallback; `fpac-head {head}`, asleep, makes `head` its newest; `fpac-objects {epoch}` lists what that life put in the bucket; `fpac-status` reads its running daemon's count, which `kill` reads too, just before its signal) |
 | `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?, files?, bytes?, type?, sha?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply` (`files` as its connector names them), `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `file` (`bytes`, base64, typed `type`, held as its runner gives a file → `{sha256, size}`; or `sha`: what it holds under that name, hashed again → `{sha256, size, type}`), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
@@ -175,25 +175,64 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
-**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
-is a place's word that its agent's owner's own record there asked it: its
-asker, the agent, the place (by its life's own key), the record, and until
-when. An agent member reading a channel as itself (`GET
+**Who asked: mandates** (FIN-615, FIN-720, `fragment_core::mandate`). A
+mandate is a place's word that a person's own record there asked its
+agent: its asker, the agent, the place (by its life's own key), the
+record, and until when. An agent member reading a channel as itself (`GET
 /api/f/{name}/channels/{c}`) is given one beside each record whose words
-are its owner's own: their own post, or a door's relay of them
-(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
-record's writing, and a record older than that carries none. The agent's
-request may carry it in `x-fragment-mandate` in place of `for=<its
-owner>`, wherever `for` is honored, and it acts exactly as that `for`
-does. The router checks it in the signer's own lookup: one the platform
-did not make, or altered, or run out, is 403; one carried by any key but
-its agent's, 403; one beside `for`, or where `for` is not honored, 400,
-as are the identity routes and the invite routes (which take `for`
-through the registry, and no mandate yet).
-Only the platform can make one: its mark is a MAC under a key derived from
-the host secret. An asker who is not the agent's owner is another entity,
-whose actions are theirs to be keyed, capped and credited by: their words
-give the agent no mandate yet.
+are a person's own (their post, a door's relay of them, or the
+platform's record of a schedule's fire for its maker:
+`mandate::asker_of`) and to it (its body's `to` names it, or names no
+one: `mandate::addressed`) (`ChannelRecord.mandate`); a live frame
+carries none. It holds for `MANDATE_LIFE_MS` from its record's writing,
+and a record older than that carries none. The agent's request may carry
+it in `x-fragment-mandate` in place of `for`, wherever `for` is honored:
+it acts for its asker as `for` does for its owner, held to the lower of
+the asker's role there and the agent's cap. An asker who is not its
+owner is someone else acting through it (`Signed::other_asker`): a run
+and its ledger key are theirs (`runs.asker`), `members/me` is refused (an
+agent never leaves, nor is removed, for them), `POST /api/fragments` is
+403 (it makes nothing for them), and an icon is never drawn on its
+owner's credit for them. The router checks it in the signer's own
+lookup: one the platform did not make, or altered, or run out, is 403;
+one carried by any key but its agent's, 403; one beside `for`, or where
+`for` is not honored, 400, as are the identity routes and the invite
+routes (which take `for` through the registry, and no mandate). Only the
+platform can make one: its mark is a MAC under a key derived from the
+host secret.
+
+**An agent's computer proves who asked** (FIN-720). Its bridge tells the
+agent's fragment each turn it runs, before its runtime hears of it
+(`/api/computer/turns`: docs/computers.md). The egress then signs each
+call the agent makes `for` its owner with the proof the open turns hold
+(`mandate::proof`): only its owner's turns open, its owner's mandate (or
+the bare `for`, with none); one other person's turns open, each proven,
+their newest mandate; turns of more than one other person, or of one
+unproven, the agent as itself, with no `for`, in those turns' places
+alone, and 403 anywhere else. The invites waiting on its owner's email
+take `for` and no mandate: there its owner's own ask keeps `for`, and
+anyone else's is 403. A hand-off (another agent of the computer's words
+in a chat) carries on the ask of the turn it was said in, unproven. Since decision 64 an agent's own
+memberships mirror its owner's, so acting as itself elsewhere would reach
+what is its owner's for someone it cannot name. A mandate names whose ask
+a turn is, whatever its bridge says (a schedule's fire is its maker's,
+though the place's own key wrote it). While someone else's turn is open,
+the agent's grants carry `lend`, what of its owner's it uses then, read
+at each use from each place that person's turns are in, the narrowest of
+them: paid tools (an operator key) by `spend`, their accounts and keys (a
+connection, a Vault secret) by `accounts`; no one proven's, nothing. Its
+owner's own ask lends everything. A paid tool used on someone else's turn
+is billed to the owner only while lent. The computer tells its own turns,
+which its agent could undo (the debt ledger, "An agent's computer tells
+its own turns").
+
+**An agent's lend** (the share sheet's card for an owner's own agent in
+a chat): `PUT /api/f/{name}/members/{agent}/lend` `{spend, accounts}` →
+the lend, kept on the agent's member row alone, so a switch holds from
+the next use, mid-turn too; its owner's alone, in person (the agent
+itself 403; anyone else refused as on any route). A member list says it
+to its owner, on their own agents' rows (`Member.lend`), and to no one
+else. One never set is `Lend::DEFAULT`: spend on, accounts off.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -477,7 +516,9 @@ fragment decides their role and meters the request to its owner): who
 they are, their and their agents' lists, each fragment they or their
 agents own (a fragment shared with them is only named, `sharedWithMe`),
 and their computer's newest save, with the newest one set aside beside it
-(docs/computers.md, "Saves and what a wake restores"). What a fragment refuses or lacks is
+(docs/computers.md, "Saves and what a wake restores"); a computer on a
+disk keeps none, so the export has one taken for it, awake (docs/computers.md,
+"A disk"). What a fragment refuses or lacks is
 named in its `meta.json` (`skipped`). The archive is one uncompressed tar
 whose layout and formats its own README states
 (`fragment_core::export::README`); its bounds are
@@ -698,10 +739,11 @@ it. Narrowing is never refused, and one shared before the rule keeps what
 it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
 offers no invite, and no switch but one to close a link from before.
 
-On a chat one of the owner's agents is in, the sheet, and `fragment
-members add`, say "People in this chat can talk to your agent."
-(`fragment_core::permit::TRUST_WARNING`): whoever is in a chat may talk to
-its agents, which act for their owner.
+On a chat one of the owner's agents is in, `fragment members add` says
+"People here can ask your agent for things. It does them as that person,
+and anyone here can see what it finds." (`fragment_core::permit::
+asked_here`), and the sheet shows the agent's lend card: whoever is in a
+chat may ask its agents, which act as them (Who asked: mandates).
 
 ### Invites by email
 
@@ -826,7 +868,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, from?, kinds?, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -1141,8 +1183,9 @@ does not ship is never answered from its repo (Serving).
 - `triggers` (at most `TRIGGERS_MAX`) start runs of a mutation or a job an
   editor may call: `{"cron": "0 9 * * *", "run": op}` (five fields, UTC,
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
-  "person" | "agent"}` (each new record, of that kind's members only with
-  `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
+  "person" | "agent", "kinds"?: [...]}` (each new record, of that kind's
+  members only with `from`, and only of those kinds with `kinds`: a body's
+  `kind`, 1 to `TRIGGER_KINDS_MAX`, named as `listed`'s are, each once); `{"files": "notes/**", "run": op}` (a move of `main` changing a
   matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
   "run": op}` (once per install of new code: a deploy moving `live`, or a
   blessed template's changed release, at the fragment's next request; its
@@ -1825,8 +1868,10 @@ steps:
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.
 
-`job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which;
+`job.principal`, `job.agent`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
+`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which
+(`job.principal` and `job.agent` as `call.principal` and `call.agent`: an
+agent's run on someone else's ask is theirs, beside that agent);
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 
@@ -1889,6 +1934,13 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   skipped. Past the owner's overdraft none fires (`schedules.blocked`); a
   channel no longer taking its records, or a record that relays someone
   (kept before that was refused), skips it (`schedule.unfired`).
+- **Its asker** (FIN-720): whom its maker acted for, else its maker
+  (`record_schedules.asker`). Each fire is checked again as them, at
+  their role now: one no longer in the fragment fires no more
+  (`schedule::Refusal::AskerGone`, 403), and the record it appends is
+  the platform's, for them (`records.asker`), so an agent asked by it
+  acts for them (Who asked: mandates). One made before has none: its
+  maker (`created_by`) is its asker.
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five
@@ -1901,7 +1953,10 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
-- The same schedule again answers the one there (`replayed: true`).
+- The same schedule again, asked by the same one, answers the one there
+  (`replayed: true`; `schedule::SAME_SCHEDULE`). Someone else's identical
+  one is theirs, kept beside it, since a schedule fires as its asker: one
+  added after its maker left fires. One kept before askers is its maker's.
   Paused, it fires nothing and has no `nextAt`; resumed, it fires from its
   next minute. Events: `schedule.added`, `.paused`, `.resumed`,
   `.removed`.
@@ -1973,15 +2028,34 @@ A subscribe answers one page of backlog (at most `CHANNEL_PAGE` records and
 `CHANNEL_PAGE_MAX_BYTES`); with `more: true`, subscribe again from `next`.
 The page that reaches the end makes it live, so records arrive in order.
 
-A socket's role is fixed when it connects. Removing a member, rotating the
-share link, or a fragment leaving `public` closes the sockets it admitted;
-a role change closes theirs (and an agent's owner's) with 4001, after which
-the library reconnects. A signed-in socket is checked again with the
-registry at its next frame after `LIVE_IDENTITY_MS`: a sign-out, an ended
-session or a revoked key closes it with 4001, as does a registry that
-cannot answer, or a fragment that woke from hibernation meanwhile on a
-socket signed in by cookie (its token is never stored; a key's socket is
-asked again as ever). A page's unsigned
+A socket is sent a channel's record or draft only on a decision that
+holds now: its role (the one a connect decides) may read the channel as
+declared now, and a socket signed by a key was asked who it is within
+`LIVE_IDENTITY_MS`. A follower that is not is closed with 4001, never
+skipped: the library reconnects and resubscribes from its cursor, which a
+channel above its role refuses until it may read it again, so no record
+is missed. What the fragment decides reaches every socket at once:
+removing a member, rotating the share link, or a fragment leaving `public`
+closes the sockets it admitted (4003); a role change closes theirs (and an
+agent's owner's) with 4001, and a person joining closes their agents' (a
+hold applies beside its person); a deploy that changes a channel's read
+role, or drops a channel, closes every socket with 4001, so a page refused
+it subscribes again as it may read it now (a deploy that changes no
+channel's read leaves them be). The share link a socket opens by is the
+link as it holds when it opens. What the
+registry holds of who a socket is reaches it when it is asked again, its
+role decided again with the answer (a role that differs closes it with
+4001): a key's socket within `LIVE_IDENTITY_MS` plus one reconnect (an
+agent its owner holds lower, a revoked key), at its next frame once half
+that passed, or at the next record or draft sent it after it; a cookie's
+at its next frame after `LIVE_IDENTITY_MS` (a sign-out, an ended
+session). A registry that cannot answer closes it with 4001 too, as does
+a fragment that woke from hibernation meanwhile on a socket signed in by
+cookie (its token is never stored; a key's socket is asked again as
+ever). A client signed by a key that pings at least every half of
+`LIVE_IDENTITY_MS` (a computer's follower, the iOS app) is never past it
+when a broadcast comes; one that only listens is reconnected about once
+that while its channels are busy. A page's unsigned
 socket that the fragment refuses (401, 403) is opened and closed at once
 with 4003, for good, rather than refused by status (a browser would dial
 again, and Firefox holds back every socket to `/__live` after a refused
@@ -2136,7 +2210,7 @@ card.
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/vault` | a person | → `SecretList {secrets: [{name, hosts, place, agents, setAt}]}`, by name |
-| `PUT /api/vault/{secret}` | a person | `PutSecret {value?, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog key's (a connection's name may be one: its placeholder is `fcx_`, the secret's `fck_`). `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. No `value`: the one held is kept and all else set, `setAt` unchanged; 400 for a secret not held, and between `place.sign` and any other place. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets (400 past it); anything else wrong 400, nothing written |
+| `PUT /api/vault/{secret}` | a person | `PutSecret {value?, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog key's (a connection's name may be one: its placeholder is `fcx_`, the secret's `fck_`). `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. No `value`: the one held is kept and all else set, `setAt` unchanged; 400 for a secret not held, and between `place.sign` and any other place. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets, and at most 8 hosts across them beyond the ones the catalog catches (400 past either; a host already in the Vault costs nothing more); anything else wrong 400, nothing written |
 | `DELETE /api/vault/{secret}` | a person | → `SecretRemoved {name, removed}` |
 | `POST /api/vault/asks` | an agent | `AskSecret {name, why, hosts?}` → `SecretAsk {id, name, state, expiresAt, url}`: an ask of its owner for a secret, a card on their notices (Notices) and reachable directly at `url` (`/vault/ask/{id}`) that waits ten minutes (`state` `waiting`). `why` one line of 1 to 200 characters; `hosts` as a secret's. Taken the same whether they keep one of that name or not (its card tells them: masked paste for a new secret, or Allow/Decline keeping the saved value for an existing one). The same agent's ask of the same name again ends the one before (`expired`); at most 8 waiting a person, and 64 kept, ended ones for an hour (429). Only an agent made from an agent fragment asks (409); a person, 403 |
 | `GET /api/vault/asks/{ask}` | the agent that asked | → `SecretAsk`: `waiting`, `saved`, `declined` or `expired` (unanswered in time, or asked again since), read an hour after it ended, then 404 |

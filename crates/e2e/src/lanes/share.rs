@@ -172,25 +172,62 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
             && r.text.contains("aria-label=\"Who can open it\""),
         &r,
     );
-    // whoever the owner lets into a chat can talk to their agent in it: the
-    // sheet says so by the invite, on a chat their agent is in and nowhere
-    // else (Paul, 2026-10-23 and 10-24): not on an app it is in (no agent
-    // hears one: this list), nor an app or a chat without it
-    let warning = fragment_core::permit::TRUST_WARNING;
+    // whoever is in a chat the owner's agent is in can ask it for things:
+    // the owner's sheet of it has their agent's lend card, which says so
+    // and holds what it uses of theirs when someone else asks it (spend on
+    // and accounts off until they change it: Paul, 2026-11-24); not an app
+    // it is in (no agent hears one: this list), nor an app or a chat
+    // without it
     let plain = make(&s.name("plain"), "blank")?;
     let without = with_session(api, "GET", &format!("/share/{plain}"), &owner_session)?;
     let talk = make(&s.name("talk"), "chat")?;
     let bare = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
     let joined = api.signed(&owner, "PUT", &format!("/api/f/{talk}/members/{agent}"), Some(&json!({ "role": "editor" })))?;
-    let warned = with_session(api, "GET", &format!("/share/{talk}"), &owner_session)?;
-    let invites = |r: &Reply| r.status == 200 && r.text.contains("name=\"email\"");
+    let talk_sheet = format!("/share/{talk}");
+    let carded = with_session(api, "GET", &talk_sheet, &owner_session)?;
+    let card = |r: &Reply| r.text.contains("name=\"action\" value=\"lend\"");
+    let switches = |r: &Reply, spend: bool, accounts: bool| {
+        let on = |field: &str, on: bool| r.text.contains(&format!("name=\"{field}\" value=\"on\"{} data-send", if on { " checked" } else { "" }));
+        on("spend", spend) && on("accounts", accounts)
+    };
     s.ok(
-        "beside its invite, the sheet of a chat the owner's agent is in says people in it can talk to their agent; an app it is in, an app without it, and a chat without it do not",
+        "the owner's sheet of a chat their agent is in has its lend card: anyone in it can ask their agent, which spends their credit and uses none of their accounts and keys until they say; an app it is in, an app without it, and a chat without it have none",
         joined.status == 200
-            && invites(&warned)
-            && warned.text.contains(&format!("<p class=\"hint trust\">{warning}</p>"))
-            && [&r, &without, &bare].iter().all(|r| invites(r) && !r.text.contains(warning)),
-        json!([joined.status, warned.status, bare.status, without.status]),
+            && card(&carded)
+            && carded.text.contains("People here can ask ")
+            && switches(&carded, true, false)
+            && [&r, &without, &bare].iter().all(|r| r.status == 200 && !card(r)),
+        json!([joined.status, carded.status, bare.status, without.status]),
+    );
+    let lend_of = |who: &Keys| -> Result<Value> {
+        let r = api.signed(who, "GET", &format!("/api/f/{talk}/members"), None)?;
+        Ok(r.body["members"].as_array().into_iter().flatten().find(|m| m["principal"] == agent.as_str()).map(|m| m["lend"].clone()).unwrap_or_default())
+    };
+    let lend = |fields: &[(&str, &str)]| -> Result<Reply> {
+        let form = armed(api, &talk_sheet, &owner_session)?;
+        let all = [&[("form", form.as_str()), ("action", "lend"), ("agent", agent.as_str())][..], fields].concat();
+        post(api, &talk_sheet, &owner_session, &platform, &all)
+    };
+    let changed = lend(&[("accounts", "on")])?;
+    let now = with_session(api, "GET", &talk_sheet, &owner_session)?;
+    let read = lend_of(&owner)?;
+    let restored = lend(&[("spend", "on")])?;
+    s.ok(
+        "its switches are the owner's, and each way back: accounts on and spend off, then as it was; the member list says the lend to its owner, and to no one else (not the agent itself)",
+        changed.status == 303
+            && read == json!({ "spend": false, "accounts": true })
+            && switches(&now, false, true)
+            && restored.status == 303
+            && lend_of(&owner)? == json!({ "spend": true, "accounts": false })
+            && lend_of(&hand)?.is_null(),
+        json!([changed.status, read, restored.status, lend_of(&hand)?]),
+    );
+    let own = api.signed(&hand, "PUT", &format!("/api/f/{talk}/members/{agent}/lend"), Some(&json!({ "spend": true, "accounts": true })))?;
+    let other = api.signed(&stranger, "PUT", &format!("/api/f/{talk}/members/{agent}/lend"), Some(&json!({ "spend": true, "accounts": true })))?;
+    s.ok(
+        "an agent never sets its own lend (403), nor does anyone not in it (refused as any of its calls): its owner's alone, in person",
+        own.status == 403 && matches!(other.status, 403 | 404) && lend_of(&owner)? == json!({ "spend": true, "accounts": false }),
+        json!([own.status, own.body, other.status]),
     );
     s.ok(
         "only the platform's own pages may frame it (`frame-ancestors 'self'` alone: every fragment is another origin), and it severs a window that opened it",
@@ -916,6 +953,28 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         chrome.screenshot(&shown, &s.scratch.join(shot))?;
     }
     s.ok("the sheet fits a popup's width and a phone's, with no sideways scroll", fits.iter().all(|(_, fit)| *fit), format!("{fits:?}"));
+    // the lend card, on the sheet of a chat the owner's agent is in, in a
+    // window of its own and at a phone's width, light and dark: no
+    // sideways scroll, and its switches armed
+    let lent = chrome.open(&format!("{platform}{talk_sheet}"))?;
+    let mut fits = vec![];
+    for (width, mobile, scheme) in [(1280, false, "light"), (1280, false, "dark"), (390, true, "light"), (390, true, "dark")] {
+        chrome.viewport(&lent, width, 900, mobile)?;
+        chrome.color_scheme(&lent, scheme)?;
+        let ready = chrome.until(&lent, "document.readyState === 'complete' && !!document.querySelector('main.share form.lend') && ![...document.querySelectorAll('form.lend [data-arm]')].some(b => b.disabled)", wait);
+        fits.push((width, scheme, ready && chrome.eval(&lent, "document.documentElement.scrollWidth <= innerWidth")? == json!(true)));
+        chrome.screenshot(&lent, &s.scratch.join(format!("share-lend-{width}-{scheme}.png")))?;
+    }
+    s.ok("the lend card fits a window's width and a phone's, light and dark, with no sideways scroll", fits.iter().all(|(_, _, fit)| *fit), format!("{fits:?}"));
+    // a switch sends its card at once: accounts on, then off again, as the owner clicks
+    let click = |chrome: &mut crate::browser::Browser, field: &str| chrome.eval(&lent, &format!("(document.querySelector('form.lend input[name={field}]').click(), true)"));
+    click(&mut chrome, "accounts")?;
+    let on = s.eventually(wait, || lend_of(&owner).is_ok_and(|l| l == json!({ "spend": true, "accounts": true })));
+    let rearmed = chrome.until(&lent, "!!document.querySelector('form.lend input[name=accounts]:checked') && ![...document.querySelectorAll('form.lend [data-arm]')].some(b => b.disabled)", wait);
+    click(&mut chrome, "accounts")?;
+    let off = s.eventually(wait, || lend_of(&owner).is_ok_and(|l| l == json!({ "spend": true, "accounts": false })));
+    s.ok("a switch sends its card as it is clicked: the sheet comes back saying so, and the lend is kept; clicked again, as it was", on && rearmed && off, lend_of(&owner)?);
+    chrome.close(lent)?;
 
     // ---- a keyboard: arrow keys over its choices send nothing (a closed
     // select's did, on Linux and Windows: an ArrowDown on a member's role

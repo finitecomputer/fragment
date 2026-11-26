@@ -341,7 +341,7 @@ mod tests {
     /// The JSON the browser library reads: the field names are the contract.
     #[test]
     fn the_fragment_sends_these_frames() {
-        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "platform".into(), author: None, kind: "said".into(), body: serde_json::value::to_raw_value(&json!({ "text": "hi" })).unwrap(), mandate: None };
+        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "platform".into(), author: None, kind: "said".into(), body: serde_json::value::to_raw_value(&json!({ "text": "hi" })).unwrap(), asker: None, mandate: None };
         let frames = [
             (
                 LiveOut::Hello {
@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn a_record_frame_from_a_borrowed_record_is_the_same_text() {
         let body = serde_json::value::to_raw_value(&json!({ "text": "hi", "n": [1, 2] })).unwrap();
-        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "id:ab".into(), author: None, kind: "said".into(), body, mandate: None };
+        let record = ChannelRecord { channel: "chat".into(), seq: 3, at: 9, principal: "id:ab".into(), author: None, kind: "said".into(), body, asker: None, mandate: None };
         let frame = LiveOut::record_frame(&record);
         assert_eq!(frame, LiveOut::Record(record).encode());
         assert!(frame.starts_with(r#"{"type":"record","channel":"chat""#), "{frame}");

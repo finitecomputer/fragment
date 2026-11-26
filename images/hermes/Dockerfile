@@ -123,14 +123,20 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
 # - cua-driver-rs 0.28.3: its Linux binary tarball.
 # - gws 0.22.5: musl's x86_64 build; glibc's for aarch64, the only Linux
 #   arm64 build the release has (the base is Debian's).
+# - fpac v0.1.0, a computer's disk's daemon (docs/computers.md, "A disk"):
+#   its x86_64 static build, named by its own SHA-256 (FPAC's
+#   docs/release.md). The release has no arm64 build: there, a stand-in
+#   that says so, and no computer of this image goes on a disk.
 FROM alpine:3.20 AS downloads-amd64
 ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
 ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
 ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
+ADD --checksum=sha256:9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e https://github.com/finitecomputer/fpac/releases/download/v0.1.0/fpac-9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e /fpac
 FROM alpine:3.20 AS downloads-arm64
 ADD --checksum=sha256:91f332edc813cab78a848da7ba75ed91bcb8d09abf1fc92eca74330dc29ec970 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-22_04-aarch64 /simplex-chat
 ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
 ADD --checksum=sha256:94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz /gws.tgz
+RUN printf '#!/bin/sh\necho "fpac: v0.1.0 has no arm64 build" >&2\nexit 1\n' > /fpac
 FROM downloads-${TARGETARCH} AS downloads
 
 # sandbox-shim, the Sandbox SDK's in-container half (its DirectoryBackup's
@@ -237,6 +243,13 @@ EOF
 RUN DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends unzip zip jq sqlite3 \
  && unzip -v > /dev/null && zip -v > /dev/null && jq --version \
  && test "$(/usr/local/bin/sqlite3 :memory: 'select sqlite_version()')" = "$(dpkg-query -W -f '${Version}' sqlite3 | cut -d- -f1)"
+
+# A computer's disk (docs/computers.md, "A disk"): its daemon, fpac
+# (`downloads`), and Debian's mke2fs, which makes a new disk's ext4 with an
+# option 1.47 added (assume_storage_prezeroed). The boot mounts it.
+COPY --from=downloads --chmod=0755 /fpac /usr/local/bin/fpac
+RUN DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 install -y --no-install-recommends e2fsprogs \
+ && mke2fs -V 2>&1 | grep -Eq '^mke2fs 1\.(4[7-9]|[5-9][0-9])'
 
 # Every agent reads the pinned Hermes skills through the boot's read-only
 # view, beside the platform skill. Move them out of Hermes' sync source:
@@ -448,6 +461,26 @@ VIRTUAL_ENV=/data/work/python
 export VIRTUAL_ENV
 PATH="$VIRTUAL_ENV/bin:$PATH"
 export PATH
+EOF
+# On a disk (docs/computers.md, "A disk"), what an agent installs with its
+# language's own tool is kept: npm's global prefix, pipx's and uv's tools,
+# cargo's and Go's homes, all under /data/work, their programs first on
+# PATH. Without a disk they stay the image's, as the save would carry them
+# at every sleep. The terminal's commands run in a login shell.
+COPY <<'EOF' /etc/profile.d/fragment-disk.sh
+# Install prefixes on a computer's disk (images/hermes/Dockerfile).
+if [ "$FRAGMENT_DISK" = fpac ]; then
+  npm_config_prefix=/data/work/.local
+  PIPX_HOME=/data/work/.local/share/pipx
+  PIPX_BIN_DIR=/data/work/.local/bin
+  UV_TOOL_DIR=/data/work/.local/share/uv/tools
+  UV_TOOL_BIN_DIR=/data/work/.local/bin
+  CARGO_HOME=/data/work/.cargo
+  GOPATH=/data/work/go
+  GOBIN=/data/work/.local/bin
+  PATH="/data/work/.local/bin:/data/work/.cargo/bin:$PATH"
+  export npm_config_prefix PIPX_HOME PIPX_BIN_DIR UV_TOOL_DIR UV_TOOL_BIN_DIR CARGO_HOME GOPATH GOBIN PATH
+fi
 EOF
 # The image's global Node packages (Playwright) for an agent's own
 # `require()`, which reads no global folder unless NODE_PATH names it

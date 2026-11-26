@@ -184,6 +184,11 @@ struct Computers {
     /// minutes when unset: docs/computers.md).
     #[serde(default)]
     unsaved_max_ms: Option<u64>,
+    /// The images whose new computers go on a disk (docs/computers.md, "A
+    /// disk"; `FRAGMENT_COMPUTER_DISKS`): each one of `images`, its image
+    /// one that mounts `/data` from FPAC. None: no disks, as production's.
+    #[serde(default)]
+    disks: Vec<String>,
     // No size here: a Durable Object's container is sized as it starts, at
     // the instance its awake time is priced at (fragment_core::price
     // `instance_size`; decision 13's 2 vCPU and 6 GiB), and wrangler
@@ -292,6 +297,14 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
         rows.push(serde_json::from_value(row).with_context(|| format!("providers: {name}"))?);
     }
     let catalog = fragment_core::catalog::Catalog::of(rows).map_err(|e| anyhow::anyhow!("providers: {e}"))?;
+    // a computer's egress has room beside them for the platform's hosts and
+    // a full Vault's (fragment_core::computer::egress): a deployment's
+    // catalog is held to it here, before anything is built
+    let caught = catalog.intercepts().len();
+    let max = fragment_core::computer::egress::CATALOG_HOSTS_MAX;
+    if caught > max {
+        bail!("providers: they catch {caught} hosts, and a computer's egress has room for at most {max} beside the platform's and a person's Vault (fragment_core::computer::egress)");
+    }
     Ok((catalog, keys))
 }
 
@@ -786,6 +799,9 @@ fn checked(d: Deployment) -> Result<Deployment> {
     if let Some(c) = &d.computers {
         if !c.images.contains_key(&c.default_image) {
             bail!("computers: the default image {:?} is not one of its images", c.default_image);
+        }
+        if let Some(d) = c.disks.iter().find(|d| !c.images.contains_key(*d)) {
+            bail!("computers: the disk image {d:?} is not one of its images");
         }
         if c.images.len() + usize::from(d.doors.is_some()) > crate::prepare::IMAGES_MAX {
             bail!("computers: {} images (and the doors' {}), more than the {} a deploy prepares", c.images.len(), usize::from(d.doors.is_some()), crate::prepare::IMAGES_MAX);
@@ -1634,6 +1650,9 @@ fn worker_config(d: &Deployment, n: &Names, store_id: &str, release: &Release, r
         if let Some(ms) = computers.unsaved_max_ms {
             v.insert("FRAGMENT_COMPUTER_UNSAVED_MAX_MS".into(), json!(ms.to_string()));
         }
+        if !computers.disks.is_empty() {
+            v.insert("FRAGMENT_COMPUTER_DISKS".into(), json!(computers.disks.join(",")));
+        }
     }
     if !catalog.is_empty() {
         v.insert("FRAGMENT_PROVIDERS".into(), Value::String(serde_json::to_string(&catalog.as_configured())?));
@@ -1772,7 +1791,9 @@ pub fn hosted_e2e_args(rest: &[String]) -> Result<Vec<String>> {
         anyhow::ensure!(!d.operators.is_empty(), "--operator-key-file names a key the deployment's operators list: its config's operators are empty");
         args.extend(["--operator-key-file".to_string(), expand(file).to_string_lossy().into_owned(), "--operators".into(), d.operators.join(",")]);
     }
-    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (d.doors.is_some(), "doors"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
+    // its new computers on disks: the default image's are (`disks`)
+    let disks = d.computers.as_ref().is_some_and(|c| c.disks.contains(&c.default_image));
+    let offers: Vec<&str> = [(d.computers.is_some(), "computers"), (disks, "disks"), (d.doors.is_some(), "doors"), (d.ai_gateway.is_some(), "models")].into_iter().filter(|(on, _)| *on).map(|(_, o)| o).collect();
     if !offers.is_empty() {
         args.extend(["--offers".to_string(), offers.join(",")]);
     }
@@ -2693,8 +2714,12 @@ mod tests {
         assert!(checked(with(vec![row(json!({ "key": "k", "hosts": ["localhost"] }))])).is_err());
         let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key": "k" });
         assert!(checked(with(vec![google])).is_err(), "a connection has no key");
+        let caught = |n: usize| -> Vec<Value> { (0..n).map(|i| json!({ "name": format!("p{i}"), "kind": "connection", "hosts": [format!("h{i}.test")], "placements": [{ "header": "x-api-key" }], "env": [format!("P{i}_KEY")] })).collect() };
+        let max = fragment_core::computer::egress::CATALOG_HOSTS_MAX;
+        assert!(catalog_of(&with(caught(max))).is_ok());
+        assert!(catalog_of(&with(caught(max + 1))).unwrap_err().to_string().contains(&format!("catch {} hosts", max + 1)), "more than a computer's egress has room for");
         let mut d = deployment(None, None);
-        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None });
+        d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None, disks: vec![] });
         assert!(checked(d).is_err());
         assert!(checked(deployment(None, None)).is_ok());
     }
@@ -2736,7 +2761,7 @@ mod tests {
         // a deploy prepares at most IMAGES_MAX images, the door's among them
         let mut full = deployment(None, None);
         let image = |i: usize| (format!("i{i}"), Image::Pinned(Pinned { image: format!("registry.cloudflare.com/acct/fragment-preview-{i}@sha256:{digest}") }));
-        let computers = || Some(Computers { default_image: "i0".into(), images: (0..crate::prepare::IMAGES_MAX).map(image).collect(), unsaved_max_ms: None });
+        let computers = || Some(Computers { default_image: "i0".into(), images: (0..crate::prepare::IMAGES_MAX).map(image).collect(), unsaved_max_ms: None, disks: vec![] });
         full.computers = computers();
         let mut with_door = deployment(None, None);
         with_door.computers = computers();
@@ -2768,6 +2793,16 @@ mod tests {
         assert_eq!(images["next"]["dockerfile"], json!(devstack::repo_root().join("images/hermes/Dockerfile")));
         assert_eq!(images["next"]["build_context"], json!(devstack::repo_root().join(".")));
         assert_eq!(cell["vars"]["FRAGMENT_COMPUTER_IMAGE"], "hermes", "new computers start on stable");
+        assert!(cell["vars"].get("FRAGMENT_COMPUTER_DISKS").is_none(), "no disks unless named");
+        // new computers of an image named go on disks; a name not among
+        // its images is refused
+        let mut on = v.clone();
+        on["computers"]["disks"] = json!(["next"]);
+        let d_on = load(&config_file("disks-on", &on)).unwrap();
+        let cell_on = worker_config(&d_on, &names(&d_on, Some("preview")).unwrap(), "0f0e0d0c", &test_release(), &devstack::repo_root()).unwrap();
+        assert_eq!(cell_on["vars"]["FRAGMENT_COMPUTER_DISKS"], "next");
+        on["computers"]["disks"] = json!(["stub"]);
+        assert!(load(&config_file("disks-unknown", &on)).err().is_some_and(|e| format!("{e:#}").contains("the disk image \"stub\" is not one of its images")));
         assert_eq!(pinned_images(&d), vec![stable.as_str()], "the deploy waits for the pinned image alone: wrangler prepares the one it builds");
         assert!(pinned_images(&deployment(None, None)).is_empty(), "no computers, no image to wait for");
 

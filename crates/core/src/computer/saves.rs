@@ -108,6 +108,10 @@ pub enum Plan {
     Backup,
     /// The image, with an empty `/data`: there is no save.
     Nothing,
+    /// The image, its `/data` its disk (docs/computers.md, "A disk"),
+    /// mounted by its guest as it was at its last flush: nothing restored,
+    /// nothing held.
+    Disk,
 }
 
 impl Plan {
@@ -116,6 +120,7 @@ impl Plan {
             Plan::Snapshot { .. } => RestoreSource::Snapshot,
             Plan::Backup => RestoreSource::Backup,
             Plan::Nothing => RestoreSource::Nothing,
+            Plan::Disk => RestoreSource::Disk,
         }
     }
 
@@ -125,7 +130,7 @@ impl Plan {
     pub fn vault_asked(&self) -> VaultAsked {
         match self {
             Plan::Snapshot { held: true, .. } | Plan::Backup => VaultAsked::Beside,
-            Plan::Snapshot { held: false, .. } | Plan::Nothing => VaultAsked::Before,
+            Plan::Snapshot { held: false, .. } | Plan::Nothing | Plan::Disk => VaultAsked::Before,
         }
     }
 }
@@ -509,13 +514,15 @@ impl Saves {
         }
         self.starting = None;
         self.running = image.map(|image| Running { generation, image: image.to_string() });
-        assert_eq!(from == RestoreSource::Nothing, save.is_none(), "a start restores a save when there is one");
+        assert_eq!(matches!(from, RestoreSource::Nothing | RestoreSource::Disk), save.is_none(), "a start restores a save when there is one, and a disk's none");
         let restored_save = save.and_then(|id| self.saves.iter().find(|b| b.id == id));
         let ended = self.ended.take();
         // a life's work since its last save is in no save unless its sleep
         // saved it, and this start restored that save (its life's newest):
         // a crash loses it, and so does a sleep that slept unsaved
-        let rollback = match ended {
+        // a disk's start goes back in time by nothing it shipped: its last
+        // flush, a second or two before a crash, is its `/data`
+        let rollback = from != RestoreSource::Disk && match ended {
             None => false,
             Some(Ended { by: LifeEnd::Exit, .. }) => true,
             Some(Ended { by: LifeEnd::Sleep, generation: life, saved, .. }) => {
@@ -859,6 +866,22 @@ mod tests {
     use super::*;
     use crate::computer::testing::{bare, rec, Computer, IMAGE, T};
     use crate::computer::*;
+
+    // Goal (docs/computers.md, "A disk"): a disk's start restores nothing
+    // and goes back by nothing it shipped: after a crash its start names
+    // its disk, no save, no rollback, and no loss is told; a disk's plan
+    // asks its Vault before its guest runs, as a fresh start does. Method:
+    // a disk computer's start after a life that crashed.
+    #[test]
+    fn a_disk_start_goes_back_by_nothing() {
+        let mut s = Saves::default();
+        s.ended(Ended { generation: 1, by: LifeEnd::Exit, saved: false, at_ms: T, restart: false, quiet: false, unchanged: false });
+        s.starting(2, Plan::Disk.source());
+        let r = s.came_up(2, RestoreSource::Disk, None, Some(IMAGE), T + 5_000).expect("its start");
+        assert_eq!((r.from, r.save.as_deref(), r.rollback, r.after), (RestoreSource::Disk, None, false, Some(LifeEnd::Exit)));
+        assert_eq!((s.rollbacks, s.went_back.is_none()), (0, true), "no loss is told");
+        assert_eq!(Plan::Disk.vault_asked(), VaultAsked::Before, "its guest runs at once: its hosts are caught first");
+    }
 
     /// Goal (the lifecycle's simulation, 2026-11-18): a life that ended
     /// after a save of its own, nothing done since, is in that save. Starts

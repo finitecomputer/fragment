@@ -170,18 +170,23 @@ pub fn delegation(s: &mut Suite, api: &Api) -> Result<()> {
     mandates(s, api)
 }
 
-/// Goal: proof of who asked (FIN-615 PR 6a; docs/api.md, "Who asked:
+/// Goal: proof of who asked (FIN-615, FIN-720; docs/api.md, "Who asked:
 /// mandates"). A place gives its agent members, reading it as themselves,
-/// a mandate beside each record their own owner wrote there; with it the
-/// agent's calls act for its owner exactly as `for` does, now proven.
-/// Method: Ana's room, where Ana's agent Juniper and Ben's agent Fred are
-/// members with Ben, and Ana and Ben each say something. Valid: Juniper's
-/// read gives a mandate beside Ana's record alone, Fred's beside Ben's
-/// alone, a person's read none; with Ana's, Juniper acts for Ana in Ana's
-/// private app (the app told Ana, at Juniper's editor cap) and in the
-/// list, as `for` would; the same mandate again acts the same (a replay).
-/// Invalid: an altered mandate, another agent carrying Juniper's, one
-/// beside `for`, and one where `for` is not honored are refused.
+/// a mandate beside each person's own words there to them; with its
+/// owner's, the agent's calls act for its owner exactly as `for` does, now
+/// proven; with anyone
+/// else's, for them, held to their role. Method: Ana's room, where Ana's
+/// agent Juniper and Ben's agent Fred are members with Ben, and Ana, Ben
+/// and Juniper each say something. Valid: each agent's read gives a
+/// mandate beside Ana's and Ben's records and none beside Juniper's, a
+/// person's read none; with Ana's, Juniper acts for
+/// Ana in Ana's private app (the app told Ana, at Juniper's editor cap) and
+/// in the list, as `for` would; the same mandate again acts the same (a
+/// replay). With Ben's, Juniper acts as Ben in Ana's shared app, at Ben's
+/// viewer role, the same op id as Ana's another run of his own. Invalid:
+/// an altered mandate, another agent carrying Juniper's, one beside `for`,
+/// and one where `for` is not honored are refused; with Ben's, Juniper
+/// reaches nothing of Ana's he cannot, makes no fragment, and never leaves.
 fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     let (ana, ben) = (api.person()?, api.person()?);
     let (ana_id, ben_id) = (api.identity(&ana)?, api.identity(&ben)?);
@@ -207,12 +212,14 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     // who wrote each record a reader is given a mandate beside
     let mandated = |records: &[Value]| -> Vec<String> { records.iter().filter(|r| r["mandate"].as_str().is_some_and(|m| m.starts_with("fm1."))).map(|r| r["principal"].as_str().unwrap_or_default().to_string()).collect() };
     let (juniper_reads, fred_reads, ben_reads) = (read(&juniper)?, read(&fred)?, read(&ben)?);
+    let both = vec![ben_id.clone(), ana_id.clone()];
     s.ok(
-        "an agent member reading its place as itself is given a mandate beside each record its own owner wrote and no other; a person's read carries none",
-        juniper_reads.len() == 3 && mandated(&juniper_reads) == vec![ana_id.clone()] && mandated(&fred_reads) == vec![ben_id.clone()] && mandated(&ben_reads).is_empty() && ben_reads.iter().all(|r| r.get("mandate").is_none()),
+        "an agent member reading its place as itself is given a mandate beside each person's own words to it, its owner's and anyone else's, and none beside an agent's; a person's read carries none",
+        juniper_reads.len() == 3 && mandated(&juniper_reads) == both && mandated(&fred_reads) == both && mandated(&ben_reads).is_empty() && ben_reads.iter().all(|r| r.get("mandate").is_none()),
         json!({ "juniper": mandated(&juniper_reads), "fred": mandated(&fred_reads), "ben": mandated(&ben_reads) }),
     );
-    let anas = juniper_reads.iter().find(|r| r["principal"] == ana_id.as_str()).and_then(|r| r["mandate"].as_str()).unwrap_or_default().to_string();
+    let mandate_of = |records: &[Value], by: &str| records.iter().find(|r| r["principal"] == by).and_then(|r| r["mandate"].as_str()).unwrap_or_default().to_string();
+    let (anas, bens) = (mandate_of(&juniper_reads, &ana_id), mandate_of(&juniper_reads, &ben_id));
 
     let private = s.named(api, &ana, "private")?;
     let c = s.create(api, &ana, &private)?;
@@ -255,6 +262,37 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
         "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400), and one where `for` is not honored (400, the identities and invites too) are refused",
         forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.iter().all(|r| r.status == 400),
         format!("{forged} {freds} {both} {:?}", unhonored.iter().map(|r| r.status).collect::<Vec<_>>()),
+    );
+
+    // ---- someone else's ask: Juniper for Ben
+    let shared = s.named(api, &ana, "shared")?;
+    let c = s.create(api, &ana, &shared)?;
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    ship(s, &c, CHAT_APP, CHAT_JSON);
+    api.signed(&ana, "PUT", &format!("/api/f/{shared}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    for (who, role) in [(&juniper_id, "editor"), (&ben_id, "viewer")] {
+        let r = api.share(&shared, who, role)?;
+        anyhow::ensure!(r.status == 200, "{who} in Ana's shared app: {r}");
+    }
+    let asked = |mandate: &str, id: &str| carrying(&juniper, mandate, "POST", &format!("/api/f/{shared}/ops/whoami"), Some(json!({ "id": id, "input": {} })));
+    let (anas_run, bens_run, bens_again) = (asked(&anas, "s1")?, asked(&bens, "s1")?, asked(&bens, "s1")?);
+    s.ok(
+        "with Ben's mandate, Juniper acts as Ben in Ana's shared app: the app is told Ben, at his viewer role (below Juniper's editor cap); the op id Ana's ask used is another run, his own, the same again the same",
+        anas_run.body["result"] == json!({ "principal": ana_id, "role": "editor" })
+            && bens_run.status == 200
+            && bens_run.body["result"] == json!({ "principal": ben_id, "role": "viewer" })
+            && bens_again.body["result"] == bens_run.body["result"],
+        format!("{anas_run} {bens_run} {bens_again}"),
+    );
+    let unreached = whoami(&juniper, &bens, "w5")?;
+    let made = carrying(&juniper, &bens, "POST", "/api/fragments", Some(json!({ "name": s.named(api, &ben, "made")?, "template": "blank" })))?;
+    let left = carrying(&juniper, &bens, "DELETE", &format!("/api/f/{shared}/members/me"), None)?;
+    let still = api.signed(&ana, "GET", &format!("/api/f/{shared}/members"), None)?;
+    let stays = still.body["members"].as_array().is_some_and(|l| l.iter().any(|m| m["principal"] == juniper_id.as_str()));
+    s.ok(
+        "with Ben's, Juniper reaches nothing of Ana's that Ben can't (her private app, 403), makes no fragment for him (403), and never leaves on his word (403)",
+        unreached.status == 403 && made.status == 403 && left.status == 403 && stays,
+        format!("{unreached} {made} {left} {stays}"),
     );
     Ok(())
 }

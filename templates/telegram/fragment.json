@@ -32,7 +32,8 @@
   },
   "triggers": [
     { "channel": "inbox", "run": "intake" },
-    { "channel": "chat", "from": "agent", "run": "mirror" }
+    { "channel": "chat", "from": "agent", "run": "mirror" },
+    { "channel": "work", "from": "agent", "kinds": ["turn.prompt"], "run": "mirror" }
   ],
   "meta": { "title": "Telegram", "description": "A chat with your agent that you also reach from Telegram: your direct messages to your own bot come here as yours, and its replies go back. Telegram carries them as plain text, not end-to-end encrypted." }
 }

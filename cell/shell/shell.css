@@ -16,9 +16,12 @@
 .action-tooltip.is-description { max-width: min(260px, calc(100vw - 12px)); padding: 8px 10px; border-radius: 8px; font-size: 12px; white-space: normal; }
 /* thin scrollbars */
 :root { --scrollbar-thumb: rgba(180, 180, 180, .28); --scrollbar-hover: rgba(180, 180, 180, .45); }
+/* light: the system's unless the person chose dark, or their choice of
+   light (Settings, Theme: theme.js sets the root's data-theme) */
 @media (prefers-color-scheme: light) {
-  :root { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
+  :root:where(:not([data-theme="dark"])) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 }
+:root:where([data-theme="light"]) { --scrollbar-thumb: rgba(70, 70, 70, .25); --scrollbar-hover: rgba(70, 70, 70, .42); }
 * { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
@@ -61,8 +64,10 @@
   --wallpaper-dark-opacity: 1;
   color-scheme: dark;
 }
+/* light, as the scrollbars are: the system's unless the person chose dark,
+   or their choice */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:where(:not([data-theme="dark"])) {
     --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
     --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
     --chat-composer:#fffdf9; --chat-code:#ece8df;
@@ -74,6 +79,18 @@
     --wallpaper-dark-opacity: 0;
     color-scheme: light;
   }
+}
+:root:where([data-theme="light"]) {
+  --bg-window:#f7f6f3; --bg-sidebar:#ebe9e5; --bg-hover:rgba(20,20,20,.055); --bg-active:#e3e0db;
+  --bg-card:#fffdfa; --surface-subtle:#f0eee9; --surface-muted:#e9e6df;
+  --chat-composer:#fffdf9; --chat-code:#ece8df;
+  --tooltip-bg:var(--bg-card); --tooltip-shadow:rgba(0,0,0,.1);
+  --text-primary:#171717; --text-secondary:#66615b; --text-tertiary:#918a82; --text-icon:#5d5954;
+  --accent-blue:#315fbd; --success:#167a52;
+  --border:rgba(20,20,20,.105); --border-strong:rgba(20,20,20,.18);
+  --danger-text:#81112f;
+  --wallpaper-dark-opacity: 0;
+  color-scheme: light;
 }
 
 @media (min-width: 48rem) { :root { --type-field: 400 .875rem/1.45 var(--font-sans); } }

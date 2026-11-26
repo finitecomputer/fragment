@@ -49,6 +49,9 @@ pub enum Refusal {
     /// scheduled record is the fragment's own, and only whom a question
     /// asks answers it, in their own post.
     Answers,
+    /// Whose ask it is (FIN-720) is no longer in the fragment: as if they
+    /// asked now, they could not post there.
+    AskerGone,
 }
 
 impl Refusal {
@@ -56,7 +59,7 @@ impl Refusal {
     pub fn code(&self) -> ErrorCode {
         match self {
             Refusal::RecordTooLarge(_) => ErrorCode::TooLarge,
-            Refusal::BelowPostRole { .. } | Refusal::Relays | Refusal::Answers => ErrorCode::Forbidden,
+            Refusal::BelowPostRole { .. } | Refusal::Relays | Refusal::Answers | Refusal::AskerGone => ErrorCode::Forbidden,
             Refusal::Cron(_) | Refusal::TooOften(_) | Refusal::NoChannel(_) | Refusal::TakesNoPosts(_) | Refusal::FromMembers(_) => ErrorCode::InvalidRequest,
         }
     }
@@ -79,6 +82,7 @@ impl fmt::Display for Refusal {
             Refusal::BelowPostRole { channel, post } => write!(f, "posting on channel {channel} needs the {} role, so scheduling a record there does too", post.as_str()),
             Refusal::Relays => write!(f, "a scheduled record is the fragment's own, and relays no one (`relayed`): an agent's owner's words come only through a door its owner opened"),
             Refusal::Answers => write!(f, "a scheduled record is the fragment's own, and answers no question (`answers`): only whom a question asks answers it, in their own post"),
+            Refusal::AskerGone => write!(f, "whoever asked for this schedule is no longer in this fragment, so it fires no more for them"),
         }
     }
 }
@@ -149,6 +153,16 @@ pub fn admit_channel(channel: &str, decl: Option<&ChannelDecl>, builtin: bool, r
     }
     Ok(())
 }
+
+/// Which kept schedule an add is the same as, its replay (FIN-720): the
+/// same cron, channel and record, asked by the same one. A schedule fires
+/// as its asker, so another's identical one is theirs, never this one: a
+/// replacement after its maker left fires. One kept before askers (Fragment
+/// step 15, `asker` NULL) is its maker's (`created_by`): found by its maker
+/// acting as themselves or for their owner, never on someone else's ask
+/// (which binds no maker, ""). `record_schedules`' WHERE clause; binds
+/// cron, channel, record, asker, maker.
+pub const SAME_SCHEDULE: &str = "cron = ? AND channel = ? AND body = ? AND (asker = ? OR (asker IS NULL AND created_by = ?))";
 
 /// The key a fire appends under: the schedule and the minute it was due,
 /// so an alarm that fires it again (a retry, a pass cut short) appends

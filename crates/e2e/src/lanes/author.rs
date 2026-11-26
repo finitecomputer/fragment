@@ -177,7 +177,7 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
         return Ok(());
     }
     let owner = api.person()?;
-    let (name, _) = chat(s, api, &owner, "live")?;
+    let (name, c) = chat(s, api, &owner, "live")?;
     api.op(&owner, &name, "say", "l1", json!({ "text": "before" }))?;
 
     let mut a = Socket::open(api, &name, "__live", None, None)?;
@@ -241,6 +241,194 @@ pub fn live(s: &mut Suite, api: &Api) -> Result<()> {
     api.op(&owner, &name, "say", "l3b", json!({ "text": "after waking" }))?;
     let rec = b.until("record", 5)?;
     s.ok("a socket that followed before the object woke still gets records", rec["body"]["text"] == "after waking" && rec["seq"] == 4, &rec);
+    // what a ping brings back before its pong, or how the socket closed
+    let fenced = |sock: &mut Socket| -> (Vec<Value>, Option<String>) {
+        if let Err(e) = sock.send(&json!({ "type": "ping" })) {
+            return (vec![], Some(e.to_string()));
+        }
+        let mut seen = vec![];
+        loop {
+            match sock.next() {
+                Ok(f) if f["type"] == "pong" => return (seen, None),
+                Ok(f) => seen.push(f),
+                Err(e) => return (seen, Some(e.to_string())),
+            }
+        }
+    };
+    // a deploy that changes a channel's read role reopens the fragment's
+    // sockets (4001), never skipping them: the visitor's, past record 4,
+    // reconnects and is refused the room from its cursor while only viewers
+    // read it; the deploy that makes it public again reopens that socket
+    // too, so its subscribe from the cursor resumes, the record posted
+    // meanwhile first: nothing missed
+    let mut raised: Value = serde_json::from_slice(CHAT_JSON)?;
+    raised["channels"]["room"]["read"] = json!("viewer");
+    ship(s, &c, CHAT_APP, raised.to_string().as_bytes());
+    api.op(&owner, &name, "say", "l3c", json!({ "text": "for viewers now" }))?;
+    let (ahead, closed) = fenced(&mut b);
+    let from_cursor = json!({ "type": "subscribe", "channel": "room", "after": 4 });
+    let mut b2 = Socket::open(api, &name, "__live", None, None)?;
+    b2.until("hello", 5)?;
+    b2.send(&from_cursor)?;
+    let refused = b2.until("error", 5)?;
+    ship(s, &c, CHAT_APP, CHAT_JSON);
+    let (_, reopened) = fenced(&mut b2);
+    api.op(&owner, &name, "say", "l3d", json!({ "text": "for everyone again" }))?;
+    let mut b3 = Socket::open(api, &name, "__live", None, None)?;
+    b3.until("hello", 5)?;
+    b3.send(&from_cursor)?;
+    let (missed, again) = (b3.until("record", 5)?, b3.until("record", 5)?);
+    s.ok(
+        "a deploy that makes a channel viewers' reopens a visitor's socket that follows it (4001), not skipping it: refused it from its cursor while so, and the deploy that makes it public again reopens that one too, so it resumes from there, missing nothing",
+        !ahead.iter().any(|f| f["type"] == "record")
+            && closed.as_deref().is_some_and(|c| c.contains("4001"))
+            && refused["message"].as_str().is_some_and(|m| m.contains("viewer"))
+            && reopened.as_deref().is_some_and(|c| c.contains("4001"))
+            && missed["seq"] == 5
+            && missed["body"]["text"] == "for viewers now"
+            && again["seq"] == 6
+            && again["body"]["text"] == "for everyone again",
+        json!({ "ahead": ahead, "closed": closed, "refused": refused, "reopened": reopened, "missed": missed, "again": again }),
+    );
+    // the visitor's socket from here, for presence below
+    b = b3;
+
+    // a socket's role holds only while its decision does (live.rs): Ana, a
+    // member here, and her agent Juniper, editors both, its sockets
+    // following the editors' staff. Ana holds Juniper at viewer. Once who it
+    // is is due to be asked again (a test lever ages the check), each closes
+    // (4001): one that pings at that frame, one that only listens at the
+    // next draft, and another at the next record, none sent before its
+    // close; reconnected, it is a viewer's, and staff is refused it
+    let ana = api.person()?;
+    let (juniper, juniper_id) = super::delegation::agent_of(api, &ana)?;
+    let ana_id = api.identity(&ana)?;
+    for who in [&ana_id, &juniper_id] {
+        let r = api.share(&name, who, "editor")?;
+        anyhow::ensure!(r.status == 200, "{who} an editor here: {r}");
+    }
+    let mut drafted: Value = serde_json::from_slice(CHAT_JSON)?;
+    drafted["channels"]["staff"]["post"] = json!("editor");
+    ship(s, &c, CHAT_APP, drafted.to_string().as_bytes());
+    let hold = |held: Value| api.signed(&ana, "PUT", &format!("/api/identities/{juniper_id}/held"), Some(&json!({ "held": held })));
+    let age = || api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "age-live", "ms": limits::LIVE_IDENTITY_MS })));
+    let following = |what: &str| -> Result<(Socket, Value)> {
+        let mut sock = Socket::open(api, &name, "__live", Some(&juniper), None)?;
+        let hello = sock.until("hello", 5)?;
+        sock.send(&json!({ "type": "subscribe", "channel": "staff", "after": 0 }))?;
+        let followed = sock.until("subscribed", 50)?;
+        anyhow::ensure!(hello["role"] == "editor" && followed["channel"] == "staff", "{what}: Juniper's socket follows staff as an editor: {hello} {followed}");
+        Ok((sock, hello))
+    };
+    // the first frame a listening socket gets: what was sent, or its close
+    let first = |sock: &mut Socket| match sock.next() {
+        Ok(f) => format!("sent {}", f["type"].as_str().unwrap_or("?")),
+        Err(e) => e.to_string(),
+    };
+    let (mut pings, _) = following("its pinging socket")?;
+    let (mut listens, _) = following("its socket that only listens")?;
+    let (held, aged) = (hold(json!("viewer"))?, age()?);
+    let (_, at_its_frame) = fenced(&mut pings);
+    let draft = api.signed(&owner, "PUT", &format!("/api/f/{name}/channels/staff/draft"), Some(&json!({ "turn": "t-staff", "text": "writing" })))?;
+    let at_a_draft = first(&mut listens);
+    let freed = hold(Value::Null)?;
+    let (mut listens_too, _) = following("its next socket that only listens")?;
+    let (held_again, aged_again) = (hold(json!("viewer"))?, age()?);
+    let noted = api.op(&owner, &name, "note", "l3e", json!({ "text": "for editors" }))?;
+    let at_a_record = first(&mut listens_too);
+    let mut viewer = Socket::open(api, &name, "__live", Some(&juniper), None)?;
+    let v_hello = viewer.until("hello", 5)?;
+    viewer.send(&json!({ "type": "subscribe", "channel": "staff", "after": 0 }))?;
+    let refused = viewer.until("error", 5)?;
+    viewer.close();
+    ship(s, &c, CHAT_APP, CHAT_JSON);
+    s.ok(
+        "an agent its owner holds lower keeps no reach its decision no longer gives: once who it is is due, its socket that pings closes at that frame, one that only listens at the next draft, another at the next record (4001), none sent it first; reconnected, it is a viewer's, refused staff",
+        [&held, &aged, &freed, &held_again, &aged_again, &draft, &noted].iter().all(|r| r.status == 200)
+            && at_its_frame.as_deref().is_some_and(|c| c.contains("4001"))
+            && at_a_draft.contains("4001")
+            && at_a_record.contains("4001")
+            && v_hello["role"] == "viewer"
+            && refused["message"].as_str().is_some_and(|m| m.contains("editor")),
+        json!({ "at_its_frame": at_its_frame, "at_a_draft": at_a_draft, "at_a_record": at_a_record, "again": v_hello, "refused": refused }),
+    );
+
+    // a person joining reopens their agent's sockets here: Dana's agent Dee,
+    // an editor here on its own, held at viewer by Dana (which applies only
+    // beside her), follows staff as an editor. Dana accepts an invite as an
+    // editor: Dee's socket closes (4001), sent no staff record after it, and
+    // reconnected Dee is a viewer's, its hold applying now
+    let dana = api.person()?;
+    let (dee, dee_id) = super::delegation::agent_of(api, &dana)?;
+    let r = api.share(&name, &dee_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Dee an editor here: {r}");
+    let dee_held = api.signed(&dana, "PUT", &format!("/api/identities/{dee_id}/held"), Some(&json!({ "held": "viewer" })))?;
+    let mut d = Socket::open(api, &name, "__live", Some(&dee), None)?;
+    let d_hello = d.until("hello", 5)?;
+    d.send(&json!({ "type": "subscribe", "channel": "staff", "after": 0 }))?;
+    let d_follows = d.until("subscribed", 50)?;
+    let invited = api.signed(&owner, "POST", &format!("/api/f/{name}/invites"), Some(&json!({ "email": Api::email_of(&dana), "role": "editor" })))?;
+    let accepted = api.signed(&dana, "POST", &format!("/api/invites/{name}/accept"), Some(&json!({})))?;
+    let noted = api.op(&owner, &name, "note", "l3f", json!({ "text": "for editors, Dana in" }))?;
+    let at_join = first(&mut d);
+    let mut d2 = Socket::open(api, &name, "__live", Some(&dee), None)?;
+    let d2_hello = d2.until("hello", 5)?;
+    d2.close();
+    s.ok(
+        "a person joining reopens their agent's sockets here (4001), so what they hold it at applies at once: its editor socket is sent no staff record after the join, and it reconnects a viewer",
+        dee_held.status == 200
+            && d_hello["role"] == "editor"
+            && d_follows["channel"] == "staff"
+            && invited.status == 200
+            && accepted.status == 200
+            && noted.status == 200
+            && at_join.contains("4001")
+            && d2_hello["role"] == "viewer",
+        json!({ "held": dee_held.status, "hello": d_hello, "invited": invited.status, "accepted": accepted.status, "at_join": at_join, "again": d2_hello }),
+    );
+
+    // the share link a socket comes by is decided as it opens: Eve, signed
+    // in but no member, opens one on a link-visible chat by its link while
+    // the owner rotates the link (a test lever holds the upgrade after who
+    // she is was asked): it opens nothing by the old link
+    let (linked, _) = chat(s, api, &owner, "live-link")?;
+    let vis = api.signed(&owner, "PUT", &format!("/api/f/{linked}/visibility"), Some(&json!({ "visibility": "link" })))?;
+    let token = api.status(&owner, &linked)?.body["viewToken"].as_str().unwrap_or("").to_string();
+    let eve = api.person()?;
+    let lever = |op: &str, on: Option<bool>| {
+        let mut body = json!({ "fragment": linked, "op": op });
+        if let Some(on) = on {
+            body["on"] = json!(on);
+        }
+        api.unsigned("POST", "/api/test/fragment", Some(&body))
+    };
+    let by_link = format!("__live?view={token}");
+    let before = Socket::open(api, &linked, &by_link, Some(&eve), None).and_then(|mut sock| sock.until("hello", 5)).map(|h| h["role"].clone()).unwrap_or(Value::Null);
+    lever("hold-live", Some(true))?;
+    let (raced, rotated) = std::thread::scope(|scope| -> Result<(String, u16)> {
+        let opening = scope.spawn(|| match Socket::open(api, &linked, &by_link, Some(&eve), None) {
+            Ok(mut sock) => sock.until("hello", 5).map(|h| format!("opened, {}", h["role"])).unwrap_or_else(|e| format!("{e:#}")),
+            Err(e) => format!("refused: {e:#}"),
+        });
+        // until the upgrade waits there, then the link rotated, then on
+        let mut held = false;
+        for _ in 0..200 {
+            if lever("live-held", None)?.body["held"] == true {
+                held = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        anyhow::ensure!(held, "the upgrade waited at the lever");
+        let rotated = api.signed(&owner, "POST", &format!("/api/f/{linked}/rotate"), Some(&json!({ "scopes": ["view"] })))?;
+        lever("hold-live", Some(false))?;
+        Ok((opening.join().unwrap_or_else(|_| "panicked".to_string()), rotated.status))
+    })?;
+    s.ok(
+        "a socket opened by the share link while the link is rotated opens nothing by it: the link it came by is decided as it opens",
+        vis.status == 200 && before == "viewer" && rotated == 200 && raced.starts_with("refused"),
+        json!({ "before": before, "rotated": rotated, "raced": raced }),
+    );
 
     // presence: whole in hello, then one socket's change at a time
     let mut c = Socket::open(api, &name, "__live", Some(&owner), None)?;
@@ -1241,9 +1429,10 @@ pub fn cli(s: &mut Suite, api: &Api) -> Result<()> {
     s.cli_json(api, &home, &["members", "add", &app, &agent, "--role", "editor", "--json"])?;
     let after = invite(&chat);
     let in_app = invite(&app);
-    let warning = fragment_core::permit::TRUST_WARNING;
+    let warning = fragment_core::permit::asked_here("your agent");
+    let warning = warning.as_str();
     s.ok(
-        "fragment members add <email> on a chat its owner's agent is in says people in it can talk to their agent; on that chat before the agent is in, and on an app it is in, it does not",
+        "fragment members add <email> on a chat its owner's agent is in says people in it can ask their agent; on that chat before the agent is in, and on an app it is in, it does not",
         before.starts_with("invited ")
             && !before.contains(warning)
             && after.starts_with("invited ")

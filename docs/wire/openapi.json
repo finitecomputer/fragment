@@ -192,6 +192,14 @@
       "ChannelRecord": {
         "description": "One record in a channel. Records are appended by the platform (`events`,\n`ops`, and posts to a channel its fragment.json declares postable) or by\nmutations' effects (app channels), never by a client's own hand.",
         "properties": {
+          "asker": {
+            "default": null,
+            "description": "Whose ask the platform wrote it for, when it wrote it for someone: a\nschedule's fire, its maker's (FIN-720). Absent on any other record.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "at": {
             "format": "int64",
             "type": "integer"
@@ -219,7 +227,7 @@
           },
           "mandate": {
             "default": null,
-            "description": "Proof that the agent reading it was asked by its owner (docs/api.md,\n\"Who asked: mandates\"): on a channel read by an agent member as\nitself, a record its owner wrote (or a door relayed for them)\ncarries one, which its calls carry in place of `for`. Absent\nelsewhere.",
+            "description": "Proof that its asker asked the agent reading it (docs/api.md, \"Who\nasked: mandates\"): on a channel read by an agent member as itself,\na record a person wrote to it (or a door relayed for them, or a\nschedule fired for them) carries one, which its calls carry in\nplace of `for`. Absent elsewhere.",
             "type": [
               "string",
               "null"
@@ -866,6 +874,26 @@
           "path",
           "bytes",
           "why"
+        ],
+        "type": "object",
+        "x-fragment-direction": "both"
+      },
+      "Lend": {
+        "additionalProperties": false,
+        "description": "What an agent's owner lends it for someone else's ask in one place (the\nlend card, FIN-720): working there as the one who asked, with no more\nthan their own role, is always lent; these two are the owner's to\nchoose. A place keeps each agent member's on its row, set by the\nagent's owner; one never set is `Lend::DEFAULT`.\n`PUT /api/f/{name}/members/{agent}/lend` sets it.",
+        "properties": {
+          "accounts": {
+            "description": "The owner's accounts and keys: their connections, their own keys,\ntheir Vault's secrets.",
+            "type": "boolean"
+          },
+          "spend": {
+            "description": "The owner's credit, for paid tools (an operator's keys).",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "spend",
+          "accounts"
         ],
         "type": "object",
         "x-fragment-direction": "both"
@@ -1827,6 +1855,18 @@
             ],
             "default": null,
             "description": "`person` or `agent`."
+          },
+          "lend": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Lend"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "An agent member's lend here (the lend card), to its owner alone:\nwhat of theirs it may use for someone else's ask. Add-only: absent\nfrom an older platform."
           },
           "owner": {
             "default": null,
@@ -4176,6 +4216,143 @@
           }
         ],
         "summary": "A fragment's members, the first added first.",
+        "tags": [
+          "members"
+        ]
+      }
+    },
+    "/api/f/{name}/members/{agent}/lend": {
+      "put": {
+        "operationId": "members.lend",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The agent member's npub.",
+            "in": "path",
+            "name": "agent",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Lend"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Lend"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "What of theirs an agent member's owner lends it here for someone else's ask (the share sheet's lend card); its owner's alone, in person.",
         "tags": [
           "members"
         ]

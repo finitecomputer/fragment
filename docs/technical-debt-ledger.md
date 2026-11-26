@@ -739,6 +739,23 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
+## An agent's computer tells its own turns
+
+- **Shortcut:** whose ask an agent's call is (FIN-720; docs/api.md, "An
+  agent's computer proves who asked") rests on the turns its bridge tells
+  the agent's fragment (`/api/computer/turns`), and on the agent signing
+  `for` its owner, as its CLI does. The bridge and the runtime share one
+  computer, where the agent has passwordless sudo and no secret is kept
+  from it (decisions 13, 43, 44).
+- **Risk:** an injected agent, on someone else's ask, closes or clears
+  their turns, or signs as itself with no `for`, and so acts with its
+  owner's reach or its own (which mirrors its owner's, decision 64). An
+  agent that follows its tools never does. **Delete when:** whose ask a
+  call is comes from what the computer can't forge (the places' own
+  records, or turns kept outside the agent's root, as the SimpleX entry
+  above needs too), with tests where the agent clears its turns and signs
+  as itself.
+
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model
@@ -868,18 +885,6 @@ unfinished design, not debt.
 - **Delete when:** Cloudflare deploys several Workers as one, or the
   admin moves back into the cell.
 
-## celld runs no admin Worker
-
-- **Shortcut:** `celld dev` runs one Worker, so its render drops the
-  cell's binding to the admin (crates/devstack celld.rs `DROPPED`), and
-  the cell there answers the admin's routes with a host failure saying
-  so (cell/src/admin.rs `forward`).
-- **Risk:** a self-hosted node has no admin page or admin API; CI runs
-  no celld lane (tag `celld-final`), so nothing else notices.
-- **Delete when:** celld runs a deployment's Workers together, with a
-  service binding between them and object bindings across them, or the
-  celld lane is retired.
-
 ## Local nodes keep their computers apart through wrangler's and workerd's internals
 
 - **Shortcut:** wrangler's teardown removes containers by image ID (other
@@ -901,15 +906,37 @@ unfinished design, not debt.
   project's by the name celld gives them: its node is `dev-` and 12 hex of
   the SHA-256 of the project's canonical path (the fork's dev.rs), each
   container `celld-`, 6 hex of the SHA-256 of the node, `-` (its
-  container.rs `node_prefix`).
+  container.rs `node_prefix`). It destroys celld's image builder too
+  (`celld-builder`, the fork's krun_build.rs) when the celld its label
+  names (`<pid>-<start>`) is gone, holding the lock celld's build
+  sessions take turns by (its `lock_path`: `celld-builder-<uid>-<12 hex of
+  the socket's canonical path>.lock` in `/run/user/<uid>`): a run killed
+  while its node built images left it holding 12 GiB of the engine's
+  memory.
 - **Risk:** a celld that names them otherwise leaves a killed run's VMs on
   the engine (its `vms_max` is 16), where its next start does not reap
   them: each e2e run is a project of its own.
-- **Delete when:** celld reaps a dev node's containers by itself when its
-  supervisor dies, or names them by a label devstack sets; then `remove`
-  and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
+- **Delete when:** celld reaps a dev node's containers and its builder by
+  itself when its supervisor dies, or names them by a label devstack sets;
+  then `remove` and its naming go. devstack's `a_projects_containers_are_named_as_celld_names_them`
   pins the naming as the fork has it; a celld that moves it must move
   that test too.
+
+## A celld node's images stay in its krun engine
+
+- **Shortcut:** the krun engine's API removes no image, so the images a
+  `celld dev` node builds into it (the fork's `krun_build`) stay there
+  after its run, and devstack removes none (crates/e2e main.rs
+  `remove_leftovers`). Each is named by its content, unlabeled for the
+  run's project (devstack's `write_local_config`, `own_images`), so a
+  run on an unchanged tree loads nothing, and the engine gains an image
+  only when an image's sources change.
+- **Risk:** the engine's store, root's, grows by an image per change to
+  an image's sources (a Hermes is 1.5 GB compressed) until someone clears
+  it, on a box whose disk the other stacks share.
+- **Delete when:** the engine removes an image (`DELETE
+  /v1/images/<reference>`) and celld removes, at the end of a dev
+  session's builds, the names of its images no deployment names.
 
 ## A local node's port is a front door of ours, past wrangler's proxy
 
@@ -1373,3 +1400,31 @@ unfinished design, not debt.
 - **Delete when:** Settings itself offers the move where no frame can ask
   (a Use it of its own in the setup dialog's note, or a move token a tab
   carries), or every supported browser signs in the frame.
+
+## A team brain's catch-up keeps its base in a file
+
+- **Shortcut:** a brain made from the old Finite holds
+  `imported-from-finite.json`: which version of each page it took, and
+  which folders it shares, each with the newest copy taken from it. Each
+  later teammate's catch-up reads it as the base of its three-way
+  comparison and writes it again
+  (`import-agent-home/profiles/finite-computer.brains.py`, FIN-774). The
+  comparison is the skill's Python, which the agent runs as the profile
+  says, not a `fragment` command.
+- **Why:** the brain's own commits are the record of what came in, but an
+  agent can't read them: `fragment` reads `main` as it is now, never a
+  file at an earlier commit nor `main`'s commit messages (FIN-780). A
+  command would also wait for a CLI release.
+- **Risk:** a person can edit or delete the file: a deleted one makes the
+  next import compare by hand (`NO RECORD`), and an edited one stops it
+  (`STOP`). Two teammates catching up within the same few seconds can
+  lose one's record entries (they heal at the next catch-up), or one's
+  new page can replace the other's at the same path. A page a person
+  deletes in the seconds between a catch-up's pull and its push, after
+  the catch-up updated it, comes back (the sync's local change wins over
+  a remote delete). Either way, the bytes stay in the brain's history. Nothing in a test runs the profile's text itself,
+  only the helper (`crates/templates/tests/import_brains.rs`).
+- **Delete when:** an agent can list `main`'s commits and read a file at
+  one (FIN-780). Then each import's commit names its old brain, its
+  sequence and the folders its copy could read, the page at the last
+  import's commit is the base, and the file goes.

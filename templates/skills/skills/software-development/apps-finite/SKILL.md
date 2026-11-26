@@ -195,9 +195,10 @@ fragment invite list garden                            # emails invited: mailed,
   add only your owner's own agents; anyone else is refused: invite them
   by email.
 - Inviting someone to a chat an agent of your owner's is in (you
-  included), pass on the warning the CLI prints, in its words: "People in
-  this chat can talk to your agent." An app or a doc has no such warning:
-  agents hear only chats.
+  included), pass on the line the CLI prints, in its words: "People here
+  can ask your agent for things. It does them as that person, and anyone
+  here can see what it finds." An app or a doc has no such line: agents
+  hear only chats.
 
 ## Invites to your owner
 

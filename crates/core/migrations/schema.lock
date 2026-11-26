@@ -17,6 +17,8 @@ step Fragment 10 face_forward_only c83644ba432a03d7
 step Fragment 11 record_author 290ff9dff6040cbf
 step Fragment 12 pending_code a323b22a2f946eb7
 step Fragment 13 ended_doors 6b677d38c0350a38
+step Fragment 14 trigger_kinds e4accb2c78ba5f08
+step Fragment 15 askers 14b4892acdccbe6a
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -45,6 +47,7 @@ step Computer 6 grants_owed a3e6ebc05fade9e1
 step Computer 7 uses_owed 0c7771bd82064913
 step Computer 8 key_hour_gone ef34ecfeb9814b7f
 step Computer 9 key_calls d0b9981c9fb6d1b7
+step Computer 10 disk 4418fb3fcc27563c
 step SearchIndex 1 baseline 500e1cc281039770
 step SearchIndex 2 fences 203375fb20518981
 step Vault 1 baseline ecff84048657043f
@@ -70,6 +73,7 @@ Fragment table code_channel_newest: CREATE TABLE code_channel_newest (channel TE
 Fragment table code_channels: CREATE TABLE code_channels (channel TEXT PRIMARY KEY, read TEXT NOT NULL, post TEXT, signed_in INTEGER NOT NULL DEFAULT 0)
 Fragment table code_op_descriptions: CREATE TABLE code_op_descriptions (op TEXT PRIMARY KEY, description TEXT NOT NULL)
 Fragment table code_ops: CREATE TABLE code_ops (op TEXT PRIMARY KEY, kind TEXT NOT NULL, role TEXT NOT NULL, input TEXT, ephemeral INTEGER NOT NULL DEFAULT 0)
+Fragment table code_trigger_kinds: CREATE TABLE code_trigger_kinds ( idx INTEGER NOT NULL, n INTEGER NOT NULL CHECK (typeof(n) = 'integer' AND n >= 0), kind TEXT NOT NULL CHECK (typeof(kind) = 'text'), PRIMARY KEY (idx, n), UNIQUE (idx, kind))
 Fragment table code_triggers: CREATE TABLE code_triggers (idx INTEGER PRIMARY KEY, kind TEXT NOT NULL, target TEXT NOT NULL, run TEXT NOT NULL, from_kind TEXT)
 Fragment index code_triggers_on: CREATE INDEX code_triggers_on ON code_triggers (kind, target)
 Fragment table delivery_outbox: CREATE TABLE delivery_outbox ( id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL CHECK (kind IN ('record', 'push')), sub INTEGER, channel TEXT, seq INTEGER, who TEXT, body TEXT, after_sub INTEGER NOT NULL DEFAULT 0, upto_sub INTEGER NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0, next_at INTEGER NOT NULL)
@@ -88,7 +92,7 @@ Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table making: CREATE TABLE making (key TEXT PRIMARY KEY, run INTEGER NOT NULL, attempt INTEGER NOT NULL, at INTEGER NOT NULL)
-Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
+Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, lend INTEGER)
 Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
 Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Fragment table meter_batches: CREATE TABLE meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER)
@@ -105,12 +109,12 @@ Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCRE
 Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
 Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
 Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
-Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER)
+Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER, asker TEXT)
 Fragment index record_schedules_due: CREATE INDEX record_schedules_due ON record_schedules (next_at) WHERE next_at IS NOT NULL
-Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, author TEXT, PRIMARY KEY (channel, seq))
+Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, author TEXT, asker TEXT, PRIMARY KEY (channel, seq))
 Fragment index records_effect: CREATE UNIQUE INDEX records_effect ON records (op, idx) WHERE op IS NOT NULL
-Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT)
-Fragment index runs_call: CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL
+Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT, asker TEXT, acting_for TEXT)
+Fragment index runs_asked: CREATE UNIQUE INDEX runs_asked ON runs (principal, call_id, COALESCE(asker, '')) WHERE call_id IS NOT NULL
 Fragment index runs_status: CREATE INDEX runs_status ON runs (status, op)
 Fragment table schedules: CREATE TABLE schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL)
 Fragment table search_forget: CREATE TABLE search_forget (source TEXT PRIMARY KEY, next_at INTEGER NOT NULL)
@@ -123,6 +127,8 @@ Fragment table sent: CREATE TABLE sent (key TEXT PRIMARY KEY, at INTEGER NOT NUL
 Fragment table steps: CREATE TABLE steps ( run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT, CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx))
 Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
+Fragment table turn_lives: CREATE TABLE turn_lives (life TEXT PRIMARY KEY, computer TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table turns: CREATE TABLE turns ( turn TEXT PRIMARY KEY, place TEXT NOT NULL, asker TEXT NOT NULL, mandate TEXT, until INTEGER NOT NULL, life TEXT NOT NULL, at INTEGER NOT NULL)
 
 Registry table admin_log: CREATE TABLE admin_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL)
 Registry table agent_fragments: CREATE TABLE agent_fragments ( identity TEXT PRIMARY KEY, fragment TEXT NOT NULL)
@@ -226,6 +232,7 @@ Ledger table wiped: CREATE TABLE wiped (at INTEGER NOT NULL)
 
 Computer table agents: CREATE TABLE agents (fragment TEXT PRIMARY KEY, identity TEXT NOT NULL, owner TEXT NOT NULL, added_at INTEGER NOT NULL)
 Computer table awake: CREATE TABLE awake (from_ms INTEGER PRIMARY KEY, to_ms INTEGER NOT NULL)
+Computer table disk: CREATE TABLE disk ( id INTEGER PRIMARY KEY CHECK (id = 0), volume_bytes INTEGER NOT NULL, head_epoch INTEGER, head_ck_epoch INTEGER, head_ck_seq INTEGER, head_ck_sum TEXT, head_clean INTEGER NOT NULL DEFAULT 0, back_epoch INTEGER, back_ck_epoch INTEGER, back_ck_seq INTEGER, back_ck_sum TEXT, back_clean INTEGER NOT NULL DEFAULT 0, slept_unshipped INTEGER, came_up INTEGER NOT NULL DEFAULT 0 )
 Computer table key_calls: CREATE TABLE key_calls (provider TEXT PRIMARY KEY, hour INTEGER NOT NULL, used INTEGER NOT NULL)
 Computer table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Computer table own_keys: CREATE TABLE own_keys (provider TEXT PRIMARY KEY, sealed TEXT NOT NULL, set_at INTEGER NOT NULL)

@@ -184,18 +184,41 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
         Step::Computer => {
             let computer = fragment_core::computer::default_computer_of(person);
             let mut deleted = 0u64;
-            // bounded: COMPUTER_CALLS_MAX calls, each its own pages
+            // when its disk is settled, as its last answer said
+            let mut settled_at = None;
+            // bounded: COMPUTER_CALLS_MAX calls, each its own pages, and
+            // each wait within the call's deadline
             for _ in 0..COMPUTER_CALLS_MAX {
                 let w = crate::computer::ask(env, &computer, "computer/wipe", &json!({})).await?;
                 deleted += w["records"].as_u64().unwrap_or(0) + w["objects"].as_u64().unwrap_or(0);
                 if w["more"] != true {
                     return Ok(Did::finished(deleted));
                 }
-                if js::now_ms() > deadline {
+                // its disk still settles (`fpac::WIPE_SETTLE_MS`): waited out
+                // here, within the call's time, so each call of an operator's
+                // wipe spends its time on it and few come back with nothing
+                // done (Codex on #1552: the CLI stops after `WIPE_STALLED_MAX`
+                // such calls)
+                let settling = w["settleMs"].as_i64().unwrap_or(0).max(0);
+                let now = js::now_ms();
+                settled_at = (settling > 0).then_some(now + settling);
+                if now >= deadline {
                     break;
                 }
+                if settling > 0 {
+                    Delay::from(std::time::Duration::from_millis(settling.min(deadline - now) as u64)).await;
+                    // a wait that took the call's time begins no call more:
+                    // the wipe's own goes on past its deadline (Codex on #1552)
+                    if js::now_ms() >= deadline {
+                        break;
+                    }
+                }
             }
-            Ok(Did::going(deleted, "its saves' prefix holds more: the next call deletes on".into()))
+            let note = match settled_at {
+                Some(at) => format!("its disk settles {} s more before its last list: the next call goes on", ((at - js::now_ms()).max(0) + 999) / 1000),
+                None => "its saves' prefix holds more: the next call deletes on".into(),
+            };
+            Ok(Did::going(deleted, note))
         }
         Step::Fragments => {
             let names = theirs(env, facts, true).await?;

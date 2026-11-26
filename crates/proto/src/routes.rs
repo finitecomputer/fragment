@@ -20,7 +20,7 @@ use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, R
 use crate::notice::NoticeList;
 use crate::vault::{AnswerAsk, AskSecret, PutSecret, Secret, SecretAsk, SecretList, SecretRemoved};
 use crate::{
-    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
+    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, Conflict, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
@@ -324,6 +324,17 @@ pub const ROUTES: &[Route] = &[
         request: None,
         answer: Answer::Json(ty::<MemberList>()),
         errors: &[Unauthenticated, Forbidden, NotFound],
+    },
+    Route {
+        operation: "members.lend",
+        method: Method::Put,
+        path: "/api/f/{name}/members/{agent}/lend",
+        summary: "What of theirs an agent member's owner lends it here for someone else's ask (the share sheet's lend card); its owner's alone, in person.",
+        auth: SIGNED,
+        params: &[NAME, Param { name: "agent", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The agent member's npub." }],
+        request: Some(Body::Json(ty::<Lend>())),
+        answer: Answer::Json(ty::<Lend>()),
+        errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound],
     },
     Route {
         operation: "channels.read",

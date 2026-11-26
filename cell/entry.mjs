@@ -7,8 +7,9 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
-import { readAgain } from "./backup-reads.mjs";
+import { readAgain, restoreChecked } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
+import { fpacRoute } from "./fpac.mjs";
 import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
 // A SimpleX door's object and its container's egress: JavaScript of its
@@ -37,13 +38,43 @@ export class DoorEgress extends DoorCalls {
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
-// (backup-reads.mjs); every other request is the SDK's own, once.
+// (backups.mjs); every other request is the SDK's own, once. A read grant
+// the lever `damage-restores` marks (`ContainerHost`'s `#damage`) has one
+// byte of its first range flipped on its way, its length kept.
 export class DirectoryBackupGateway extends SandboxGateway {
   fetch(request) {
     if (request.method !== "GET") return super.fetch(request);
+    const damage = this.ctx.props?.damage === true;
     const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
-    return readAgain(() => super.fetch(request), again);
+    const read = async () => {
+      const answer = await super.fetch(request);
+      const range = damage && answer.status === 206 && /^bytes 0-([0-9]+)\//.exec(answer.headers.get("content-range") ?? "");
+      if (!range || !answer.body) return answer;
+      // answered at its length, as the SDK's own answer is
+      const fixed = new FixedLengthStream(Number(range[1]) + 1);
+      flipped(answer.body).pipeTo(fixed.writable).catch(() => {});
+      return new Response(fixed.readable, answer);
+    };
+    return readAgain(read, again);
   }
+}
+
+// `body` with one byte of its first chunk flipped, its length kept: the
+// lever `damage-restores`, as FIN-775's transfers came. The chunk is
+// copied, never written in place.
+function flipped(body) {
+  let done = false;
+  const flip = new TransformStream({
+    transform(chunk, out) {
+      if (!done && chunk.byteLength > 0) {
+        chunk = new Uint8Array(chunk);
+        chunk[chunk.byteLength >> 1] ^= 0xff;
+        done = true;
+      }
+      out.enqueue(chunk);
+    },
+  });
+  return body.pipeThrough(flip);
 }
 
 export default rs.default;
@@ -249,6 +280,9 @@ async function tail(stream, keep) {
   return new TextDecoder().decode(last);
 }
 
+// The bucket a computer's saves are in (computer.rs's `js::BLOBS`).
+const BACKUPS_BINDING = "BLOBS";
+
 // A container step that answered nothing within its bound: its name
 // (`step`) and the bound (`ms`) say which, in its message too, so the
 // Rust side's failure (a save's, a start's, a stop's) says it.
@@ -324,15 +358,37 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The e2e's lever `damage-restores` (computer.rs): how many of the next
+  // restores' grants the gateway damages, one each.
+  #damage = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
-      binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+    const gateway = ctx.exports.DirectoryBackupGateway;
+    this.#backups = new DirectoryBackup(ctx.container, ({ props }) => gateway({ props: this.#damaged(props) }), {
+      binding: BACKUPS_BINDING,
+      prefix: this.#prefix,
     });
+  }
+
+  get #prefix() {
+    return `computers/${this.#ctx.id}/backups/`;
+  }
+
+  // Where R2 keeps `record`'s archive: the SDK's own name for it
+  // (`DirectoryBackup`'s key; computer.rs's export reads it so too).
+  #key(record) {
+    return `${this.#prefix}${record.id}.tar.zst`;
+  }
+
+  // `props` of a grant, a restore's marked for the gateway to damage while
+  // the lever asks for it (one grant is one restore tried)
+  #damaged(props) {
+    if (props.mode !== "read" || !(this.#damage > 0)) return props;
+    this.#damage--;
+    return { ...props, damage: true };
   }
 
   get #c() {
@@ -386,7 +442,7 @@ class ContainerHost {
   // overtaken meanwhile (a start after it, or a destroy begun: a sleep's
   // or a wipe's) starts nothing, answering false, and one overtaken by the
   // time its idle stop is set answers false too (that destroy ends it).
-  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs) {
+  async start(generation, image, snapshot, env, instance, computer, swapHosts, codestorage, idleMs, disk) {
     this.#generation = generation;
     const destroys = this.#destroys;
     // `FRAGMENT_COMPUTER_INTERNET=off` (the e2e's fleet): a run must not
@@ -397,7 +453,7 @@ class ContainerHost {
     if (snapshot) opts.containerSnapshot = { id: snapshot };
     else if (this.#c.images && this.#c.images[image]) opts.image = this.#c.images[image];
     const overtaken = () => generation !== this.#generation || destroys !== this.#destroys;
-    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage), overtaken))) return false;
+    if (!(await startIntercepted(this.#c, opts, () => this.#intercept(computer, swapHosts, codestorage, disk), overtaken))) return false;
     this.#c.monitor().then(
       () => this.#report("computer/exited", { generation }),
       (e) => this.#report("computer/exited", { generation, why: String((e && e.message) || e) }),
@@ -422,20 +478,23 @@ class ContainerHost {
   // intercept, which a computer has none of. One registered late (a
   // start's that was overtaken) would replace the grant of a restore under
   // way.
-  #intercept(computer, swapHosts, codestorage) {
-    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage);
+  // A start on a disk (`disk`: its prefix, name, epoch, volume and the
+  // head it opens from) also routes fpac.fragment.internal, with the disk
+  // in its props (fpac.mjs).
+  #intercept(computer, swapHosts, codestorage, disk) {
+    return intercept(this.#c, this.#egress(computer), swapHosts, codestorage, disk);
   }
 
   #egress(computer) {
-    return (route) => this.#ctx.exports.ComputerEgress({ props: { computer, route } });
+    return (route, disk) => this.#ctx.exports.ComputerEgress({ props: disk ? { computer, route, disk } : { computer, route } });
   }
 
   // Its running start `generation`'s intercepts again (a new isolate's),
   // and the runtime's idle stop, the safety net under the Computer DO's
   // own sleep.
-  async arm(generation, computer, idleMs, swapHosts, codestorage) {
+  async arm(generation, computer, idleMs, swapHosts, codestorage, disk) {
     if (generation !== this.#generation) return false;
-    await this.#intercept(computer, swapHosts, codestorage);
+    await this.#intercept(computer, swapHosts, codestorage, disk);
     await settled(() => this.#c.setInactivityTimeout(idleMs));
     return generation === this.#generation;
   }
@@ -517,19 +576,34 @@ class ContainerHost {
     return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
   }
 
-  // Restores `record` into its directory within `ms` (`Overdue` past it):
-  // null once it is in place, `{unusable}` when the save itself will never
-  // restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND and
-  // BACKUP_INTEGRITY), or `{noRoom}` when it found no room on the disk (a
-  // restore's SandboxFileError ENOSPC), which the Rust side tells from a
-  // failure that may pass (it throws).
+  // Restores `record` into its directory within `ms` (`Overdue` past it),
+  // asked again while its bytes come damaged (backups.mjs
+  // `restoreChecked`): null once it is in place, `{unusable}` when the
+  // save itself will never restore (its archive gone, the SDK's
+  // BACKUP_NOT_FOUND, or its bytes damaged at every try: BACKUP_INTEGRITY),
+  // or `{noRoom}` when it found no room on the disk (a restore's
+  // SandboxFileError ENOSPC), which the Rust side tells from a failure that
+  // may pass (it throws).
   async restore(generation, record, ms) {
-    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const until = Date.now() + ms;
+    const left = () => Math.max(1, until - Date.now());
+    const restore = async () => {
+      if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+      try {
+        await bounded(`the restore of ${record.dir}`, left(), (signal) => this.#backups.restore(record, { signal }));
+        return null;
+      } catch (e) {
+        if (SandboxBackupError.is(e) && e.code === "BACKUP_INTEGRITY") return `${e.code}: ${e.detail || e.message}`;
+        throw e;
+      }
+    };
     try {
-      await bounded(`the restore of ${record.dir}`, ms, (signal) => this.#backups.restore(record, { signal }));
-      return null;
+      return await restoreChecked({
+        restore,
+        again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),
+      });
     } catch (e) {
-      if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
+      if (SandboxBackupError.is(e) && e.code === "BACKUP_NOT_FOUND") {
         return { unusable: `${e.code}: ${e.detail || e.message}` };
       }
       if (SandboxFileError.is(e) && e.operation === "restore" && e.code === "ENOSPC") {
@@ -542,6 +616,26 @@ class ContainerHost {
   // Deletes `record`'s archive within `ms` (`Overdue` past it).
   async forget(record, ms) {
     await bounded(`the delete of record ${record.id}`, ms, (signal) => this.#backups.delete(record, { signal }));
+  }
+
+  // The lever `damage-restores`: the next `times` restores each come
+  // damaged once. Answers how many the last pull left unspent.
+  damage(times) {
+    const unspent = this.#damage;
+    this.#damage = times;
+    return unspent;
+  }
+
+  // The lever `damage-stored`: R2's copy of `record` with one byte flipped,
+  // its length kept, a stored copy really bad (a test fleet's saves are
+  // small, so read whole).
+  async damageStored(record) {
+    const bucket = this.#env[BACKUPS_BINDING];
+    const object = await bucket.get(this.#key(record));
+    if (object === null) throw new Error(`record ${record.id} is not in R2`);
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    bytes[bytes.length >> 1] ^= 0xff;
+    await bucket.put(this.#key(record), bytes, { httpMetadata: object.httpMetadata, customMetadata: object.customMetadata });
   }
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
@@ -734,10 +828,25 @@ export class Computer extends DurableObject {
 export class ComputerEgress extends WorkerEntrypoint {
   async fetch(request) {
     const { computer, route } = this.ctx.props;
+    // a disk's own route (fpac.mjs): its bytes R2's, streamed through, its
+    // head the Computer DO's (Rust carries the post to it)
+    if (route === "fpac") {
+      const E = rs.ComputerEgress;
+      const rules = { nameEpoch: (n) => E.fpac_name_epoch(n) ?? null, objectBytesMax: E.fpac_object_bytes_max(), headLineMax: E.fpac_head_line_max() };
+      return fpacRoute(
+        request,
+        this.env.BLOBS,
+        this.ctx.props.disk,
+        rules,
+        (epoch, line) => E.disk_head(this.env, computer, epoch, line),
+        (epoch, head, why, blank, unmountable) => E.disk_unusable(this.env, computer, epoch, head, why, blank, unmountable),
+      );
+    }
     // a relay only where one was asked for: its route, a GET that upgrades
     // (Rust strips the relay's headers from every other answer besides)
     const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
-    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
+    // a disk start's API names its life (`disk.epoch`): its guest's reads say whose
+    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route, this.ctx.props.disk?.epoch ?? null);
     const lease = asked ? answer.headers.get("x-fragment-relay") : null;
     if (!lease) return answer;
     const h = answer.headers;

@@ -13,12 +13,31 @@
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
 //!
-//! A socket's role is fixed when it connects; removing a member closes
-//! theirs, and rotating the share link closes link holders' (4003);
-//! deleting the fragment closes every socket (4004). Both codes are
-//! final: the browser library does not reconnect after them. A member
-//! whose role changes has theirs closed with 4001 (`ROLE_CHANGED`), after
-//! which the library reconnects, at the new role.
+//! A socket is sent a channel's record or draft only on a decision that
+//! holds now (`sends_to`): its role, the one a connect decides
+//! (`permit::decide` over the caller's standing), reads the channel as it
+//! is declared now (`socket_reads`), and a socket signed by a key was
+//! asked who it is within `LIVE_IDENTITY_MS`. A follower that is not is
+//! closed with 4001 (`ROLE_CHANGED`), never skipped: the library
+//! reconnects, decided afresh, and resubscribes each channel from its
+//! cursor, which a channel above its role refuses until it may read it
+//! again; so no record is missed. Each time who it is is asked again
+//! (below), its role is decided again too, and one that would differ now
+//! closes it with 4001 as well. So what the fragment decides reaches
+//! every socket at once: a member removed or their role changed, a person
+//! joining (their agents' sockets reopen: a hold applies beside its
+//! person), the visibility, the share link (decided as a socket opens),
+//! and a deploy that changes a channel's read role or drops a channel
+//! (every socket reopens, plane.rs `install_rows`, so one refused it
+//! subscribes again as it may now). And what the registry
+//! holds of who it is reaches a key's socket (an agent held lower by its
+//! owner, a key revoked) within `LIVE_IDENTITY_MS` plus one reconnect, and
+//! a cookie's (a sign-out) at its next frame after that. A socket asks
+//! the same `decide` at its subscribe and at each query. Removing a member
+//! closes theirs, and rotating the share link closes link holders' (4003);
+//! deleting the fragment closes every socket (4004). Both codes are final:
+//! the browser library does not reconnect after them. A member whose role
+//! changes here has theirs closed with 4001 at once.
 //!
 //! A query over the socket runs as the socket's principal and role, as its
 //! subscriptions read, and outside the public call budget (ops.rs): no
@@ -27,9 +46,12 @@
 //! sockets. Opening a socket at the public role is one call of the public
 //! budget, so reconnecting to get more is bounded as calls are.
 //!
-//! A signed-in socket acts as who it connected as for `LIVE_IDENTITY_MS`;
-//! at its next frame after that, the registry is asked again with the
-//! credential it connected with. A key is a public key, kept in the
+//! A signed-in socket acts as who it connected as, at the role it
+//! connected with, until the registry is asked again with the credential
+//! it connected with, and its role decided again with what it answers: at
+//! its next frame once `LIVE_IDENTITY_MS` passed, or half that for a key's
+//! socket, so a client that pings that often (a computer's follower, the
+//! CLI) is never past the bound when a broadcast comes. A key is a public key, kept in the
 //! socket's attachment, so it is asked about after waking too; a cookie's
 //! token is a secret, held in this activation's memory only. A socket
 //! whose credential no longer names its principal (a sign-out, an ended
@@ -123,6 +145,10 @@ pub struct LiveState {
     /// at their next check, as all were); an older release ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Whether it opened with the share link: its role is decided again
+    /// as it was decided as it connected (`still_who`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link: bool,
 }
 
 impl LiveState {
@@ -166,12 +192,41 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id and the
-/// channels it follows, and no more (its presence is any JSON a page set).
+/// What a broadcast reads of a socket's attachment: its id, its role, the
+/// channels it follows, and when a key's socket was last asked who it is,
+/// and no more (its presence is any JSON a page set). Every release's
+/// attachment has carried them (`LiveState`).
 #[derive(Deserialize)]
 struct Follows {
     id: String,
+    role: Role,
     subs: Vec<String>,
+    checked_at: i64,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Whether a follower is sent what a channel read at `read` carries (none:
+/// not declared now), on a decision that holds now: its role reads it,
+/// and a key's socket was asked who it is within `LIVE_IDENTITY_MS`. One
+/// that is not is closed (4001), never skipped (the module doc): records
+/// and drafts alike.
+fn sends_to(ws: &WebSocket, st: &Follows, read: Option<Role>, now: i64) -> bool {
+    let why = if st.key.is_some() && now - st.checked_at >= limits::LIVE_IDENTITY_MS {
+        "who you are is checked again: reconnect"
+    } else if !read.is_some_and(|read| socket_reads(st.role, read).is_ok()) {
+        "what you follow changed: reconnect"
+    } else {
+        return true;
+    };
+    let _ = ws.close(Some(ROLE_CHANGED), Some(why));
+    false
+}
+
+/// Whether a socket at `role` reads what needs `read` (a channel, a
+/// query): `decide`, over the socket's kept standing.
+fn socket_reads(role: Role, read: Role) -> CellResult<Role> {
+    crate::fragment::decide(Visibility::Members, Standing::kept(role), Action::Read(read))
 }
 
 fn follows_of(ws: &WebSocket) -> Option<Follows> {
@@ -260,6 +315,7 @@ impl FragmentCell {
             presence_at: 0,
             checked_at: if signed_in { js::now_ms() } else { 0 },
             key,
+            link,
         };
         assert_eq!(st.signed(), signed_in, "a signed-in socket's principal is not an anonymous one");
         if let Some(cookie) = cookie {
@@ -279,17 +335,19 @@ impl FragmentCell {
         }
     }
 
-    /// A record to the sockets following its channel: none are looked at
-    /// when no socket may follow it (`LiveMemory::followers`).
+    /// A record to the sockets following its channel, each on a decision
+    /// that holds now (`sends_to`): none are looked at when no socket may
+    /// follow it (`LiveMemory::followers`).
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
         if !self.followed(&r.channel) {
             return;
         }
+        let (read, now) = (self.channel_read_role(&r.channel).ok(), js::now_ms());
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
-            if st.subs.contains(&r.channel) {
+            if st.subs.contains(&r.channel) && sends_to(&ws, &st, read, now) {
                 let _ = ws.send_with_str(&frame);
                 found.insert(st.id);
             }
@@ -299,7 +357,8 @@ impl FragmentCell {
         }
     }
 
-    /// A draft to the sockets following its channel, at most
+    /// A draft to the sockets following its channel, each on a decision
+    /// that holds now (`sends_to`), at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
     /// `thinking`: ms a text step's model has reasoned with no words yet.
@@ -311,9 +370,10 @@ impl FragmentCell {
         if !self.followed(channel) {
             return true;
         }
+        let read = self.channel_read_role(channel).ok();
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel)) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && sends_to(&ws, &st, read, now)) {
                 send(&ws, &frame);
             }
         }
@@ -378,6 +438,28 @@ impl FragmentCell {
         Ok(sockets.len())
     }
 
+    /// Test fleets: a socket's upgrade waits while `hold-live` is on, at
+    /// most `TEST_HOLD_MAX_MS`, saying so (`live-held`): a test changes the
+    /// fragment between who it is being asked and its accept.
+    pub(crate) async fn held_live(&self) -> CellResult<()> {
+        use crate::jobs::{TEST_HOLD_MAX_MS, TEST_HOLD_POLL_MS};
+        assert!(self.cfg.test_hooks, "only a test fleet holds an upgrade");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldLive)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestLiveHeld, "1")?;
+            Delay::from(std::time::Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
+    }
+
+    /// Closes every live socket so that its page reconnects, decided afresh:
+    /// what the fragment's channels let it read changed (plane.rs).
+    pub(crate) fn reopen_live(&self, reason: &str) {
+        self.reopen_sockets(LIVE_TAG, reason);
+    }
+
     /// Closes the sockets of `tag` so that their pages reconnect: a
     /// member's role changed.
     pub(crate) fn reopen_sockets(&self, tag: &str, reason: &str) {
@@ -410,10 +492,7 @@ impl FragmentCell {
         match frame {
             LiveIn::Ping => send(ws, &LiveOut::Pong),
             LiveIn::Subscribe(Subscribe { channel, from }) => {
-                let read = self.channel_read_role(&channel)?;
-                if st.role < read {
-                    return Err(CellError::new(ErrorCode::Forbidden, format!("channel {channel} needs the {} role", read.as_str())));
-                }
+                socket_reads(st.role, self.channel_read_role(&channel)?)?;
                 let live = st.subs.contains(&channel);
                 if !live && st.subs.len() >= SUBSCRIPTIONS_MAX {
                     return Err(CellError::invalid(format!("a socket follows at most {SUBSCRIPTIONS_MAX} channels")));
@@ -466,11 +545,14 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Whether a socket still acts as who it connected as (the module doc);
-    /// a registry that cannot answer closes it too: fail closed.
+    /// Whether a socket still acts as who it connected as, at the role a
+    /// connect would decide now (the module doc); a registry that cannot
+    /// answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
         let now = js::now_ms();
-        if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
+        // a key's socket before it reaches the bound at a broadcast (`sends_to`)
+        let due = if st.key.is_some() { limits::LIVE_IDENTITY_MS / 2 } else { limits::LIVE_IDENTITY_MS };
+        if !st.signed() || now - st.checked_at < due {
             return true;
         }
         let credential = match &st.key {
@@ -479,19 +561,23 @@ impl FragmentCell {
         };
         let same = match (credential, self.meta(MetaKey::Name)) {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
-                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal,
-                Ok(None) | Err(_) => false,
+                Ok(Some(signed)) if npub::display(&signed.identity.id) == st.principal => Some(Caller::of(signed)),
+                Ok(_) | Err(_) => None,
             },
-            _ => false,
+            _ => None,
         };
-        if same {
+        // the role a connect would decide now, after the last await: one
+        // that differs is reconnected to, at it
+        let role = same.map(|caller| self.require(&caller, st.link, Role::Public).ok());
+        if role == Some(Some(st.role)) {
             st.checked_at = now;
             if ws.serialize_attachment(&*st).is_ok() {
                 return true;
             }
         }
         self.live.borrow_mut().credentials.remove(&st.id);
-        let _ = ws.close(Some(ROLE_CHANGED), Some("who you are is checked again: reconnect"));
+        let why = if role.is_some() { "your role here changed: reconnect" } else { "who you are is checked again: reconnect" };
+        let _ = ws.close(Some(ROLE_CHANGED), Some(why));
         false
     }
 
@@ -543,8 +629,8 @@ impl FragmentCell {
         if decl.kind != OpKind::Query {
             return Err(CellError::invalid(format!("{op} is not a query: only queries run over the live socket (call it through __op)")));
         }
-        crate::fragment::decide(Visibility::Members, Standing::kept(st.role), Action::Read(decl.role))?;
-        let inv = Invocation { principal: &st.principal, asker: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
+        socket_reads(st.role, decl.role)?;
+        let inv = Invocation { principal: &st.principal, asker: None, other: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
         self.invoke(inv).await
     }
 

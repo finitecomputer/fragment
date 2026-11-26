@@ -130,6 +130,14 @@ pub mod limits {
     /// A mandate's text, at most: its names are each bounded, so one the
     /// platform makes is about half this.
     pub const MANDATE_MAX_BYTES: usize = 1024;
+    /// Open turns an agent fragment holds as its bridge tells them
+    /// (cell runs_on.rs `turns`): past it a turn is refused, and its
+    /// bridge runs it later.
+    pub const TURNS_HELD_MAX: i64 = 64;
+    /// How long an agent fragment holds a turn its bridge never said ended
+    /// (a crash between): its mandate's day and as long again, then it is
+    /// forgotten. A bridge's start forgets them all at once.
+    pub const TURN_HELD_MS: i64 = 2 * MANDATE_LIFE_MS;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
     /// A page of a channel on the live socket also ends at about this many
@@ -228,6 +236,9 @@ pub mod limits {
     pub const APP_MODULES_MAX_BYTES: usize = 4 * 1024 * 1024;
     /// Triggers per fragment.
     pub const TRIGGERS_MAX: usize = 32;
+    /// The kinds of record one channel trigger starts runs for, at most
+    /// (`TriggerDecl::kinds`): as many as a channel lists.
+    pub const TRIGGER_KINDS_MAX: usize = LISTED_KINDS_MAX;
     /// Paths a fragment.json names as kept for good (`immutable`).
     pub const IMMUTABLE_MAX: usize = 16;
     /// How many hops a chain of triggered runs may take (a mutation's record
@@ -1628,6 +1639,48 @@ pub struct Member {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub door: Option<String>,
+    /// An agent member's lend here (the lend card), to its owner alone:
+    /// what of theirs it may use for someone else's ask. Add-only: absent
+    /// from an older platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub lend: Option<Lend>,
+}
+
+/// What an agent's owner lends it for someone else's ask in one place (the
+/// lend card, FIN-720): working there as the one who asked, with no more
+/// than their own role, is always lent; these two are the owner's to
+/// choose. A place keeps each agent member's on its row, set by the
+/// agent's owner; one never set is `Lend::DEFAULT`.
+/// `PUT /api/f/{name}/members/{agent}/lend` sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct Lend {
+    /// The owner's credit, for paid tools (an operator's keys).
+    pub spend: bool,
+    /// The owner's accounts and keys: their connections, their own keys,
+    /// their Vault's secrets.
+    pub accounts: bool,
+}
+
+impl Lend {
+    /// A place's lend until its agent's owner sets one: spend on, as
+    /// before; accounts off.
+    pub const DEFAULT: Lend = Lend { spend: true, accounts: false };
+    /// What the owner's own ask lends: everything of theirs.
+    pub const OWNER: Lend = Lend { spend: true, accounts: true };
+    /// What no one's proven ask lends: nothing of the owner's.
+    pub const NONE: Lend = Lend { spend: false, accounts: false };
+
+    /// As a stored row writes it: 0 to 3.
+    pub fn bits(self) -> u8 {
+        u8::from(self.spend) + 2 * u8::from(self.accounts)
+    }
+
+    pub fn from_bits(bits: u8) -> Option<Lend> {
+        (bits <= 3).then_some(Lend { spend: bits & 1 == 1, accounts: bits & 2 == 2 })
+    }
 }
 
 /// `GET /api/f/<name>/members` (viewer).
@@ -2192,11 +2245,16 @@ pub struct ChannelRecord {
     /// The JSON text the cell stored, passed through as it is: the cell
     /// neither parses a body it just wrote nor one it reads back.
     pub body: Box<RawValue>,
-    /// Proof that the agent reading it was asked by its owner (docs/api.md,
-    /// "Who asked: mandates"): on a channel read by an agent member as
-    /// itself, a record its owner wrote (or a door relayed for them)
-    /// carries one, which its calls carry in place of `for`. Absent
-    /// elsewhere.
+    /// Whose ask the platform wrote it for, when it wrote it for someone: a
+    /// schedule's fire, its maker's (FIN-720). Absent on any other record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub asker: Option<String>,
+    /// Proof that its asker asked the agent reading it (docs/api.md, "Who
+    /// asked: mandates"): on a channel read by an agent member as itself,
+    /// a record a person wrote to it (or a door relayed for them, or a
+    /// schedule fired for them) carries one, which its calls carry in
+    /// place of `for`. Absent elsewhere.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub mandate: Option<String>,
@@ -2360,6 +2418,13 @@ pub struct TriggerDecl {
     /// "agent"`). None: every record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub from: Option<IdentityKind>,
+    /// A channel trigger's kinds of record: only a record whose body's
+    /// `kind` is one of these starts a run (a chat's agents' questions:
+    /// `"kinds": ["turn.prompt"]` on `work`), at most
+    /// `limits::TRIGGER_KINDS_MAX`, each `valid_listed_kind`. Empty: every
+    /// record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kinds: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2826,6 +2891,7 @@ mod tests {
             author: None,
             kind: "said".into(),
             body: RawValue::from_string(stored.into()).unwrap(),
+            asker: None,
             mandate: None,
         };
         let text = serde_json::to_string(&record).unwrap();

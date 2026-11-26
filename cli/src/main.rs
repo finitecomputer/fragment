@@ -2896,7 +2896,7 @@ fn run(cli: Cli) -> Result<()> {
                                 println!("invited {email} as {} on {name}: they were mailed a link, and are in once they accept it, signed in as {email}", i.role.as_str());
                                 println!("  it waits until {}; `fragment invite revoke {name} {email}` takes it back", chrono_like(expires_s));
                                 if warns {
-                                    println!("  {}", fragment_core::permit::TRUST_WARNING);
+                                    println!("  {}", fragment_core::permit::asked_here("your agent"));
                                 }
                                 return Ok(());
                             }
