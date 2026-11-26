@@ -550,9 +550,15 @@ the DO removes them from one started from a snapshot.
   container), which never wait for it. When two reads agree that copy is
   not its record, the save is unusable, as above, once a try beside them
   failed too (a read that fails is made again at once, three in all);
-  otherwise (a read that failed each time) the restore is asked
-  again, three tries in all, within its own bound, and a start whose tries
-  all came damaged fails as one that may pass, its save kept. A start
+  otherwise the restore is asked again, three tries in all, within its own
+  bound. A start whose tries all came damaged, R2's copy read whole, fails
+  as one that may pass, its save kept. One whose copy could be proven
+  neither whole nor bad in its time (its reads failed or disagreed, or a
+  very large one's ran out of time or CPU) fails so too at a first start,
+  and at a start after a failed one is set aside (`Saves::unconfirmed`), as
+  a save too big for its disk is: kept, exportable, never found unusable,
+  and the save before it is next, at once and no strike ("rollback is
+  preferred to being stuck"). A start
   after a failed one reads R2's copy of each of its records from the start
   of its restores (`checkAhead`), so a copy damaged in R2 is found even
   when a long restore, or the restores before it, leave no time to read it

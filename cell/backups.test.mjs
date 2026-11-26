@@ -98,12 +98,17 @@ test("a copy found bad is heard whatever else a try failed by: its time, or a tr
 });
 
 test("a read of R2's copy damaged on its own way condemns nothing: the restore is asked again", async () => {
-  // the first read disagrees with its record, the second with the first
+  // the first read disagrees with its record, the second with the first (or holds it)
   for (const copies of [[bad, whole], [bad, { size: 100, sha256: "c".repeat(64) }], [bad, null], [null, bad]]) {
     const { seen, run } = restores([DAMAGED, DAMAGED, null], copies);
     assert.equal(await run(), null, JSON.stringify(copies));
-    assert.deepEqual([seen.restores, seen.reads], [3, 2], "read once a start, while the copy was not found bad");
+    assert.equal(seen.restores, 3);
+    assert.ok(seen.reads >= 2, JSON.stringify(copies));
   }
+  // reads that keep disagreeing, every try damaged: unconfirmed, never unusable
+  const other = { size: 100, sha256: "c".repeat(64) };
+  const odd = restores([DAMAGED], Array.from({ length: 12 }, (_, i) => (i % 2 ? other : bad)));
+  assert.match((await odd.run()).unconfirmed, /R2's copy unread/);
 });
 
 test("a read of R2's copy that fails is made again at once, a bounded number of times, the first mismatch kept", async () => {
@@ -147,9 +152,23 @@ test("a start after a failed one reads R2's copy from its restores' start: a cop
   assert.match((await slow.run()).unusable, /^the restore of \/data: no answer within 1 ms; R2's copy holds 100 bytes/);
 });
 
+test("a restore that runs out of tries or time, damaged, its copy proven neither whole nor bad, is unconfirmed, never unusable", async () => {
+  const fails = new Error("the check of record id-1: no answer within 1 ms");
+  // every read of R2's copy fails (a CPU or time limit on a very large one)
+  const { seen, run } = restores([DAMAGED], [fails]);
+  assert.match((await run()).unconfirmed, new RegExp(`came in damaged ${RESTORE_TRIES} times, R2's copy unread`));
+  assert.equal(seen.restores, RESTORE_TRIES);
+  // its time ran out after damage, its read still not in
+  const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
+  const late = restores([DAMAGED, overdue], [fails]);
+  assert.match((await late.run()).unconfirmed, /^the restore of \/data: no answer within 1 ms; R2's copy unread/);
+  // its time ran out before any damage: a plain failure, as master's
+  await assert.rejects(restores([overdue], [whole]).run(), /no answer within 1 ms/);
+});
+
 test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {
   const { seen, run } = restores([DAMAGED], [whole]);
-  await assert.rejects(run(), new RegExp(`the restore of /data came in damaged ${RESTORE_TRIES} times, R2's copy not found bad: BACKUP_INTEGRITY`));
+  await assert.rejects(run(), new RegExp(`the restore of /data came in damaged ${RESTORE_TRIES} times, R2's copy whole: BACKUP_INTEGRITY`));
   assert.ok(RESTORE_TRIES >= 3, "damage in transit is asked again at least twice");
   assert.equal(seen.restores, RESTORE_TRIES);
   assert.equal(seen.reads, 1, "R2's copy is read once a start once found whole, not once a try");

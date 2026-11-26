@@ -33,12 +33,10 @@ function against(held, record) {
 
 // R2's copy of `record` read (`stored()`, twice when the first is not it),
 // as a verdict that never rejects: `{bad}` (two reads agree it is not its
-// record), `{unread}` (a read failed), or `{}` (not found bad).
+// record), `{}` (a read found it whole), or `{unread}` (a read failed, or
+// two disagreed: neither proven).
 export function verdictOf(record, stored) {
-  return badCopy(record, stored).then(
-    (bad) => (bad === null ? {} : { bad }),
-    (e) => ({ unread: String(e?.message ?? e) }),
-  );
+  return copyOf(record, stored).catch((e) => ({ unread: String(e?.message ?? e) }));
 }
 
 // One record's restore. `restore()` answers null once it is in place, or
@@ -52,12 +50,16 @@ export function verdictOf(record, stored) {
 // verdict is used once it is in, and awaited only once no try is left (the
 // last came damaged, or one failed otherwise). Answers null once restored, or
 // `{unusable}` when R2's own copy is not its record: the save never will
-// restore. Throws once `RESTORE_TRIES` came in damaged while R2's copy was
-// not found bad (a failed start, which may pass: the save is kept), and
-// whatever `restore` throws.
+// restore; or `{unconfirmed}` when its tries ran out (or its time, after
+// damage) with R2's copy read neither whole nor bad (a CPU or time limit on
+// a very large one, or R2 failing it): the cell fails a first start so, and
+// sets the save aside at a start after a failed one, never condemning it.
+// Throws once `RESTORE_TRIES` came in damaged while R2's copy was whole (a
+// failed start, which may pass: the save is kept), and whatever `restore`
+// throws.
 export async function restoreChecked({ record, restore, stored, again = () => {}, ahead = null }) {
   // a read of R2's copy under way or done (it never rejects), and its
-  // verdict once in: {bad}, {unread} or {} (not found bad)
+  // verdict once in: {bad}, {unread} or {} (whole)
   let checking = null;
   let verdict = null;
   const check = (under = verdictOf(record, stored)) => {
@@ -72,9 +74,11 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
     } catch (e) {
       // a try that failed otherwise ends the start: a read under way is
       // awaited (within the start's own bound, as the try was), and a copy
-      // found bad heard, so the start goes back at once, no strike
+      // found bad heard, so the start goes back at once, no strike; one cut
+      // off by its time after damage, its copy not found whole, unconfirmed
       const v = checking !== null ? await checking : verdict;
       if (v?.bad) return { unusable: `${e?.message ?? e}; ${v.bad}` };
+      if (checking !== null && e?.name === "Overdue" && !whole(v)) return { unconfirmed: `${e.message}; R2's copy ${v?.unread ? `unread: ${v.unread}` : "unread in its time"}` };
       throw e;
     }
     if (damaged === null) return null;
@@ -82,11 +86,17 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
     const v = last && checking !== null ? await checking : verdict;
     if (v?.bad) return { unusable: `${damaged}; ${v.bad}` };
     if (v?.unread) damaged = `${damaged}; R2's copy unread: ${v.unread}`;
-    if (last) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy not found bad: ${damaged}`);
+    if (last && !whole(v)) return { unconfirmed: `the restore of ${record.dir} came in damaged ${tried} times, R2's copy unread: ${damaged}` };
+    if (last) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy whole: ${damaged}`);
     // the first that came damaged, or a read that failed: read beside the next try
     if (checking === null || v?.unread) check();
     again(tried, damaged);
   }
+}
+
+// Whether a verdict found R2's copy whole.
+function whole(v) {
+  return v !== null && v !== undefined && !v.bad && !v.unread;
 }
 
 // Reads of R2's copy in all while one fails (R2 refused it, say), each
@@ -104,14 +114,16 @@ async function readOf(stored) {
   }
 }
 
-// Why R2's copy of `record` is not it, or null unless two reads agree on
-// what it holds instead: a read damaged on its own way never condemns it.
-async function badCopy(record, stored) {
+// What R2's copy of `record` is, as `verdictOf` says: whole once a read
+// finds its record; bad only when two reads agree on what it holds instead
+// (a read damaged on its own way never condemns it); else unread.
+async function copyOf(record, stored) {
   const first = await readOf(stored);
-  if (holds(first, record)) return null;
+  if (holds(first, record)) return {};
   const second = await readOf(stored);
+  if (holds(second, record)) return {};
   const same = first === null ? second === null : second !== null && second.size === first.size && second.sha256 === first.sha256;
-  return same ? against(first, record) : null;
+  return same ? { bad: against(first, record) } : { unread: "two reads of R2's copy disagree" };
 }
 
 // A restore's ranged reads, asked again when storage failed them. The

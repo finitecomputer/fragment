@@ -468,6 +468,10 @@ enum Unstarted {
     /// The save's restore found no room on its disk
     /// (`fragment_core::computer::restore_found_no_room`).
     NoRoom(String),
+    /// A start after a failed one: the save's restore came in damaged, and
+    /// R2's copy could be proven neither whole nor bad in its time
+    /// (backups.mjs `restoreChecked`'s `{unconfirmed}`).
+    Unconfirmed(String),
     /// It came up, and its guest never read its view within its wait: a
     /// container Cloudflare restored from a snapshot dead (#362), answered
     /// as a snapshot that would not start.
@@ -1816,20 +1820,27 @@ impl ComputerCell {
                 let _ = self.destroy(generation, "its save would not restore").await;
                 Event::RestoreFailed { generation, why, older }
             }
-            Err(Unstarted::NoRoom(why)) => {
+            Err(unstarted @ (Unstarted::NoRoom(_) | Unstarted::Unconfirmed(_))) => {
                 // Paul, 2026-11-20: "rollback is preferred to being stuck".
                 // It is set aside, kept and exportable, and the save before
                 // it is next, at once and no strike; with none older, a
-                // strike as any failed start, its save kept current
-                self.starts.borrow_mut().failing(generation, start_line::Failed::NoRoom);
+                // strike as any failed start, its save kept current. A save
+                // whose restore came damaged, its copy in R2 proven neither
+                // whole nor bad, is so too (FIN-784), never found unusable
+                let (too_big, why) = match unstarted {
+                    Unstarted::NoRoom(why) => (true, why),
+                    Unstarted::Unconfirmed(why) => (false, why),
+                    _ => unreachable!("matched as one of the two"),
+                };
+                self.starts.borrow_mut().failing(generation, if too_big { start_line::Failed::NoRoom } else { start_line::Failed::Unconfirmed });
                 let id = save_id.expect("only a start from a save restores one");
-                let set = self.update_saves(|s| s.too_big(&id, js::now_ms()));
+                let set = self.update_saves(|s| if too_big { s.too_big(&id, js::now_ms()) } else { s.unconfirmed(&id, js::now_ms()) });
                 let older = matches!(set, Ok(Some(_)));
-                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": "no_room", "id": id, "generation": generation, "why": why, "setAside": older }));
+                console_log!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": if too_big { "no_room" } else { "unconfirmed" }, "id": id, "generation": generation, "why": why, "setAside": older }));
                 for record in set.ok().flatten().unwrap_or_default() {
                     console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
                 }
-                let _ = self.destroy(generation, "its save did not fit its disk").await;
+                let _ = self.destroy(generation, if too_big { "its save did not fit its disk" } else { "its save's restore came damaged, its copy unproven" }).await;
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {
@@ -2002,7 +2013,8 @@ impl ComputerCell {
                 // in its time, or after the restores before it, to read it
                 // after (an 8 GB save's, say)
                 let until = js::now_ms() + RESTORE_MS;
-                if self.lifecycle()?.failures() > 0 {
+                let after_failed = self.lifecycle()?.failures() > 0;
+                if after_failed {
                     self.call("checkAhead", &[g.clone(), js::to_js(&save.records), JsValue::from_f64(RESTORE_MS as f64)]).await?;
                 }
                 for record in &save.records {
@@ -2024,6 +2036,14 @@ impl ComputerCell {
                     }
                     if let Some(why) = answer["unusable"].as_str() {
                         return Err(Unstarted::Unusable(of(why)));
+                    }
+                    // a first start: a failed start (the next reads R2's copy
+                    // ahead); a start after a failed one: set aside
+                    if let Some(why) = answer["unconfirmed"].as_str() {
+                        return Err(match after_failed {
+                            true => Unstarted::Unconfirmed(of(why)),
+                            false => CellError::host(of(why)).into(),
+                        });
                     }
                 }
                 // the image's check, behind the gate: nothing reads /data yet
