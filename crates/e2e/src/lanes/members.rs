@@ -959,120 +959,24 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let after = api.signed(&owner, "GET", &format!("/api/f/{name}/events"), None)?;
     s.ok("and changes no secret (no secret.set event)", r.status != 200 && after.text.matches("secret.set").count() == set_count, &r);
 
-    // a secret of its owner's Vault moved here (FIN-466): kept here, gone
-    // from the Vault, never in an answer; theirs alone to move
-    let bot = format!("123456:vault-moved-{}", &Keys::generate().pubkey_hex()[..16]);
-    let vault = |keys: &Keys, method: &'static str, path: &str, body: Option<Value>| api.signed(keys, method, path, body.as_ref());
-    let parked = vault(&owner, "PUT", "/api/vault/telegram-e2e", Some(json!({ "value": bot, "hosts": [], "agents": [agent_id_name(&name)] })))?;
-    let signer = vault(&owner, "PUT", "/api/vault/nostr-e2e", Some(json!({ "value": Keys::generate().secret_hex(), "hosts": ["finite.site"], "place": { "sign": "nip98" }, "agents": [agent_id_name(&name)] })))?;
-    anyhow::ensure!(parked.status == 200 && signer.status == 200, "the owner's vault: {parked} {signer}");
-    // its agent an editor here, so only its being an agent refuses it
-    let r = api.signed(&owner, "PUT", &format!("/api/f/{name}/members/{agent_id}"), Some(&json!({ "role": "editor" })))?;
-    anyhow::ensure!(r.status == 200, "the owner's agent its editor: {r}");
-    let both = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "value": "123456:x", "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
-    let by_agent = put(&viewer, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
-    let a_signer = put(&owner, "NOSTR_KEY", json!({ "fromVault": "nostr-e2e", "hosts": ["finite.site"] }))?;
-    let held = vault(&owner, "GET", "/api/vault", None)?;
-    s.ok(
-        "a value and fromVault both, an agent's move, and a Nostr key's move are each refused, the Vault keeping both",
-        both.status == 400 && by_agent.status == 403 && by_agent.text.contains("only a person") && a_signer.status == 400 && a_signer.text.contains("never leaves") && held.text.contains("telegram-e2e") && held.text.contains("nostr-e2e"),
-        format!("{both} {by_agent} {a_signer}"),
-    );
-    // a name outside a Vault name's grammar never reaches a Vault's route:
-    // dot segments and separators, literal or percent-encoded, a slash, from
-    // the API and from the fragment's own page, aimed at a key that signs
-    // and at a token, are each refused (400), the Vault keeping both and
-    // the fragment given nothing (Alex's review of #1184: `../delete/…`)
-    let escapes = [
-        "../delete/nostr-e2e",
-        "../delete/telegram-e2e",
-        "%2e%2e/delete/nostr-e2e",
-        "%2E%2E%2Fdelete%2Fnostr-e2e",
-        "..%2fdelete%2ftelegram-e2e",
-        "telegram-e2e/../../delete/nostr-e2e",
-        "nostr-e2e/x",
-    ];
-    let before = vault(&owner, "GET", "/api/vault", None)?;
-    let refused = escapes.iter().map(|from| put(&owner, "PATH_E2E", json!({ "fromVault": from, "hosts": ["api.telegram.org"] }))).collect::<Result<Vec<_>>>()?;
-    // from its page, any fromVault is refused before its name is read
-    // (`secrets-page`, below)
-    let body = json!({ "fromVault": "../delete/nostr-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
-    let paged = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/PATH_E2E"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?;
-    let held = vault(&owner, "GET", "/api/vault", None)?;
+    // the move is gone (FIN-615, PR 13): a person's secret stays in their
+    // Vault, which lends it; a body naming `fromVault`, from the API or the
+    // fragment's own page, is refused (400) and takes nothing
+    let bot = format!("123456:vault-kept-{}", &Keys::generate().pubkey_hex()[..16]);
+    let parked = api.signed(&owner, "PUT", "/api/vault/telegram-e2e", Some(&json!({ "value": bot, "hosts": ["api.telegram.org"], "agents": [agent_id_name(&name)] })))?;
+    anyhow::ensure!(parked.status == 200, "the owner's vault: {parked}");
+    let before = api.signed(&owner, "GET", "/api/vault", None)?;
+    let asked = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
+    let body = json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }).to_string().into_bytes();
+    let paged = api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/TELEGRAM_BOT_TOKEN"), body: Some(body), content_type: Some("application/json"), cookie: Some(editor_site.clone()), ..api::Call::default() })?;
+    let held = api.signed(&owner, "GET", "/api/vault", None)?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a fromVault outside a Vault name's grammar (../, %2e%2e, %2F, a slash) is refused before any Vault route (400 from the API, 403 from its page): the Vault keeps its token and its key that signs, each as it was (hosts, place, agents, when set), and the fragment is given nothing",
-        refused.iter().all(|r| r.status == 400 && r.text.contains("is not one"))
-            && paged.status == 403
-            && held.text.contains("\"telegram-e2e\"")
-            && held.text.contains("\"nostr-e2e\"")
-            && held.status == 200
-            && held.body == before.body
-            && listed.status == 200
-            && !listed.text.contains("PATH_E2E"),
-        json!({ "statuses": refused.iter().map(|r| r.status).collect::<Vec<_>>(), "first": refused.first().map(|r| r.text.clone()), "paged": paged.text, "vault": held.text, "listed": listed.text }),
+        "a move out of the Vault is no request now: fromVault, from the API or its page, is refused (400), the Vault keeping the secret as it was and the fragment given nothing",
+        asked.status == 400 && paged.status == 400 && held.body == before.body && !listed.text.contains("TELEGRAM_BOT_TOKEN") && ![&asked, &paged, &held, &listed].iter().any(|r| r.text.contains(&bot)),
+        format!("{asked} {paged}"),
     );
-    let moved = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
-    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
-    let held = vault(&owner, "GET", "/api/vault", None)?;
-    let again = put(&owner, "TELEGRAM_BOT_TOKEN", json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org"] }))?;
-    s.ok(
-        "its person moves a Vault secret into their fragment: its secret now, gone from the Vault, its value in no answer; again, nothing is there (404)",
-        moved.status == 200
-            && listed.body["secrets"].as_array().is_some_and(|l| l.iter().any(|x| x == &json!({ "name": "TELEGRAM_BOT_TOKEN", "hosts": ["api.telegram.org"] })))
-            && !held.text.contains("telegram-e2e")
-            && again.status == 404
-            && ![&moved, &listed, &held, &again].iter().any(|r| r.text.contains(&bot)),
-        format!("{moved} {held} {again}"),
-    );
-    // moved at once into three fragments of theirs, each move reading it
-    // before any keeps it: one keeps it, the others are refused (409
-    // while it is claimed, 404 once it is gone), and it leaves the Vault
-    let mut homes = vec![name.clone()];
-    for which in ["move-a", "move-b"] {
-        let home = s.named(api, &owner, which)?;
-        s.create(api, &owner, &home)?;
-        // private, as a key needs (`reach`, above)
-        let private = api.signed(&owner, "PUT", &format!("/api/f/{home}/visibility"), Some(&json!({ "visibility": "members" })))?;
-        anyhow::ensure!(private.status == 200, "{home} made private: {private}");
-        homes.push(home);
-    }
-    let (owner_keys, homes) = (&owner, &homes);
-    let raced = (0..3)
-        .map(|trial| -> Result<Value> {
-            let (secret, key, value) = (format!("raced-e2e-{trial}"), format!("RACED_{trial}"), format!("{bot}-raced-{trial}"));
-            let parked = vault(owner_keys, "PUT", &format!("/api/vault/{secret}"), Some(json!({ "value": value, "hosts": [], "agents": [agent_id_name(&name)] })))?;
-            anyhow::ensure!(parked.status == 200, "the owner's vault: {parked}");
-            let body = json!({ "fromVault": secret, "hosts": ["api.telegram.org"] });
-            let answers = std::thread::scope(|scope| {
-                let each: Vec<_> = homes
-                    .iter()
-                    .map(|home| {
-                        let (path, body) = (format!("/api/f/{home}/secrets/{key}"), &body);
-                        scope.spawn(move || api.signed(owner_keys, "PUT", &path, Some(body)))
-                    })
-                    .collect();
-                each.into_iter().map(|h| h.join().expect("a move's thread")).collect::<Result<Vec<_>>>()
-            })?;
-            let kept = homes.iter().map(|home| api.signed(owner_keys, "GET", &format!("/api/f/{home}/secrets"), None)).collect::<Result<Vec<_>>>()?;
-            let held = vault(owner_keys, "GET", "/api/vault", None)?;
-            let refused = answers.iter().filter(|r| r.status != 200).all(|r| (r.status == 409 && r.code() == Some(ErrorCode::Conflict)) || r.status == 404);
-            Ok(json!({
-                "statuses": answers.iter().map(|r| r.status).collect::<Vec<_>>(),
-                "moved": answers.iter().filter(|r| r.status == 200).count(),
-                "refused": refused,
-                "homes": kept.iter().filter(|r| r.text.contains(&key)).count(),
-                "inVault": held.text.contains(&secret),
-                "shown": answers.iter().chain(&kept).chain([&held]).any(|r| r.text.contains(&value)),
-            }))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    s.ok(
-        "a Vault secret moved into three fragments at once, three times: each time one keeps it, the others are refused (409 claimed, or 404 gone), and the Vault holds it no more",
-        raced.iter().all(|t| t["moved"] == 1 && t["refused"] == true && t["homes"] == 1 && t["inVault"] == false && t["shown"] == false),
-        json!(raced),
-    );
-    vault(&owner, "DELETE", "/api/vault/nostr-e2e", None)?;
+    api.signed(&owner, "DELETE", "/api/vault/telegram-e2e", None)?;
     Ok(())
 }
 
@@ -1089,13 +993,15 @@ export class App extends DurableObject {
 "#;
 const TAKER_JSON: &str = r#"{ "operations": { "send": { "kind": "job" } } }"#;
 
-/// A Vault secret is its person's to move, never a page's (docs/secrets.md,
+/// A Vault secret is its person's alone, never a page's (docs/secrets.md,
 /// "Only its person says where a value goes"): the page of an ordinary
-/// fragment (its author's own code, no connector of the platform's) asks
-/// `fromVault` with a visiting editor's session, as its script would,
-/// naming a host of its author's. Nothing leaves the Vault, the fragment
-/// is given nothing, and its author's job carries nothing of theirs to
-/// that host.
+/// fragment (its author's own code, no connector of the platform's), with
+/// a visiting editor's session, as its script would, asks to move one in
+/// (`fromVault`, which is gone: 400) and to lend one to its author's app
+/// (the Vault's routes are its person's own, by their key or the shell's
+/// session on the platform's origin). Nothing leaves the Vault or is lent,
+/// the fragment is given nothing, and its author's job carries nothing of
+/// theirs to its author's host.
 pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
     if !s.section("secrets-page", &[crate::Need::Fakes]) {
         return Ok(());
@@ -1133,23 +1039,9 @@ pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
     let held = api.signed(&visitor, "GET", "/api/vault", None)?;
     let kept = api.signed(&author, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a fromVault move asked from the page of an ordinary fragment (its author's own code), with a visiting editor's session, takes nothing from their Vault and stores nothing: their Vault lists the secret as it was, its hosts theirs, and the fragment holds no such secret",
-        held.status == 200 && held.body == before.body && kept.status == 200 && kept.body["secrets"] == json!([]),
+        "a fromVault asked from the page of an ordinary fragment (its author's own code), with a visiting editor's session, is refused (400) and takes nothing from their Vault: it lists the secret as it was, and the fragment holds no such secret",
+        asked.status == 400 && held.status == 200 && held.body == before.body && kept.status == 200 && kept.body["secrets"] == json!([]),
         json!({ "asked": asked.status, "answer": asked.body, "vaultBefore": before.body, "vault": held.body, "fragment": kept.body }),
-    );
-    // and the page learns nothing of what their Vault holds: a name it
-    // holds and names it does not, asked the same way, answer alike
-    let guesses = (0..24)
-        .map(|i| {
-            let body = json!({ "fromVault": format!("telegram-guess-{i}"), "hosts": ["127.0.0.1"] });
-            api.call(api::Call { method: "PUT", url: api.site_url(&name, "__secrets/STOLEN"), body: Some(body.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie.clone()), extra: extra.clone(), ..api::Call::default() })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
-    s.ok(
-        "from the page, a name their Vault holds and two dozen it does not answer alike (status and body), so a page learns nothing of their Vault; it is as it was",
-        guesses.iter().all(|g| g.status == asked.status && g.body == asked.body) && held.body == before.body,
-        json!({ "held": { "status": asked.status, "body": asked.body }, "guessed": guesses.iter().map(|g| format!("{} {}", g.status, g.text)).collect::<std::collections::BTreeSet<_>>() }),
     );
     // nor does its page lend one to its author's app (FIN-615, PR 12): the
     // Vault's routes are its person's alone, by their key or the shell's
@@ -1161,16 +1053,6 @@ pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
         "a lend asked from the page of an ordinary fragment, with a visiting editor's session, lends nothing: their Vault lists the secret as it was, lent to no app",
         lend_asked.status != 200 && held.body == before.body,
         json!({ "asked": lend_asked.status, "vault": held.body }),
-    );
-    // their own move (their key) keeps it within the hosts they set for it
-    // in their Vault: toward another, refused before anything is claimed
-    let wider = api.signed(&visitor, "PUT", &format!("/api/f/{name}/secrets/WIDER"), Some(&json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org", "127.0.0.1"] })))?;
-    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
-    let kept = api.signed(&author, "GET", &format!("/api/f/{name}/secrets"), None)?;
-    s.ok(
-        "its person's own move toward a host their Vault does not point it at is refused (400), their Vault keeping it as it was and the fragment given nothing",
-        wider.status == 400 && wider.text.contains("goes only to the hosts set for it") && held.body == before.body && kept.body["secrets"] == json!([]),
-        json!({ "wider": wider.text, "vault": held.body, "fragment": kept.body }),
     );
     // its author runs the job: its fetch names `{{STOLEN}}` toward their host
     let r = api.op(&author, &name, "send", "send-1", json!({ "url": format!("{}/take", host.url) }))?;

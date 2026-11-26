@@ -1052,10 +1052,6 @@ enum SecretCmd {
         /// `--host`: that names the fragment host)
         #[arg(long = "to", required = true, value_name = "HOST")]
         hosts: Vec<String>,
-        /// Move this secret of your Vault here instead (`fragment vault
-        /// list`): kept here, gone from your Vault, no value read
-        #[arg(long = "from-vault", value_name = "SECRET", value_parser = vault_name)]
-        from_vault: Option<String>,
     },
     List { name: String },
     Rm { name: String, key: String },
@@ -2648,12 +2644,9 @@ fn run(cli: Cli) -> Result<()> {
             println!("New share link: {}", share_link(&st.urls.canonical, &v.view_token));
         }
         Cmd::Secret { sub } => match sub {
-            SecretCmd::Set { name, key, hosts, from_vault } => {
-                let value = match &from_vault {
-                    Some(_) => String::new(),
-                    None => from_env_or_stdin(&key, &format!("value for {key}"))?,
-                };
-                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts, from_vault })?)?;
+            SecretCmd::Set { name, key, hosts } => {
+                let value = from_env_or_stdin(&key, &format!("value for {key}"))?;
+                let set = c.call(c.put_json(&format!("/api/f/{name}/secrets/{key}"), &PutSecret { value, hosts })?)?;
                 // names and hosts only — values never travel back
                 json_exit(j, &json!({ "name": name, "key": key, "set": true, "hosts": set["hosts"] }));
                 println!("secret {key} set on {name}, for {}", set["hosts"].as_array().into_iter().flatten().filter_map(Value::as_str).collect::<Vec<_>>().join(", "));
@@ -3534,9 +3527,10 @@ mod tests {
         for bad in ["../computers/x", "%2e%2e/delete/nostr", "..%2fdelete%2fnostr", "linear/x", "Linear"] {
             assert!(!parses(&["fragment", "vault", "set", bad, "--agent", "ada--k3x9"]), "vault set {bad}");
             assert!(!parses(&["fragment", "vault", "rm", bad]), "vault rm {bad}");
-            assert!(!parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", bad]), "--from-vault {bad}");
         }
-        assert!(parses(&["fragment", "vault", "rm", "linear"]) && parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", "telegram-bot"]), "a name of its form");
+        assert!(parses(&["fragment", "vault", "rm", "linear"]), "a name of its form");
+        // a person's secret is lent from their Vault, never moved out of it (FIN-615, PR 13)
+        assert!(!parses(&["fragment", "secret", "set", "bot", "TOKEN", "--to", "api.telegram.org", "--from-vault", "telegram-bot"]), "no --from-vault");
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--header", "x-key", "--query", "key"]), "one place");
         assert!(!parses(&["fragment", "vault", "set", "linear", "--agent", "ada--k3x9", "--format", "Bearer {}"]), "a format is a header's");
         assert!(parses(&["fragment", "vault", "list"]) && parses(&["fragment", "vault", "rm", "linear"]));

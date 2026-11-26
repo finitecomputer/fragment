@@ -157,30 +157,18 @@ their Vault and never move, and an app's own stay with the app).
   (`vault/handoff`), and keeps a receipt in the same turn, so a retry
   never puts back one they removed or moved since. A hand-off never
   takes the name of another agent's secret.
-- **A secret moves out once, whole**: its person may move one into a
-  fragment they edit as that fragment's secret (`fromVault` on `PUT
-  /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`).
-  Nothing of the platform's asks it since its apps fill from the Vault
-  (FIN-615, PR 13 removes it). The Vault claims the
-  value for that one destination as the move reads it; the fragment keeps
-  it, then the Vault removes it, for its claimant alone. So it has one
-  home and is never lost between: a move into anywhere else is refused
-  (409) while the claim stands, and the same move again finishes one cut
-  short. A claim has no clock; setting the secret again with a value, or
-  removing it, ends it (`fragment_core::vault::Claimed`); set again with
-  no value, the value claimed is the one held, and its claim stands. A Nostr key never moves.
-- **A move is its person's word, never a page's**: from the platform's
-  own pages (the shell's session) or their own key, never from a
-  fragment's page (`__secrets`, a site or frame session: 403 for any
-  name, before the Vault is asked). A page runs its authors' code with its
-  visitor's session, and an author may be the visitor's own agent, so a
-  page's call says nothing of what they want. The Telegram connector's
-  setup page asks Settings to lend its bot instead (`vault-lend`,
-  frame-messages.js): Settings binds only the bot it offered that frame,
-  to that connector, and the Vault keeps it.
-  A move keeps the secret within the hosts its Vault names
-  (`fragment_core::vault::within`, 400 otherwise, before it is claimed);
-  a parked one's move names them.
+- **It never moves out** (Paul, 2026-11-21, option B; FIN-615, PR 13): a
+  person's secret stays in their Vault, which lends it where it is used.
+  No route copies a value out of it (`fromVault` is gone: a body naming
+  it is 400).
+- **Its person's word, never a page's**: a lend is asked from the
+  platform's own pages (the shell's session on its own origin) or their
+  own key, never from a fragment's page. A page runs its authors' code
+  with its visitor's session, and an author may be the visitor's own
+  agent, so a page's call says nothing of what they want. The Telegram
+  connector's setup page asks Settings to lend its bot instead
+  (`vault-lend`, frame-messages.js): Settings lends only the bot it
+  offered that frame, to that connector, and the Vault keeps it.
 
 ## The Secrets Store
 

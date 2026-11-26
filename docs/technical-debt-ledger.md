@@ -1389,6 +1389,17 @@ unfinished design, not debt.
   (a Use it of its own in the setup dialog's note, or a lend token a tab
   carries), or every supported browser signs in the frame.
 
+## A Vault row keeps the move's claim column
+
+- **Shortcut:** the move of a secret out of a Vault (`fromVault`) is gone
+  (FIN-615, PR 13), but the Vault's `secrets.claim` column it used stays:
+  a locked schema step made it, and a row a move claimed before still
+  holds its claim. Nothing reads or writes it now.
+- **Risk:** none: an unread column. A rollback to a release before PR 13
+  reads a claim left by a move cut short, as it did then.
+- **Delete when:** no release before PR 13 can be rolled back to (one
+  production release after it): a schema step that drops the column.
+
 ## An app that needs its owner's key says so only in its run
 
 - **Shortcut:** an app whose `job.fetch` names `{{KEY}}` it holds none
