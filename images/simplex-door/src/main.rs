@@ -147,7 +147,8 @@ struct Kept {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopt: Option<run::Adoption>,
     /// The messages its computer's chat holds past the cursor it handed
-    /// over (`run::Saved::ahead`), each by its item and its sender's id:
+    /// over, as that chat answered at the handover (the bridge's
+    /// `Handle::ahead`), each by its item and its sender's id:
     /// never delivered here, as a message reaches a chat once, by its own
     /// id, however far back that cursor stands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

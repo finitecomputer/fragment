@@ -123,10 +123,6 @@ const TITLE_EVERY_MS: u64 = 10_000;
 const POSTS_MAX: usize = 64;
 /// Files a link waits to receive at once, at most.
 const FILES_MAX: usize = 32;
-/// Messages its chat holds past what was delivered (`Saved::ahead`) kept
-/// by their own ids, at most: past it a handover waits for its computer's
-/// restart, whose catch-up moves what was delivered on.
-const AHEAD_MAX: usize = 512;
 /// A file not received this long after its message is given up on: the
 /// message is posted with a note that it did not arrive. The core retries
 /// a server it cannot reach for good, and says nothing (a computer on
@@ -262,6 +258,36 @@ pub struct Handing {
     contact: ContactId,
     chat: Option<String>,
     staged: bool,
+    /// Its agent's fragment, and what its chat confirmed (`delivered`).
+    agent: String,
+    delivered: i64,
+}
+
+/// Messages past a handover's cursor its chat is asked of, at most: past
+/// it the handover waits for its computer's restart to move it on.
+const PAST_MAX: usize = 16 * crate::limits::HELD_IDS_MAX;
+
+/// Of `past` (each by its item and its sender's id), those its chat holds,
+/// by their post ids (`records::relayed_id`), asked `ask` in chunks of at
+/// most `HELD_IDS_MAX`: the chat's own word, never the bridge's copy, so a
+/// door given this link never relays one of them again (Codex's rounds on
+/// #1541). Any ask that fails, or answers what it was not asked, is no
+/// answer.
+async fn held_of<F, A>(agent: &str, past: Vec<(i64, String)>, mut ask: F) -> Result<Vec<(i64, String)>, String>
+where
+    F: FnMut(Vec<String>) -> A,
+    A: std::future::Future<Output = Result<Vec<String>, String>>,
+{
+    let mut held = vec![];
+    for chunk in past.chunks(crate::limits::HELD_IDS_MAX) {
+        let ids: Vec<String> = chunk.iter().map(|(_, shared)| records::relayed_id(agent, shared)).collect();
+        let said = ask(ids.clone()).await?;
+        if said.iter().any(|id| !ids.contains(id)) {
+            return Err("its chat answered of a post it was not asked of".into());
+        }
+        held.extend(chunk.iter().zip(&ids).filter(|(_, id)| said.contains(id)).map(|(m, _)| m.clone()));
+    }
+    Ok(held)
 }
 
 /// A link's door's first save: its bytes, their SHA-256 (hex) and its
@@ -612,7 +638,26 @@ impl Handle {
         let gone = || Refused::new(503, "this computer is stopping: try again in a moment");
         let (reply, answer) = oneshot::channel();
         self.tx.send(Msg::Handover { agent: agent.to_string(), ticket: Box::new(ticket), reply }).await.map_err(|_| gone())?;
-        let h = answer.await.map_err(|_| gone())??;
+        let mut h = answer.await.map_err(|_| gone())??;
+        // what its chat holds already of the messages past its cursor, by
+        // their senders' ids, asked of its chat itself: its door relays
+        // none of them again (`ahead`). Not answered whole, nothing is
+        // handed over, and its core runs again.
+        if !h.staged {
+            match self.ahead(&h).await {
+                Ok(ahead) => {
+                    let mut state: serde_json::Value = serde_json::from_slice(&h.state).expect("its state is JSON");
+                    state["ahead"] = serde_json::json!(ahead);
+                    h.state = serde_json::to_vec(&state).expect("a link serializes");
+                }
+                Err(why) => {
+                    let (reply, told) = oneshot::channel();
+                    self.tx.send(Msg::Packed { agent: agent.to_string(), failed: true, reply }).await.map_err(|_| gone())?;
+                    told.await.map_err(|_| gone())?;
+                    return Err(Refused::new(503, format!("its chat could not say which of its messages it holds ({why}): ask again")));
+                }
+            }
+        }
         let (chat, staged) = (h.chat.clone(), h.staged);
         let packed = tokio::task::spawn_blocking(move || pack_handover(&h)).await.unwrap_or_else(|e| Err(super::save::SaveError::Io(format!("its pack stopped: {e}"))));
         let (reply, told) = oneshot::channel();
@@ -620,6 +665,23 @@ impl Handle {
         told.await.map_err(|_| gone())?;
         let bytes = packed.map_err(save_refused)?;
         Ok(Packed { sha256: sha256_hex(&bytes), bytes, chat, staged })
+    }
+
+    /// Of the messages past a handover's cursor, those its chat holds.
+    async fn ahead(&self, h: &Handing) -> Result<Vec<(i64, String)>, String> {
+        let chat = h.chat.clone().ok_or("its link names no chat")?;
+        let (dir, contact, delivered) = (h.dir.clone(), h.contact, h.delivered);
+        let past = tokio::task::spawn_blocking(move || super::save::received_past(&dir, contact, delivered, PAST_MAX)).await.map_err(|e| e.to_string())?.map_err(|e| e.to_string())?;
+        if past.len() > PAST_MAX {
+            return Err(format!("more than {PAST_MAX} messages past its cursor: its computer's restart moves it on"));
+        }
+        let api = &self.api;
+        held_of(&h.agent, past, |ids| {
+            let chat = chat.clone();
+            let agent = h.agent.clone();
+            async move { api.held(&agent, &chat, records::CHAT, &ids).await.map_err(|e| e.to_string()) }
+        })
+        .await
     }
 
     /// The way back from `agent`'s door, by a back's ticket: its door's
@@ -925,14 +987,6 @@ pub struct Saved {
     /// stay with that door): sent once its core is next up, then let go.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried: Vec<String>,
-    /// The messages its chat holds past what was delivered, each by its
-    /// item and its sender's id: a post refused holds what was delivered
-    /// before it (`gap`) while later ones post, and a start reads back past
-    /// those. A handover hands them to its door, which never delivers one
-    /// of them again: a message reaches a chat once, by its own id, however
-    /// far back its cursor stands (Codex's rounds on #1541).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ahead: Vec<(i64, String)>,
 }
 
 /// A link handed over to its door; or its staged identity, never kept here
@@ -1244,8 +1298,6 @@ struct Slot {
     /// their file, queued, or being posted. What was delivered never moves
     /// past the oldest of them.
     outstanding: std::collections::BTreeSet<i64>,
-    /// Their senders' ids, by item, while outstanding.
-    posting: BTreeMap<i64, String>,
     /// The newest message acknowledged as posted.
     acked: i64,
     /// Its link's door key (`door.key`): what it relays is signed by it.
@@ -1542,8 +1594,6 @@ impl Manager {
                     Some("files are on their way")
                 } else if !s.outstanding.is_empty() || !s.pending.is_empty() {
                     Some("messages are on their way")
-                } else if s.saved.ahead.len() >= AHEAD_MAX {
-                    Some("more of its messages are posted past its cursor than it keeps by their ids (its computer's restart moves it on)")
                 } else {
                     None
                 };
@@ -1568,7 +1618,7 @@ impl Manager {
         let adopt = s.saved.moved.as_ref().and_then(|m| m.staged.clone());
         let (dir, contact, state) = match (&adopt, &s.saved.link.phase) {
             (Some(a), _) => (s.dir.join(stage::STAGED_DIR), a.owner, serde_json::json!({ "link": Link::default(), "adopt": a })),
-            (None, Phase::Linked { contact, .. }) => (s.dir.clone(), *contact, serde_json::json!({ "link": s.saved.link, "ahead": s.saved.ahead })),
+            (None, Phase::Linked { contact, .. }) => (s.dir.clone(), *contact, serde_json::json!({ "link": s.saved.link })),
             // a mark a release before this one left with nothing to pack:
             // its way back unmarks it
             // the platform's mark kept (`moved`), so its way back reaches here
@@ -1576,7 +1626,7 @@ impl Manager {
         };
         s.handing = true;
         crate::ev!("simplex.handing_over", { "agent": agent, "again": again.is_some(), "staged": adopt.is_some() });
-        Ok(Handing { dir, state: serde_json::to_vec(&state).expect("a link serializes"), contact, chat: s.saved.chat.clone(), staged: adopt.is_some() })
+        Ok(Handing { dir, state: serde_json::to_vec(&state).expect("a link serializes"), contact, chat: s.saved.chat.clone(), staged: adopt.is_some(), agent: agent.to_string(), delivered: s.saved.link.delivered })
     }
 
     /// A staged chat's read, as its adoption's (`maintenance_read`), its
@@ -1662,7 +1712,6 @@ impl Manager {
                 link.forced = true;
             }
             s.saved.link = link;
-            s.saved.ahead.clear();
             s.saved.moved = None;
             // what its door took and had not sent goes on from here, in
             // order, once its core is up (`up`); placed again (a way back
@@ -1987,7 +2036,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] });
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
@@ -2026,7 +2075,6 @@ impl Manager {
                 poster: None,
                 gap: false,
                 outstanding: Default::default(),
-                posting: Default::default(),
                 acked: 0,
                 door,
                 session: None,
@@ -2775,18 +2823,8 @@ impl Manager {
     fn delivered(&mut self, f: &str, item: i64, ok: bool) {
         let Some(s) = self.slots.get_mut(f) else { return };
         s.outstanding.remove(&item);
-        let id = s.posting.remove(&item);
         if !ok {
             s.gap = true;
-        }
-        // posted: kept by its own id while what was delivered stands before it
-        if let (true, Some(id)) = (ok, id) {
-            if item > s.saved.link.delivered && s.saved.ahead.len() < AHEAD_MAX && !s.saved.ahead.iter().any(|(_, a)| *a == id) {
-                s.saved.ahead.push((item, id));
-                if let Err(e) = store(&s.dir, &s.saved) {
-                    crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
-                }
-            }
         }
         if s.gap || item <= 0 {
             return;
@@ -2794,17 +2832,6 @@ impl Manager {
         s.acked = s.acked.max(item);
         let upto = s.outstanding.first().map_or(s.acked, |oldest| s.acked.min(oldest - 1));
         self.apply(f, Input::Delivered(upto));
-        // what was delivered passed them: a start reads back no further
-        if let Some(s) = self.slots.get_mut(f) {
-            let before = s.saved.ahead.len();
-            let delivered = s.saved.link.delivered;
-            s.saved.ahead.retain(|(i, _)| *i > delivered);
-            if s.saved.ahead.len() != before {
-                if let Err(e) = store(&s.dir, &s.saved) {
-                    crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
-                }
-            }
-        }
     }
 
     /// A message forwarded that will not be posted this life (dropped past
@@ -2812,7 +2839,6 @@ impl Manager {
     fn dropped(&mut self, f: &str, item: i64) {
         if let Some(s) = self.slots.get_mut(f) {
             s.outstanding.remove(&item);
-            s.posting.remove(&item);
             s.gap = true;
         }
     }
@@ -2945,10 +2971,6 @@ impl Manager {
         if s.up && s.core.is_some() {
             actions.extend(s.saved.link.react(&s.working));
         }
-        // a link let go holds no messages ahead of its cursor
-        if s.saved.link.phase == Phase::Off {
-            s.saved.ahead.clear();
-        }
         // a link let go sends nothing more: its uploads' copies go with it
         if s.saved.link.phase == Phase::Off && !s.saved.sending.is_empty() {
             for sending in std::mem::take(&mut s.saved.sending).into_values() {
@@ -3020,7 +3042,6 @@ impl Manager {
                 crate::ev!("simplex.forward", { "agent": f, "kind": i.kind, "bytes": i.text.len(), "file": i.file.is_some() });
                 if i.item > 0 {
                     s.outstanding.insert(i.item);
-                    s.posting.insert(i.item, i.id.clone());
                 }
                 self.forward(f, i);
             }
@@ -4259,7 +4280,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -4275,7 +4296,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![], ahead: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![] };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
@@ -4349,7 +4370,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
             name: None,
             named_at: None,
             naming: false,
@@ -4375,7 +4396,6 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
-            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,
@@ -4704,45 +4724,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Goal: a message reaches a chat once, by its own id, however far back
-    /// its cursor stands (Codex's rounds on #1541). A post refused (41),
-    /// two posted after it: what was delivered stays at 40, and its chat
-    /// holds 42 and 43, which its handover hands its door by their ids
-    /// (`ahead`). Its next life posts 41, what was delivered passes them,
-    /// and none is kept; an unlink keeps none either.
+    /// Goal: a handover names what its chat holds past its cursor by asking
+    /// its chat, never by the bridge's own record of its posts (Codex's
+    /// rounds on #1541). Valid: 42 posted, its answer lost so the bridge
+    /// recorded nothing, and 43: its chat holds both, so its door relays
+    /// neither; 41, never posted, it relays once. 600 asked in chunks of
+    /// `HELD_IDS_MAX`, none cut. Invalid: an ask that fails, or an answer
+    /// of a post not asked of: no answer, so no handover.
     #[tokio::test]
-    async fn a_handover_names_what_its_chat_holds_past_its_cursor() {
-        let dir = std::env::temp_dir().join(format!("simplex-ahead-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let key = agent_key(&dir.join("key"));
-        let f = "juniper--k3x9";
-        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
-        let link_dir = m.slots[f].dir.clone();
-        core_dbs(&link_dir, 3);
-        let s = m.slots.get_mut(f).expect("its slot");
-        s.saved.link.delivered = 40;
-        for item in [41, 42, 43] {
-            s.outstanding.insert(item);
-            s.posting.insert(item, format!("m{item}"));
-        }
-        m.delivered(f, 41, false);
-        m.delivered(f, 42, true);
-        m.delivered(f, 43, true);
-        let ahead = vec![(42, "m42".to_string()), (43, "m43".to_string())];
-        assert_eq!((m.slots[f].saved.link.delivered, &m.slots[f].saved.ahead), (40, &ahead));
-        assert_eq!(load(&link_dir, &agent()).expect("its file").ahead, ahead, "on disk");
-        let h = m.handover(f, &signed("handover", &"31".repeat(16))).await.expect("handed over");
-        let state: serde_json::Value = serde_json::from_slice(&h.state).expect("its state");
-        assert_eq!(state["ahead"], serde_json::json!([[42, "m42"], [43, "m43"]]), "handed to its door by their ids");
-        // a next life: no gap, 41 posted at last, what was delivered passes them
-        let s = m.slots.get_mut(f).expect("its slot");
-        (s.saved.moved, s.gap, s.acked) = (None, false, 43);
-        s.outstanding.insert(41);
-        s.posting.insert(41, "m41".into());
-        m.delivered(f, 41, true);
-        assert_eq!(m.slots[f].saved.link.delivered, 43);
-        assert!(m.slots[f].saved.ahead.is_empty(), "behind what was delivered: kept no more");
-        let _ = std::fs::remove_dir_all(&dir);
+    async fn a_handover_asks_its_chat_what_it_holds() {
+        let agent = "juniper--k3x9";
+        let posted: BTreeSet<String> = ["s42", "s43"].iter().map(|s| records::relayed_id(agent, s)).collect();
+        let chat = |ids: Vec<String>| {
+            let held: Vec<String> = ids.into_iter().filter(|id| posted.contains(id)).collect();
+            async move { Ok(held) }
+        };
+        let past = vec![(41, "s41".to_string()), (42, "s42".into()), (43, "s43".into())];
+        assert_eq!(held_of(agent, past.clone(), chat).await.expect("answered"), vec![(42, "s42".to_string()), (43, "s43".into())]);
+        let many: Vec<(i64, String)> = (1..=600).map(|i| (i, format!("s{i}"))).collect();
+        let mut asks = vec![];
+        let all = held_of(agent, many, |ids| {
+            asks.push(ids.len());
+            async move { Ok(ids) }
+        })
+        .await
+        .expect("answered");
+        assert_eq!((all.len(), asks), (600, vec![256, 256, 88]), "in chunks, none cut");
+        assert!(held_of(agent, past.clone(), |_| async { Err("refused".to_string()) }).await.is_err(), "an ask that fails");
+        assert!(held_of(agent, past, |_| async { Ok(vec!["sx:not-asked".to_string()]) }).await.is_err(), "an answer of a post not asked of");
     }
 
     /// Goal (D4): the way back. Invalid: a link never handed over
@@ -5070,7 +5079,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -5100,7 +5109,6 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
-            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,
@@ -5233,7 +5241,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
             name: None,
             named_at: None,
             naming: false,
@@ -5259,7 +5267,6 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
-            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,

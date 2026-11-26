@@ -1303,6 +1303,11 @@ impl FragmentCell {
                 let channel = channel.to_string();
                 self.post_api(&caller, &channel, body).await
             }
+            (Method::Post, ["api", "channels", channel, "held"]) => {
+                let body = body_json(&mut req).await?;
+                let channel = channel.to_string();
+                self.held_api(&caller, &channel, body)
+            }
             (Method::Put, ["api", "channels", channel, "draft"]) => {
                 let body = body_json(&mut req).await?;
                 let channel = channel.to_string();

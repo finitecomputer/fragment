@@ -225,14 +225,16 @@ mod tests {
     /// workspace of its own), takes a message's files as the platform
     /// bounds them: its `ATTACHMENT_MAX_BYTES` is proto's `BLOB_MAX_BYTES`
     /// (a computer's files never meet a zone's limit) and its
-    /// `ATTACHMENTS_MAX` is `FILES_PER_MESSAGE`. Its `HERMES_MEDIA_MAX_BYTES`
-    /// is Hermes' own, and no platform limit. Method: its file, read and
-    /// evaluated.
+    /// `ATTACHMENTS_MAX` is `FILES_PER_MESSAGE`; it asks a chat of at most
+    /// `HELD_IDS_MAX` post ids at once, as the platform answers. Its
+    /// `HERMES_MEDIA_MAX_BYTES` is Hermes' own, and no platform limit.
+    /// Method: its file, read and evaluated.
     #[test]
     fn the_bridge_takes_files_as_the_platform_bounds_them() {
         let bridge = std::fs::read_to_string(crate::devstack::repo_root().join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENT_MAX_BYTES", ": u64 = "), fragment_proto::limits::BLOB_MAX_BYTES as i64);
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENTS_MAX", ": usize = "), i64::from(fragment_proto::limits::FILES_PER_MESSAGE));
+        assert_eq!(constant(&bridge, "pub const", "HELD_IDS_MAX", ": usize = "), fragment_proto::limits::HELD_IDS_MAX as i64);
     }
 
     /// Goal: a SimpleX door carries a reply's files as the platform bounds a

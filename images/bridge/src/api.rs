@@ -767,6 +767,16 @@ impl Api {
         Ok(Posted { replayed: v["replayed"].as_bool().unwrap_or(false), seq: v["record"]["seq"].as_u64().filter(|s| *s > 0) })
     }
 
+    /// `POST /api/f/{name}/channels/{channel}/held {ids}` → `{held}`: which
+    /// of `ids` (at most `limits::HELD_IDS_MAX`) the channel holds as this
+    /// agent's own posts.
+    pub async fn held(&self, agent: &str, fragment: &str, channel: &str, ids: &[String]) -> Result<Vec<String>, ApiError> {
+        let path = format!("/api/f/{}/channels/{}/held", name(fragment)?, encode(channel));
+        let v: Value = self.json(Method::POST, &path, Some(agent), Some(json!({ "ids": ids }))).await?;
+        let held = v["held"].as_array().ok_or_else(|| ApiError::Decode(format!("{path}: no held")))?;
+        held.iter().map(|id| id.as_str().map(str::to_string).ok_or_else(|| ApiError::Decode(format!("{path}: a held id is no string")))).collect()
+    }
+
     /// `PUT /api/f/{name}/channels/{channel}/draft {turn, text}`.
     pub async fn draft(&self, agent: &str, fragment: &str, channel: &str, turn: &str, text: Option<&str>) -> Result<(), ApiError> {
         let _: Value = self.json(Method::PUT, &format!("/api/f/{}/channels/{}/draft", name(fragment)?, encode(channel)), Some(agent), Some(json!({ "turn": turn, "text": text }))).await?;

@@ -272,6 +272,30 @@ pub fn staged_contact(dir: &Path, contact: i64) -> Result<bool, SaveError> {
     Ok(n == 1)
 }
 
+/// The messages its core received from `contact` past item `after` (what
+/// its chat confirmed), oldest first, each by its item and its sender's id
+/// as the core's JSON names it (`itemSharedMsgId`: the id it stores, in
+/// standard base64): read from a stopped core's chat database in `dir`, at
+/// most `max` and one more, so a caller sees it went past.
+pub fn received_past(dir: &Path, contact: i64, after: i64, max: usize) -> Result<Vec<(i64, String)>, SaveError> {
+    use base64::Engine as _;
+    use rusqlite::types::ValueRef;
+    let c = Connection::open(dir.join(DBS[0])).map_err(sqlite)?;
+    let mut q = c
+        .prepare("SELECT chat_item_id, shared_msg_id FROM chat_items WHERE contact_id = ?1 AND item_sent = 0 AND chat_item_id > ?2 AND shared_msg_id IS NOT NULL ORDER BY chat_item_id LIMIT ?3")
+        .map_err(sqlite)?;
+    let rows = q
+        .query_map(rusqlite::params![contact, after, max as i64 + 1], |r| {
+            let id = match r.get_ref(1)? {
+                ValueRef::Blob(b) | ValueRef::Text(b) => b.to_vec(),
+                _ => vec![],
+            };
+            Ok((r.get::<_, i64>(0)?, base64::engine::general_purpose::STANDARD.encode(id)))
+        })
+        .map_err(sqlite)?;
+    rows.map(|r| r.map_err(sqlite)).collect()
+}
+
 /// What SQLite said of a staged database: this container's own failure
 /// (its disk full or failing, a file it could not open or lock, its
 /// memory: `Io`, never held against the save), or else the save's (no
@@ -312,6 +336,27 @@ pub fn place(dir: &Path) -> Result<(), SaveError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: a stopped core's messages past its cursor, from its contact
+    /// alone, received alone, by their senders' ids as its JSON names them
+    /// (standard base64 of the id stored), oldest first, at most `max` and
+    /// one more. Method: a chat database of its tables' columns.
+    #[test]
+    fn what_a_core_received_past_its_cursor_reads() {
+        let d = std::env::temp_dir().join(format!("save-past-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let c = Connection::open(d.join(DBS[0])).unwrap();
+        c.execute_batch("CREATE TABLE chat_items (chat_item_id INTEGER PRIMARY KEY, contact_id INTEGER, item_sent INTEGER, shared_msg_id BLOB);").unwrap();
+        for (id, contact, sent, shared) in [(40, 3, 0, "qPWF0qhirOeixjgu"), (41, 3, 0, "nQNYc3pBg4jmiYFy"), (42, 3, 1, "kYJfQnlsuwOuM4Z0"), (43, 4, 0, "FPE9+iqQrsUk42re"), (44, 3, 0, "E/VvTgrNBEB0kqgB")] {
+            c.execute("INSERT INTO chat_items VALUES (?1, ?2, ?3, ?4)", rusqlite::params![id, contact, sent, shared.as_bytes()]).unwrap();
+        }
+        drop(c);
+        // as the core's own JSON names them (images/bridge's fixtures)
+        assert_eq!(received_past(&d, 3, 40, 10).unwrap(), vec![(41, "blFOWWMzcEJnNGptaVlGeQ==".to_string()), (44, "RS9WdlRnck5CRUIwa3FnQg==".into())]);
+        assert_eq!(received_past(&d, 3, 0, 1).unwrap().len(), 2, "one past its bound, so it is seen");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn dir(name: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("door-save-{name}-{}", std::process::id()));

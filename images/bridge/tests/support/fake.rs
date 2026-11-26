@@ -126,6 +126,8 @@ pub struct World {
     pub refused_closures: u32,
     /// Fragments whose `GET …/channels` answers 500, every time.
     pub broken: Vec<String>,
+    /// The next this many asks of a channel's `held` answer 503.
+    pub fail_held: u32,
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
@@ -857,6 +859,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let s = json!({ "id": id, "principal": me, "channel": channel, "wake": true });
             w.fragments.get_mut(&fragment).unwrap().subscriptions.push(s.clone());
             answer(StatusCode::OK, s)
+        }
+        (Method::POST, ["channels", _, "held"]) if w.fail_held > 0 => {
+            w.fail_held -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
+        }
+        // which of the ids asked it holds as posts (the platform answers of
+        // the asker's own alone; the fake's posts are its agents')
+        (Method::POST, ["channels", channel, "held"]) => {
+            let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let held: Vec<Value> = v["ids"].as_array().into_iter().flatten().filter(|id| id.as_str().is_some_and(|id| c.ids.contains_key(id))).cloned().collect();
+            answer(StatusCode::OK, json!({ "held": held }))
         }
         (Method::GET, ["channels", _]) if w.fail_history_reads > 0 && query(&q, "limit").first().is_some_and(|l| *l == "100") => {
             w.fail_history_reads -= 1;

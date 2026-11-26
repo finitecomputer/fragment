@@ -449,6 +449,17 @@ fn received_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
     q.query_map([], |r| r.get::<_, String>(0)).expect("read").map(|t| t.expect("a text")).collect()
 }
 
+/// Its senders' ids of what the core's chat database in a save holds as
+/// received, as its handover reads them (`save::received_past`).
+fn sent_ids_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
+    let dir = scratch.join("save-sent");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("made");
+    std::fs::write(dir.join("sx_chat.db"), file_of(packed, "sx_chat.db")).expect("written");
+    let contact: i64 = rusqlite::Connection::open(dir.join("sx_chat.db")).expect("opened").query_row("SELECT max(contact_id) FROM chat_items WHERE item_sent = 0", [], |r| r.get(0)).expect("a contact");
+    fragment_bridge::simplex::save::received_past(&dir, contact, 0, 100).expect("read").into_iter().map(|(_, id)| id).collect()
+}
+
 fn build_image() {
     let have = docker(&["image", "inspect", "--format", "{{.Id}}", DOOR_IMAGE]).is_ok();
     if have && std::env::var("FRAGMENT_DOCKER_SKIP_BUILD").is_ok() {
@@ -955,6 +966,25 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the move")).await;
     assert_eq!(relayed_on(&fake, &chat).len(), 1);
 
+    // its chat unasked (its `held` answering 503): nothing handed over,
+    // and its core runs again, its link at one end (Codex's rounds on #1541)
+    fake.with(|w| w.fail_held = 1);
+    let unasked = lab.dir.join("unasked.sxd");
+    let t0 = Instant::now();
+    loop {
+        let (code, body, _) = hand_over(&c, &fake.ticket("juniper", "handover"), &unasked);
+        if code == 503 {
+            break;
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code} {}", String::from_utf8_lossy(&body));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let t0 = Instant::now();
+    while c.cores() != 1 {
+        assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
     // handed over: once its posts are acknowledged (busy until then)
     fake.with(|w| w.computer["simplexMoved"] = json!(["juniper--k3x9"]));
     let ticket = fake.ticket("juniper", "handover");
@@ -970,6 +1000,11 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     };
     assert_eq!(sha256_hex(&bytes), sha, "its answer names its save's SHA-256");
     assert_eq!(kept_of(&bytes)["link"]["phase"], "linked");
+    // its chat database names each message's sender as its posts did: the
+    // post id a handover asks of (`save::received_past`) is the one posted
+    let ids = sent_ids_in(&bytes, &lab.dir);
+    let posted: Vec<String> = fake.with(|w| w.fragments[&chat].channels["chat"].ids.keys().cloned().collect());
+    assert!(!ids.is_empty() && ids.iter().all(|id| posted.contains(&fragment_bridge::records::relayed_id("juniper--k3x9", id))), "{ids:?} posted as {posted:?}");
     let again = lab.dir.join("again.sxd");
     let (code, _, _) = hand_over(&c, &ticket, &again);
     assert_eq!(code, 409, "another handover's ticket, once moved");
