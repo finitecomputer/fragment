@@ -1,197 +1,122 @@
-// backups.mjs: a computer's backups, checked end to end (FIN-784).
-// - A backup is kept only once R2's copy hashes to its record: one damaged
-//   on its way out is deleted and backed up again, a bounded number of
-//   times.
-// - A restore whose bytes came damaged is asked again once R2's copy is not
-//   found bad, a bounded number of times, and never condemns a whole copy:
-//   a save is unusable only when two reads of R2's copy agree it is not its
-//   record.
+// backups.mjs: a computer's restores, checked end to end (FIN-784).
+// - A restore whose bytes came damaged is asked again, a bounded number of
+//   times, and never condemns a whole copy: a save is unusable only when
+//   two reads of R2's copy agree it is not its record.
+// - R2's copy is read beside the try after a damaged one, never before it:
+//   a try never waits for the check, and the check's verdict is awaited
+//   only once that try comes damaged too, or runs out of time.
 // - A backup's ranged read that storage failed (a 5xx) is asked again after
 //   a growing pause, a bounded number of times; any other answer is the
 //   answer at once.
-// Valid (whole at once), invalid (damaged, then whole; a copy really bad),
-// the bounds (each gives up), and replay (a read damaged on its own way, or
-// a second call, condemns nothing).
+// Valid (restored at once), invalid (damaged, then restored; a copy really
+// bad), the bounds (each gives up), and replay (a read damaged on its own
+// way, a check that fails, a second start).
+// (A save's records are checked by the Rust side: fragment_core's
+// computer::checks, and the e2e's computer-damage.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, SAVE_TRIES, backupChecked, readAgain, restoreChecked } from "./backups.mjs";
+import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, readAgain, restoreChecked } from "./backups.mjs";
 
 const SHA = "a".repeat(64);
 const OTHER = "b".repeat(64);
-const record = (n) => ({ id: `id-${n}`, dir: "/data", size: 100, sha256: SHA, format: "directory-backup/v1" });
+const r = { id: "id-1", dir: "/data", size: 100, sha256: SHA, format: "directory-backup/v1" };
+const whole = { size: r.size, sha256: r.sha256 };
+const bad = { size: 100, sha256: OTHER };
+const DAMAGED = "BACKUP_INTEGRITY: the backup is corrupt: Data corruption detected";
 
-// A save's backups of one directory, whose copies in R2 hold `copies` in
-// turn (null: gone; `{size, sha256}` otherwise; "whole": its record's).
-function saves(copies) {
-  const seen = { backups: 0, read: [], forgot: [], again: [] };
-  const run = () =>
-    backupChecked({
-      backup: async () => record(++seen.backups),
-      stored: async (r) => {
-        seen.read.push(r.id);
-        const copy = copies[Math.min(seen.read.length - 1, copies.length - 1)];
-        return copy === "whole" ? { size: r.size, sha256: r.sha256 } : copy;
-      },
-      forget: async (r) => void seen.forgot.push(r.id),
-      again: (tried, why) => seen.again.push([tried, why]),
-    });
-  return { seen, run };
-}
-
-test("a backup whose copy in R2 is its record is kept, read once", async () => {
-  const { seen, run } = saves(["whole"]);
-  assert.deepEqual(await run(), record(1));
-  assert.deepEqual([seen.backups, seen.read, seen.forgot, seen.again], [1, ["id-1"], [], []]);
-});
-
-test("a backup that came out damaged is deleted and backed up again, and the whole one kept", async () => {
-  const { seen, run } = saves([{ size: 100, sha256: OTHER }, "whole"]);
-  assert.deepEqual(await run(), record(2), "the second backup's record, a fresh archive");
-  assert.deepEqual([seen.backups, seen.forgot], [2, ["id-1"]]);
-  assert.equal(seen.again.length, 1);
-  assert.match(seen.again[0][1], /R2's copy holds 100 bytes of SHA-256 b{64}, not its record's 100 bytes of SHA-256 a{64}/);
-});
-
-test("a backup whose copy is gone or another size is backed up again too", async () => {
-  for (const copy of [null, { size: 99, sha256: SHA }]) {
-    const { seen, run } = saves([copy, "whole"]);
-    assert.deepEqual(await run(), record(2), JSON.stringify(copy));
-    assert.deepEqual(seen.forgot, ["id-1"]);
-  }
-});
-
-test("a backup that keeps coming out damaged is tried a bounded number of times, each copy deleted, and fails", async () => {
-  const { seen, run } = saves([{ size: 100, sha256: OTHER }]);
-  await assert.rejects(run(), new RegExp(`the backup of /data came out damaged ${SAVE_TRIES} times: R2's copy holds`));
-  assert.ok(SAVE_TRIES >= 3, "damage in transit is tried again at least twice");
-  assert.equal(seen.backups, SAVE_TRIES);
-  assert.deepEqual(seen.forgot, Array.from({ length: SAVE_TRIES }, (_, i) => `id-${i + 1}`), "no damaged copy is left as a record");
-  assert.equal(seen.again.length, SAVE_TRIES - 1);
-});
-
-test("a backup whose copy cannot be read (storage failed the read, or the save's time ran out) is kept unchecked, as before", async () => {
-  const seen = { forgot: [], unchecked: [] };
-  const unread = await backupChecked({
-    backup: async () => record(1),
-    stored: async () => {
-      throw new Error("the check of record id-1: no answer within 10 ms");
-    },
-    forget: async (r) => void seen.forgot.push(r.id),
-    unchecked: (r, why) => seen.unchecked.push([r.id, why]),
-  });
-  assert.deepEqual(unread, record(1), "a save that fits today's bounds is never failed for want of its check");
-  assert.deepEqual(seen, { forgot: [], unchecked: [["id-1", "the check of record id-1: no answer within 10 ms"]] });
-});
-
-test("a backup that fails is not tried again here, nor its copy read: its save fails as before", async () => {
-  let read = 0;
-  const failing = backupChecked({
-    backup: async () => {
-      throw new Error("BACKUP_TRANSFER: a part upload failed");
-    },
-    stored: async () => void read++,
-    forget: async () => {},
-  });
-  await assert.rejects(failing, /BACKUP_TRANSFER/);
-  assert.equal(read, 0);
-});
-
-// A start's restores of one record: `tries` answers each restore in turn
-// (null: in place; a string: why its bytes came damaged), and `copies` what
-// each read of R2's copy holds, as above.
+// A start's restores of `r`: `tries` answers each try in turn (null: in
+// place; a string: why its bytes came damaged; an Error: thrown), and
+// `copies` each read of R2's copy (an Error: thrown; "never": a read that
+// never answers).
 function restores(tries, copies) {
   const seen = { restores: 0, reads: 0, again: [] };
-  const r = record(1);
   const run = () =>
     restoreChecked({
       record: r,
-      restore: async () => tries[Math.min(seen.restores++, tries.length - 1)],
-      stored: async () => {
+      restore: async () => {
+        const t = tries[Math.min(seen.restores++, tries.length - 1)];
+        if (t instanceof Error) throw t;
+        return t;
+      },
+      stored: () => {
         const copy = copies[Math.min(seen.reads++, copies.length - 1)];
-        return copy === "whole" ? { size: r.size, sha256: r.sha256 } : copy;
+        if (copy === "never") return new Promise(() => {});
+        return copy instanceof Error ? Promise.reject(copy) : Promise.resolve(copy);
       },
       again: (tried, why) => seen.again.push([tried, why]),
     });
   return { seen, run };
 }
 
-const DAMAGED = "BACKUP_INTEGRITY: the backup is corrupt: Unknown frame descriptor";
-
 test("a restore that is in place reads nothing more: nothing is added to a wake", async () => {
-  const { seen, run } = restores([null], ["whole"]);
+  const { seen, run } = restores([null], [whole]);
   assert.equal(await run(), null);
   assert.deepEqual([seen.restores, seen.reads], [1, 0]);
 });
 
-test("a restore whose bytes came damaged, R2's copy whole, is asked again and restored, never unusable", async () => {
-  const { seen, run } = restores([DAMAGED, null], ["whole"]);
+test("a restore whose bytes came damaged is asked again at once, never waiting for R2's copy, and restored", async () => {
+  // its check never answers: the second try is not held for it
+  const { seen, run } = restores([DAMAGED, null], ["never"]);
   assert.equal(await run(), null);
   assert.deepEqual([seen.restores, seen.reads, seen.again], [2, 1, [[1, DAMAGED]]]);
 });
 
-test("a save whose copy in R2 is not its record, on two reads that agree, is unusable at once", async () => {
-  const { seen, run } = restores([DAMAGED, null], [{ size: 100, sha256: OTHER }]);
+test("a save whose copy in R2 is not its record, on two reads that agree, is unusable once the try beside them comes damaged too", async () => {
+  const { seen, run } = restores([DAMAGED], [bad]);
   const answer = await run();
-  assert.match(answer.unusable, /^BACKUP_INTEGRITY: the backup is corrupt: Unknown frame descriptor; R2's copy holds 100 bytes of SHA-256 b{64}, not its record's/);
-  assert.deepEqual([seen.restores, seen.reads], [1, 2], "not asked again: it never will restore");
+  assert.match(answer.unusable, /^BACKUP_INTEGRITY: the backup is corrupt: Data corruption detected; R2's copy holds 100 bytes of SHA-256 b{64}, not its record's 100 bytes of SHA-256 a{64}$/);
+  assert.deepEqual([seen.restores, seen.reads], [2, 2], "not asked a third time: it never will restore");
   const gone = restores([DAMAGED], [null]);
   assert.match((await gone.run()).unusable, /R2's copy is gone/);
 });
 
+test("a try cut off by its time still hears a copy found bad beside it; any other failure is thrown at once", async () => {
+  const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
+  const late = restores([DAMAGED, overdue], [bad]);
+  assert.match((await late.run()).unusable, /^the restore of \/data: no answer within 1 ms; R2's copy holds 100 bytes/);
+  // a failure that is not its time's is not held for a check that never answers
+  const transfer = restores([DAMAGED, new Error("BACKUP_TRANSFER: gateway connection failed")], ["never"]);
+  await assert.rejects(transfer.run(), /BACKUP_TRANSFER/);
+  const whole_late = restores([DAMAGED, overdue], [whole]);
+  await assert.rejects(whole_late.run(), /no answer within 1 ms/);
+});
+
 test("a read of R2's copy damaged on its own way condemns nothing: the restore is asked again", async () => {
   // the first read disagrees with its record, the second with the first
-  for (const copies of [[{ size: 100, sha256: OTHER }, "whole"], [{ size: 100, sha256: OTHER }, { size: 100, sha256: "c".repeat(64) }], [{ size: 100, sha256: OTHER }, null], [null, { size: 100, sha256: OTHER }]]) {
-    const { seen, run } = restores([DAMAGED, null], copies);
+  for (const copies of [[bad, whole], [bad, { size: 100, sha256: "c".repeat(64) }], [bad, null], [null, bad]]) {
+    const { seen, run } = restores([DAMAGED, DAMAGED, null], copies);
     assert.equal(await run(), null, JSON.stringify(copies));
-    assert.deepEqual([seen.restores, seen.reads], [2, 2]);
+    assert.deepEqual([seen.restores, seen.reads], [3, 2], "read once a start, while the copy was not found bad");
   }
 });
 
-test("a check of R2's copy that fails condemns nothing: the restore is asked again, and the copy read again after", async () => {
-  // its read throws (storage failed it, or the start's time ran out), then the next try restores
-  const flaky = () => {
-    let reads = 0;
-    return async () => {
-      if (reads++ === 0) throw new Error("R2 internal error, please try again (10001)");
-      return { size: 100, sha256: OTHER };
-    };
-  };
-  let tries = 0;
-  const again = [];
-  const r = record(1);
-  const restored = await restoreChecked({ record: r, restore: async () => (tries++ === 0 ? DAMAGED : null), stored: flaky(), again: (t, why) => again.push([t, why]) });
-  assert.equal(restored, null);
-  assert.equal(tries, 2);
-  assert.match(again[0][1], /^BACKUP_INTEGRITY: .*; R2's copy unread: R2 internal error/);
-  // unread at the first try, read at the second, bad on two reads that agree: unusable then
-  tries = 0;
-  const bad = await restoreChecked({ record: r, restore: async () => (tries++, DAMAGED), stored: flaky() });
-  assert.match(bad.unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
-  assert.equal(tries, 2);
+test("a check of R2's copy that fails condemns nothing, and is made again beside the next try", async () => {
+  const fails = new Error("R2 internal error, please try again (10001)");
+  const { seen, run } = restores([DAMAGED, DAMAGED, null], [fails, whole]);
+  assert.equal(await run(), null);
+  assert.equal(seen.reads, 2);
+  assert.match(seen.again[1][1], /^BACKUP_INTEGRITY: .*; R2's copy unread: R2 internal error/);
+  // unread beside the second try, read bad beside the third: unusable then
+  const later = restores([DAMAGED], [fails, bad]);
+  assert.match((await later.run()).unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
+  assert.equal(later.seen.restores, 3);
 });
 
 test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {
-  const { seen, run } = restores([DAMAGED], ["whole"]);
+  const { seen, run } = restores([DAMAGED], [whole]);
   await assert.rejects(run(), new RegExp(`the restore of /data came in damaged ${RESTORE_TRIES} times, R2's copy not found bad: BACKUP_INTEGRITY`));
   assert.ok(RESTORE_TRIES >= 3, "damage in transit is asked again at least twice");
   assert.equal(seen.restores, RESTORE_TRIES);
-  assert.equal(seen.reads, 1, "R2's copy is read once a restore, not once a try");
+  assert.equal(seen.reads, 1, "R2's copy is read once a start once found whole, not once a try");
   // the next start asks afresh, and restores
-  const next = restores([null], ["whole"]);
+  const next = restores([null], [whole]);
   assert.equal(await next.run(), null);
 });
 
 test("a failure that is not damage is thrown at once, untried again and nothing read", async () => {
-  let reads = 0;
-  const failing = restoreChecked({
-    record: record(1),
-    restore: async () => {
-      throw new Error("BACKUP_TRANSFER: gateway connection failed");
-    },
-    stored: async () => void reads++,
-  });
-  await assert.rejects(failing, /BACKUP_TRANSFER/);
-  assert.equal(reads, 0);
+  const { seen, run } = restores([new Error("BACKUP_TRANSFER: gateway connection failed")], [whole]);
+  await assert.rejects(run(), /BACKUP_TRANSFER/);
+  assert.deepEqual([seen.restores, seen.reads], [1, 0]);
 });
 
 // A read answering `statuses` in turn, counting its calls and the bodies

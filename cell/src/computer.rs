@@ -55,7 +55,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, AfterCheck, Checked, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -2311,28 +2311,22 @@ impl ComputerCell {
         }
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
+        // whether its home's unhold let its guest go (an awake save's)
+        let mut let_go = false;
         for dir in SAVED_DIRS {
-            // the guest's own state (its home) leaves its work out (a record
-            // of its own) and what it copied or named; its work leaves out
-            // only the caches it named in it
-            let (name, exclude) = match dir {
-                "/data" => ("home", std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
-                // what it named in its work (its agents' caches), relative to it
-                _ => ("work", fragment_core::computer::work_left_out(&left_out)),
-            };
-            let exclude = js::to_js(&json!(exclude));
             let t = js::now_ms();
-            let left = JsValue::from_f64((until - t).max(1) as f64);
-            match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
+            match self.backup_dir(&g, dir, &left_out, until).await {
                 Ok(record) => {
-                    took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
+                    took[if dir == "/data" { "home" } else { "work" }] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
                     // its home is in, the copies its guest made under the
                     // hold with it: an awake save lets go of its hold before
                     // it takes its work's (`Lifecycle`'s `HomeSaved`)
                     // (its time, at most `UNMARK_EXEC_MS`, is not the backups')
                     if dir == "/data" {
-                        until += self.home_saved(generation, seq).await;
+                        let (ms, went) = self.home_saved(generation, seq).await;
+                        until += ms;
+                        let_go = went;
                     }
                 }
                 Err(e) => {
@@ -2343,6 +2337,53 @@ impl ComputerCell {
                     }
                     return Event::SaveFailed { generation, seq, why: e.message };
                 }
+            }
+        }
+        // each record checked against R2's own copy (FIN-784), once all are
+        // taken, within what their backups left: a check never takes the
+        // time a later backup needs. One that came out damaged is let go of
+        // (this save's forget pass deletes it) and backed up again while its
+        // guest is held as it was then; else the save fails, tried again
+        for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
+            // bounded: at its last try `after_check` answers no Again
+            for tried in 1..=fragment_core::computer::SAVE_TRIES {
+                let next = fragment_core::computer::after_check(self.stored(&records[at], until).await, tried, dir != "/data" || !let_go);
+                let why = match next {
+                    AfterCheck::Keep => break,
+                    AfterCheck::Unchecked(why) => {
+                        console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "backup": "unchecked", "dir": dir, "why": why }));
+                        break;
+                    }
+                    AfterCheck::Again(why) => {
+                        console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "backup": "saved again", "dir": dir, "tried": tried, "why": why }));
+                        let damaged = records[at].clone();
+                        match self.update_saves(|s| s.let_go(vec![damaged])) {
+                            Ok(lost) => {
+                                for record in lost {
+                                    console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
+                                }
+                            }
+                            Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+                        }
+                        match self.backup_dir(&g, dir, &left_out, until).await {
+                            Ok(record) => {
+                                records[at] = record;
+                                continue;
+                            }
+                            Err(e) => {
+                                records.remove(at);
+                                e.message
+                            }
+                        }
+                    }
+                    AfterCheck::Fail(why) => why,
+                };
+                console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": why, "ms": js::now_ms() - t0 }));
+                match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
+                    Ok(lost) => self.forget(lost).await,
+                    Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
+                }
+                return Event::SaveFailed { generation, seq, why };
             }
         }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
@@ -2370,13 +2411,49 @@ impl ComputerCell {
         }
     }
 
+    /// Backs up `dir` for start `g` within what is left until `until`,
+    /// leaving out what its held guest named (`left_out`): its record. The
+    /// guest's own state (its home) leaves its work out (a record of its
+    /// own) and what it copied or named; its work leaves out only the
+    /// caches it named in it.
+    async fn backup_dir(&self, g: &JsValue, dir: &str, left_out: &[String], until: i64) -> CellResult<Value> {
+        let exclude = match dir {
+            "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
+            // what it named in its work (its agents' caches), relative to it
+            _ => fragment_core::computer::work_left_out(left_out),
+        };
+        let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+        let record = self.call("backup", &[g.clone(), dir.into(), js::to_js(&json!(exclude)), left]).await?;
+        js::from_js(&record).map_err(CellError::host)
+    }
+
+    /// What R2 holds of `record` against it (entry.mjs `stored`, read
+    /// within what is left until `until`): a read that failed or ran out
+    /// is `Unread`.
+    async fn stored(&self, record: &Value, until: i64) -> Checked {
+        let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+        let (Some(size), Some(sha256)) = (record["size"].as_u64(), record["sha256"].as_str()) else {
+            return Checked::Unread("the record names no size or SHA-256".into());
+        };
+        // its answer: null (nothing there), or the size and SHA-256 it read
+        match self.call("stored", &[js::to_js(record), left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
+            Ok(held) if held.is_null() => fragment_core::computer::checked(size, sha256, None),
+            Ok(held) => match (held["size"].as_u64(), held["sha256"].as_str()) {
+                (Some(n), Some(sha)) => fragment_core::computer::checked(size, sha256, Some((n, sha))),
+                _ => Checked::Unread(format!("stored answered {held}")),
+            },
+            Err(e) => Checked::Unread(e.message),
+        }
+    }
+
     /// Save `seq`'s home's record is taken: told to its lifecycle as the
     /// drive tells any event (`drive_events`: stored, one line), within the
     /// save, and the unhold it asks for (an awake save's, once) made at once,
     /// so its guest claims turns again while its work is copied. It asks for
     /// nothing else: no life ends, nothing of its saves is said, and its
-    /// alarm stays the save's deadline. Answers how long its unhold took.
-    async fn home_saved(&self, generation: u64, seq: u64) -> i64 {
+    /// alarm stays the save's deadline. Answers how long its unhold took,
+    /// and whether it let its guest go (an unhold that failed may have).
+    async fn home_saved(&self, generation: u64, seq: u64) -> (i64, bool) {
         let event = Event::HomeSaved { generation, seq };
         let logged = json!(event);
         let applied = self.lifecycle().and_then(|mut life| {
@@ -2387,18 +2464,20 @@ impl ComputerCell {
             Ok(step)
         });
         let t = js::now_ms();
+        let mut let_go = false;
         match applied {
             Ok(step) => {
                 assert!(step.ended.is_none() && step.note == SaveNote::Same, "a save's home ends no life and says nothing of its saves");
                 for action in step.actions {
                     let Action::Unhold { generation } = action else { unreachable!("a save's home asks for its unhold alone") };
+                    let_go = true;
                     self.unhold(generation, true).await;
                 }
             }
             // held on to its end, as before: its end lets go
             Err(e) => console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "save": seq, "homeSaved": "untold", "error": e.message })),
         }
-        js::now_ms() - t
+        (js::now_ms() - t, let_go)
     }
 
     /// What the held guest of start `g` names as left out of its save (its
@@ -3264,12 +3343,13 @@ impl ComputerCell {
             "damage-saves" | "damage-restores" => {
                 // the next `times` backups of its saves, or restores, each
                 // come with one byte flipped on its way through the gateway,
-                // its length kept, as FIN-775's transfers came (0: none)
+                // its length kept, as FIN-775's transfers came (0: none);
+                // answers how many the lever's last pull left unspent
                 let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
                 let way = if b.op == "damage-saves" { "write" } else { "read" };
-                self.call("damage", &[JsValue::from_str(way), JsValue::from_f64(f64::from(times))]).await?;
-                console_log!("{}", json!({ "computer": id, "lever": b.op, "times": times }));
-                Ok(json!({ "computer": id }))
+                let unspent = self.call("damage", &[JsValue::from_str(way), JsValue::from_f64(f64::from(times))]).await?.as_f64().map_or(0, |n| n as u32);
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "times": times, "unspent": unspent }));
+                Ok(json!({ "computer": id, "unspent": unspent }))
             }
             "damage-stored" => {
                 // save `save`'s archives in R2, one byte of each flipped: a

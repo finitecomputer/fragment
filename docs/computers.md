@@ -542,19 +542,25 @@ the DO removes them from one started from a snapshot.
 - **Every save and restore is checked end to end** (FIN-784): bytes have
   come the right length with the wrong contents on their way into or out
   of a container (FIN-775). The SDK's shim hashes each archive as it makes
-  it (its record's SHA-256), but R2 checks a part's length alone. So a
-  record is kept once R2's own copy hashes to it: one that came out
-  damaged is deleted and backed up again, three tries in all, within the
-  save's own bound (a failure after them fails the save, tried again as
-  any). A check that cannot be made (R2 failed its read, or the save's
-  time ran out) keeps the record unchecked, as before the check, and logs
-  it: a save that fits its bounds is never failed for want of its check.
-  A restore whose bytes came damaged (the SDK's `BACKUP_INTEGRITY`) reads
-  R2's copy: when two reads agree it is not its record, the save is
-  unusable, as above; otherwise (a read that failed too) the restore is
-  asked again, three tries in all, within its own bound, and a start whose
-  tries all came damaged fails as one that may pass, its save kept. A
-  restore that works reads nothing more. R2's copy is read and hashed by the backups' gateway
+  it (its record's SHA-256), but R2 checks a part's length alone. So once
+  a save's records are all taken, each is read back from R2 and kept once
+  R2's own copy hashes to it (`fragment_core::computer::after_check`): a
+  check never takes the time a later backup needs. One that came out
+  damaged is let go of (the save's forget pass deletes it) and backed up
+  again while its guest is held as it was when it was taken, three tries
+  in all, within the save's own bound; an awake save's home, its hold let
+  go since, fails the save instead, tried again as any. A check that
+  cannot be made (R2 failed its read, or the save's time ran out) keeps
+  the record unchecked, as before the check, and logs it: a save that fits
+  its bounds is never failed for want of its check. A restore whose bytes
+  came damaged (the SDK's `BACKUP_INTEGRITY`) is asked again at once, and
+  R2's copy is read beside that try (`cell/backups.mjs`): when two reads
+  agree it is not its record, and the try beside them came damaged too or
+  ran out of time, the save is unusable, as above; otherwise (a read that
+  failed too) the restore is asked again, three tries in all, within its
+  own bound, and a start whose tries all came damaged fails as one that
+  may pass, its save kept. A restore that works reads nothing more. R2's
+  copy is read and hashed by the backups' gateway
   (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
   through the container. Damage before the shim's hash (in the
   container's own reading of its files) is out of reach.

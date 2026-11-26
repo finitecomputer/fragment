@@ -3642,10 +3642,13 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
     let damaging = lever_with(api, &id, json!({ "op": "damage-saves", "times": 1 }))?;
     let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&v), within)?;
     let kept = lever(api, &id, "saves")?.body;
+    // its damage was spent on the way (a lever's pull answers what the last left)
+    let spent = lever_with(api, &id, json!({ "op": "damage-saves", "times": 0 }))?.body;
     s.ok(
         DAMAGE_CHECKS[0],
         ok && up
             && damaging.status == 200
+            && spent["unspent"] == 0
             && r.status == 200
             && done
             && kept["saves"][0]["number"] == 2
@@ -3653,7 +3656,7 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
             && from_save(&v, &kept["saves"][0])
             && v["restored"]["rollback"] == false
             && (s.hosted() || lines(s, r#""backup":"saved again""#) > again),
-        json!({ "view": v, "saves": kept["saves"], "damaging": damaging.body }),
+        json!({ "view": v, "saves": kept["saves"], "damaging": damaging.body, "spent": spent }),
     );
     // restarted with its home's restore damaged: its save is 3, restored
     // from on its second try
@@ -3661,9 +3664,11 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
     let damaging = lever_with(api, &id, json!({ "op": "damage-restores", "times": 1 }))?;
     let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&v), within)?;
     let kept = lever(api, &id, "saves")?.body;
+    let spent = lever_with(api, &id, json!({ "op": "damage-restores", "times": 0 }))?.body;
     s.ok(
         DAMAGE_CHECKS[1],
         damaging.status == 200
+            && spent["unspent"] == 0
             && r.status == 200
             && done
             && kept["saves"][0]["number"] == 3
@@ -3672,7 +3677,7 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
             && kept["failures"] == 0
             && kept["saves"].as_array().is_some_and(|l| l.iter().all(|s| s["unusable"] == false))
             && (s.hosted() || lines(s, r#""restore":"asked again""#) > asked),
-        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body }),
+        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body, "spent": spent }),
     );
     // put to sleep (save 4), its copy in R2 damaged, and restarted: asleep,
     // it saves nothing more, so its start restores save 4
