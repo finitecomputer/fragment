@@ -380,6 +380,8 @@ enum MetaKey {
     SlowStartTell,
     /// Its disk's last fallback: `{generation, found, to}` (the fpac lever's).
     DiskFell,
+    /// When its wipe first found its container gone (its disk's settle).
+    WipeGone,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -437,6 +439,7 @@ impl MetaKey {
             MetaKey::SlowTell => "slow_tell",
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::DiskFell => "disk_fell",
+            MetaKey::WipeGone => "wipe_gone",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -1446,7 +1449,7 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         if self.call("adopt", std::slice::from_ref(&g)).await?.as_bool() != Some(true) {
             return Ok(Some(match life.saving() {
-                Some(Saving::Stop { .. }) => Event::Asleep { generation },
+                Some(Saving::Stop { .. }) => self.stopped(generation),
                 _ => Event::Exited { generation },
             }));
         }
@@ -1481,7 +1484,7 @@ impl ComputerCell {
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
-                        reported.push(Event::Asleep { generation });
+                        reported.push(self.stopped(generation));
                     }
                 }
                 Action::Meter { from_ms, to_ms } => {
@@ -2858,6 +2861,20 @@ impl ComputerCell {
         }
     }
 
+    /// A stop of start `generation` found ended (its container gone): on a
+    /// disk, unsaved unless its final flush posted that life's clean head,
+    /// whichever path finds it (the stop's own, an isolate's adoption, an
+    /// alarm's look: Codex on #1552).
+    fn stopped(&self, generation: u64) -> Event {
+        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+        let clean = || self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
+        if on_disk && !clean() {
+            Event::AsleepUnshipped { generation }
+        } else {
+            Event::Asleep { generation }
+        }
+    }
+
     /// A sleep's snapshot, taken after its save `save`: kept as that save's
     /// cache, for the image its start ran (not the one pinned now: a pin
     /// while it ran is the next start's), within what its sleep's steps
@@ -3288,6 +3305,11 @@ impl ComputerCell {
         if !destroyed {
             return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
         }
+        // when its container was first seen gone: its disk's settle runs from
+        // then (no put its route takes after it)
+        if self.meta(MetaKey::WipeGone)?.is_none() {
+            self.set_meta(MetaKey::WipeGone, &js::now_ms().to_string())?;
+        }
         let records = self.saves()?.every_record();
         // bounded: a computer's records are (Saves::every_record), each
         // delete within a pass's bound; one that passes it fails this call,
@@ -3300,13 +3322,15 @@ impl ComputerCell {
         // disk"): at most `WIPE_PAGES_PER_CALL` pages more
         let on_disk = self.disk()?.is_some();
         if let (false, true, Some(prefix)) = (more, on_disk, id.as_deref().and_then(fpac::disk_prefix)) {
+            // its last list is one begun once any put its route took has had
+            // `WIPE_SETTLE_MS` to land since its container was gone: one that
+            // landed after an earlier list, or whose own delete failed, goes
+            // too (Codex on #1552); until then, more (the next call lists again)
+            let gone = self.meta(MetaKey::WipeGone)?.and_then(|t| t.parse::<i64>().ok()).unwrap_or(i64::MAX);
+            let settled = fpac::wipe_settled(gone, js::now_ms());
             let (disk_objects, disk_more) = js::blob_delete_under(&self.env, js::BLOBS, &prefix, WIPE_PAGES_PER_CALL).await?;
             objects += disk_objects;
-            // listed again once any put its route took has landed: one that
-            // landed after this list, or whose own delete failed, goes too
-            // (Codex on #1552); until then, more (the next call lists again)
-            let marked = self.rows("SELECT at FROM wiped", vec![])?.first().and_then(|r| r["at"].as_i64()).unwrap_or(0);
-            more = disk_more || !fpac::wipe_settled(marked, js::now_ms());
+            more = disk_more || !settled;
         }
         if !more {
             // one step, no await: its record emptied, the mark kept

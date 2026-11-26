@@ -618,10 +618,11 @@ put on disks.
   the stub's bridge as its PID 1). The runtime gives its container FUSE
   and a loop device: Cloudflare's does, and krun's on a self-hosted box;
   workerd's Docker does not.
-- **A wipe** deletes its disk's objects with its saves', and lists them
-  once more `WIPE_SETTLE_MS` (2 minutes) after its mark before it is done:
-  a put its route took before the container went, landing after the
-  first list, or one whose delete failed, goes too.
+- **A wipe** deletes its disk's objects with its saves', and is done only
+  with a list begun `WIPE_SETTLE_MS` (2 minutes) after its container was
+  gone: a put its route took before then, landing after an earlier list,
+  or one whose delete failed, goes too (R2 promises no bound for a put in
+  flight; two minutes is past what it takes in practice).
 
 ### Saves and what a wake restores
 

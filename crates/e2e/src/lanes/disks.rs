@@ -45,7 +45,7 @@ const DISK_CHECKS: [&str; 11] = [
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
     "a wake mounts the disk as it slept: what it wrote is there, nothing restored, its line saying what its last sleep left unshipped",
-    "every write is read after the wake that follows it, each sleep clean, each tenth a crash while a fill ships (its daemon holding bytes unshipped as it is killed)",
+    "every write is read after the wake that follows it, each sleep clean, each tenth a crash as a fill ships (its daemon's last status, read by the kill just before its signal, holding bytes unshipped)",
     "a crash while it runs loses no write it acknowledged: the start after it mounts the disk as that life left it",
     "a head that will not open is fallen back past: that start fails as unusable, the next mounts the head before it, no strike",
     "awake or asleep, no save of a disk is taken for itself",

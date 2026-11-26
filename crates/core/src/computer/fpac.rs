@@ -170,16 +170,18 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
     }
 }
 
-/// How long after a wipe's mark its disk's objects are listed once more
-/// before it is done: past any put its route took before the container
-/// went (R2 lands a put whose body it had within its own request, seconds
-/// at most), so one that landed after the wipe's first list, or whose own
-/// delete failed, is deleted too (Codex on #1552).
+/// How long after a wiped computer's container was gone its disk's objects
+/// are listed once more before the wipe is done: past any put its route
+/// took before then (R2 lands a put whose body it had within its own
+/// request, seconds in practice; it promises no bound), so one that landed
+/// after an earlier list, or whose own delete failed, is deleted too
+/// (Codex on #1552).
 pub const WIPE_SETTLE_MS: i64 = 120_000;
 
-/// Whether a wipe marked at `marked_ms` may finish its disk (`WIPE_SETTLE_MS`).
-pub fn wipe_settled(marked_ms: i64, now_ms: i64) -> bool {
-    now_ms >= marked_ms.saturating_add(WIPE_SETTLE_MS)
+/// Whether a list begun at `now_ms` may be a wipe's last of its disk, its
+/// container gone at `gone_ms` (`WIPE_SETTLE_MS`).
+pub fn wipe_settled(gone_ms: i64, now_ms: i64) -> bool {
+    now_ms >= gone_ms.saturating_add(WIPE_SETTLE_MS)
 }
 
 /// The platform's answer to a head a life posts.
