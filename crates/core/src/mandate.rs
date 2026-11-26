@@ -162,6 +162,43 @@ pub fn place_of(text: &str) -> Option<&str> {
     text.strip_prefix(PREFIX)?.split('.').nth(2)
 }
 
+/// Until when a mandate's text holds, read from a text its place made.
+pub fn until_of(text: &str) -> Option<i64> {
+    text.strip_prefix(PREFIX)?.split('.').nth(6)?.parse().ok()
+}
+
+/// Whose ask a record of a place hands its agents (FIN-720), as its place
+/// opens their turns on it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Asked {
+    /// Someone's own words (`asker_of`), proven by their mandate.
+    By(String),
+    /// An agent's words in a turn of its own (`turn`, its body's): the ask
+    /// that turn carries on, as its place opened it, else the agent's own.
+    Handed { agent: String, turn: String },
+    /// An agent's words in no turn: its own, with nothing to prove them.
+    Unproven(String),
+}
+
+/// Whose ask a record is (`Asked`), or no one's: app code's words, the
+/// platform's own, an anonymous visitor's.
+pub fn asked_of(principal: &str, author: Option<Author>, asker: Option<&str>, body: &str) -> Option<Asked> {
+    if author == Some(Author::Agent) {
+        if !crate::npub::is_identity(principal) {
+            return None;
+        }
+        let turn = match serde_json::from_str::<serde_json::Value>(body) {
+            Ok(serde_json::Value::Object(o)) => o.get("turn").and_then(|t| t.as_str()).filter(|t| fragment_proto::valid_op_id(t)).map(str::to_string),
+            _ => None,
+        };
+        return Some(match turn {
+            Some(turn) => Asked::Handed { agent: principal.to_string(), turn },
+            None => Asked::Unproven(principal.to_string()),
+        });
+    }
+    asker_of(principal, author, asker, body).map(Asked::By)
+}
+
 /// Whose own words a record is, as a mandate names them: a person's own
 /// post (its `principal`, an identity: an anonymous visitor asks no one
 /// elsewhere), or a door's relay of its agent's owner (its `body`'s
@@ -213,29 +250,51 @@ pub struct Held<'a> {
     pub place: &'a str,
 }
 
-/// Whether a bridge life's word on its agent's turns is heard (cell
-/// runs_on.rs `turn_life`), given the lives heard on the computer the agent
-/// runs on, each with that computer's start (the Computer DO's generation,
-/// which its bridge read as it started), the newest first: by start, then,
-/// within one start, by when first heard. Another computer's starts are
-/// not comparable: none of its lives is among them. The newest's is; a life never heard of a start no
-/// older takes over (its bridge is the computer's one now: every other
-/// life's turns are forgotten); any other is retired, its word not heard:
-/// a late call from a bridge gone, its first among them (a container
-/// before's, which may come after its successor's).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Heard {
-    Speaks,
-    TakesOver,
-    Retired,
+/// A turn's id (docs/chat-records.md): what one agent, by its fragment's
+/// name, does about one record of a place. A place opens the turn its
+/// agent will run on someone's ask by this id, as the agent's bridge names
+/// it.
+pub fn turn_id(agent_fragment: &str, place: &str, channel: &str, seq: i64) -> String {
+    use sha2::Digest;
+    let digest = Sha256::digest(format!("{agent_fragment}|{place}/{channel}/{seq}").as_bytes());
+    hex::encode(digest)[..24].to_string()
 }
 
-pub fn heard(lives_newest_first: &[(&str, u64)], life: &str, start: u64) -> Heard {
-    match lives_newest_first.iter().position(|(l, _)| *l == life) {
-        Some(0) => Heard::Speaks,
-        Some(_) => Heard::Retired,
-        None if lives_newest_first.first().is_some_and(|(_, newest)| *newest > start) => Heard::Retired,
-        None => Heard::TakesOver,
+/// Whether a record's body is words an agent answers with a turn: a
+/// message (no `kind`, or `message`), as an agent's bridge hears one; a
+/// stop, a card's answer or a command starts none.
+pub fn starts_turn(body: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(body) {
+        Ok(serde_json::Value::String(_)) => true,
+        Ok(serde_json::Value::Object(o)) => match o.get("kind") {
+            None => true,
+            Some(kind) => kind == "message",
+        },
+        _ => false,
+    }
+}
+
+/// Whether an agent's call is its presence in its chats, which stays its
+/// own and carries no one's mandate: its live socket, and a fragment's
+/// channels (their list, records, posts, drafts, newest), blobs, roster
+/// (`members`, `__people`), status and subscriptions; its own fragment
+/// list; and anything on its own fragment (`own`, its name), its own
+/// state. Every other call is work, held to whose ask is open (FIN-720):
+/// this one list decides, and a route not on it is work.
+pub fn presence(method: &str, path: &str, own: &str) -> bool {
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let reads = matches!(method, "GET" | "HEAD");
+    match parts.as_slice() {
+        ["f", name, ..] | ["api", "f", name, ..] if *name == own => true,
+        ["f", _, "__live"] => reads,
+        ["f", _, "__people"] => reads,
+        ["api", "fragments"] => reads,
+        ["api", "f", _, "status" | "members" | "channels" | "subscriptions"] => reads,
+        ["api", "f", _, "channels", _] => reads || method == "POST",
+        ["api", "f", _, "channels", _, "newest"] => reads,
+        ["api", "f", _, "channels", _, "draft"] => method == "PUT",
+        ["api", "f", _, "blobs", ..] => reads || method == "PUT",
+        _ => false,
     }
 }
 
@@ -299,6 +358,65 @@ pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal (FIN-720): a place names a turn as its agent's bridge does
+    /// (docs/chat-records.md), and opens one only for words that start one.
+    #[test]
+    fn a_place_names_a_turn_as_its_bridge_does() {
+        assert_eq!(turn_id("juniper--k3x9", "talk--k3x9", "chat", 4), "e3c5ceec11d5e3e016f08aee", "sha256 of `agent|place/channel/seq`, 24 hex");
+        assert_ne!(turn_id("juniper--k3x9", "talk--k3x9", "chat", 5), turn_id("juniper--k3x9", "talk--k3x9", "chat", 4));
+        assert!(starts_turn(r#"{"text":"hi"}"#) && starts_turn(r#"{"kind":"message","text":"hi"}"#) && starts_turn(r#""hi""#));
+        for other in [r#"{"kind":"stop"}"#, r#"{"kind":"prompt_response","prompt":"p","option":"o"}"#, r#"{"kind":"command"}"#, "7", "not json"] {
+            assert!(!starts_turn(other), "{other}: starts no turn");
+        }
+        let (ben, juniper) = (crate::npub::display(&"b".repeat(64)), crate::npub::display(&"a".repeat(64)));
+        assert_eq!(asked_of(&ben, Some(Author::Person), None, r#"{"text":"hi"}"#), Some(Asked::By(ben.clone())), "a person's own words: theirs");
+        assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"over to you","turn":"t1"}"#), Some(Asked::Handed { agent: juniper.clone(), turn: "t1".into() }), "an agent's words in its turn carry that turn's ask on");
+        assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"hello"}"#), Some(Asked::Unproven(juniper.clone())), "an agent's words in no turn: its own, unproven");
+        assert_eq!(asked_of(&juniper, Some(Author::Code), None, r#"{"text":"hi"}"#), None, "app code's words are no one's");
+        assert_eq!(asked_of("anon:x", Some(Author::Person), None, r#"{"text":"hi"}"#), None, "an anonymous visitor asks no one");
+    }
+
+    /// Goal (FIN-720): one list says what of an agent's calls is its
+    /// presence in its chats, its own; everything else is work, held to
+    /// whose ask is open, a route not on the list among it.
+    #[test]
+    fn an_agents_presence_is_one_list_and_all_else_is_work() {
+        let own = "juniper--k3x9";
+        for (method, path) in [
+            ("GET", "/f/talk--k3x9/__live"),
+            ("GET", "/f/talk--k3x9/__people"),
+            ("GET", "/api/fragments"),
+            ("GET", "/api/f/talk--k3x9/status"),
+            ("GET", "/api/f/talk--k3x9/members"),
+            ("GET", "/api/f/talk--k3x9/channels"),
+            ("GET", "/api/f/talk--k3x9/channels/chat"),
+            ("POST", "/api/f/talk--k3x9/channels/chat"),
+            ("GET", "/api/f/talk--k3x9/channels/chat/newest"),
+            ("PUT", "/api/f/talk--k3x9/channels/chat/draft"),
+            ("GET", "/api/f/talk--k3x9/blobs/abc"),
+            ("PUT", "/api/f/talk--k3x9/blobs/abc"),
+            ("GET", "/api/f/talk--k3x9/subscriptions"),
+            ("POST", "/api/f/juniper--k3x9/ops/note"),
+            ("GET", "/f/juniper--k3x9/memories/MEMORY.md"),
+        ] {
+            assert!(presence(method, path, own), "{method} {path}: presence");
+        }
+        for (method, path) in [
+            ("POST", "/api/f/recipes--k3x9/ops/note"),
+            ("GET", "/f/recipes--k3x9/index.html"),
+            ("GET", "/api/f/recipes--k3x9/files"),
+            ("POST", "/api/fragments"),
+            ("POST", "/api/search"),
+            ("PUT", "/api/f/talk--k3x9/members/npub1x"),
+            ("DELETE", "/api/f/talk--k3x9/channels/chat"),
+            ("PUT", "/api/f/talk--k3x9/secrets/KEY"),
+            ("GET", "/api/f/talk--k3x9/a-route-made-later"),
+            ("GET", "/api/identities/me"),
+        ] {
+            assert!(!presence(method, path, own), "{method} {path}: work");
+        }
+    }
 
     const HOST: &str = "a host secret of at least thirty-two bytes, for tests";
     const NEXT: &str = "the next host secret, also thirty-two bytes or more";
@@ -413,23 +531,6 @@ mod tests {
         assert!(addressed(r#"{"text":"say "to" me"}"#, &juniper), "the word in a text names no one");
     }
 
-    /// Goal (FIN-720): one bridge life speaks for an agent's turns at a
-    /// time: the newest heard; a new one of its computer's start or a later
-    /// one takes over; one heard before it is retired (its late word changes
-    /// nothing), and so is one never heard of an earlier start (a container
-    /// gone, its first word late: after its successor's); the same word
-    /// again is heard the same.
-    #[test]
-    fn the_newest_bridge_life_speaks_for_its_turns() {
-        assert_eq!(heard(&[], "a", 3), Heard::TakesOver, "the first life heard");
-        let lives = [("b", 4), ("a", 3)];
-        assert_eq!(heard(&lives, "b", 4), Heard::Speaks);
-        assert_eq!(heard(&lives, "a", 3), Heard::Retired, "a late word from the life before");
-        assert_eq!(heard(&lives, "c", 4), Heard::TakesOver, "a new life of the same start (its bridge restarted)");
-        assert_eq!(heard(&lives, "c", 5), Heard::TakesOver, "a new life of a later start");
-        assert_eq!(heard(&lives, "c", 3), Heard::Retired, "a first word of an earlier start's, late");
-        assert_eq!(heard(&lives, "b", 4), heard(&lives, "b", 4), "replay");
-    }
 
     /// Goal: the narrowest ask an agent's call for its owner carries while
     /// turns are open (`Proof`): its owner's newest proof alone; anyone

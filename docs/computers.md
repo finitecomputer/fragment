@@ -1026,25 +1026,11 @@ sleep answers within 14 minutes.
     `diskMountMs`, `diskMisses` and `diskRefetches` (each a number, any
     left out), what its mount did, which the start's line takes from its
     first read.
-  - `PUT /api/computer/turns {life, generation, turn, place, asker?,
-    mandate?}`, as the agent its header names: a turn it runs, before its
-    runtime hears of it: whose ask it is (none, app code's words) and the
-    mandate its record carried. `DELETE /api/computer/turns {life,
-    generation, turn}` as it ends, and `{life, generation}` at the
-    bridge's start. Each names the bridge life it is and its computer's
-    start (`generation`, as `GET /api/computer` said it when the bridge
-    started; `mandate::heard`): a new life of that start or a later one
-    takes the agent's turns (every other life's forgotten: one computer
-    runs one bridge), and any other is retired, its word refused (409)
-    and changing nothing, a late first word from a container gone among
-    them. Lives are ordered within the computer the agent runs on (another
-    computer's starts are not comparable): run on another, its bridge's
-    first word takes over. The agent's
-    fragment holds at most `TURNS_HELD_MAX`, each for at most
-    `TURN_HELD_MS`; a mandate that does not check holds that turn
-    unproven, never refused. A platform from before sends it on to its
-    API, which has no such route (404): a bridge takes that as nothing to
-    tell.
+  - `PUT` and `DELETE /api/computer/turns`, as the agent its header
+    names, from a bridge that tells its turns: answered and changing
+    nothing. Whose ask a turn is is its place's word (docs/api.md, "A
+    place opens its agents' turns"); the route goes once no computer runs
+    an image that calls it (the debt ledger).
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.

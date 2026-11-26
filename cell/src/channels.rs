@@ -341,6 +341,10 @@ impl FragmentCell {
             )?;
         }
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw, asker: asker.map(str::to_string), mandate: None };
+        // the asks it hands its agents, in this step: someone else's waits
+        // for its agent fragment to hold it (asks.rs), told in `published`
+        let gated = self.asks_noted(&record)?;
+        self.hold_live(&gated);
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -543,6 +547,10 @@ impl FragmentCell {
     /// search is sent from the alarm, armed then too, so a post waits on
     /// no person's list. Answers the runs.
     pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32, laps: &mut js::Laps) -> CellResult<Vec<i64>> {
+        // the asks it handed its agents told first: someone else's reaches
+        // its agent only then (asks.rs)
+        self.tell_asks().await;
+        laps.lap("asks");
         // A retry finds the record appended; its deliveries are written
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
@@ -611,6 +619,11 @@ impl FragmentCell {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
         self.door_checked(caller, &facts.name, channel, id, body).await?;
+        // an agent's claim of someone else's ask is taken once its agent
+        // fragment holds it (asks.rs)
+        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
+            self.claim_noted(&agent.id, channel, body).await?;
+        }
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -932,6 +945,14 @@ impl FragmentCell {
     pub(crate) async fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.channel_reader(caller, channel)?;
         let mut page = self.channel_page(channel, after, before, limit)?;
+        // a page an agent reads forward hands it what it holds, and it is
+        // read only once its turns here are open (asks.rs)
+        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
+            if before.is_none() {
+                self.asks_handed(&agent.id, &page.records, after)?;
+            }
+            self.asks_settled(&agent.id).await?;
+        }
         self.mandated(caller, &mut page).await?;
         json_response(&page)
     }

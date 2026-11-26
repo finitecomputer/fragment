@@ -19,6 +19,7 @@ step Fragment 12 pending_code a323b22a2f946eb7
 step Fragment 13 ended_doors 6b677d38c0350a38
 step Fragment 14 trigger_kinds e4accb2c78ba5f08
 step Fragment 15 askers 14b4892acdccbe6a
+step Fragment 16 asks c23f830412f1a070
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -62,6 +63,9 @@ step Migrations 5 people_comped edd3cbbee6194f4f
 step Migrations 6 withdrawn_why 4d666c2bbef4f282
 step Migrations 7 waiting_forward_only 18ed5cf065932299
 
+Fragment table asks: CREATE TABLE asks ( agent TEXT NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, asker TEXT NOT NULL, proven INTEGER NOT NULL, at INTEGER NOT NULL, turn TEXT, until INTEGER, PRIMARY KEY (agent, channel, seq))
+Fragment index asks_turn: CREATE INDEX asks_turn ON asks (agent, turn) WHERE turn IS NOT NULL
+Fragment table asks_told: CREATE TABLE asks_told ( agent TEXT PRIMARY KEY, fragment TEXT, handed INTEGER NOT NULL, version INTEGER NOT NULL, gate INTEGER NOT NULL, told INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table blobs: CREATE TABLE blobs ( sha TEXT PRIMARY KEY, size INTEGER NOT NULL, uploaded_at INTEGER NOT NULL, seen_at INTEGER NOT NULL, mime TEXT)
 Fragment table charges: CREATE TABLE charges ( ref TEXT PRIMARY KEY, run INTEGER NOT NULL, micros INTEGER NOT NULL, held INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index charges_run: CREATE INDEX charges_run ON charges (run)
@@ -127,6 +131,7 @@ Fragment table steps: CREATE TABLE steps ( run INTEGER NOT NULL, attempt INTEGER
 Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
 Fragment table turn_lives: CREATE TABLE turn_lives (life TEXT PRIMARY KEY, computer TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table turn_places: CREATE TABLE turn_places (place TEXT PRIMARY KEY, version INTEGER NOT NULL)
 Fragment table turns: CREATE TABLE turns ( turn TEXT PRIMARY KEY, place TEXT NOT NULL, asker TEXT NOT NULL, mandate TEXT, until INTEGER NOT NULL, life TEXT NOT NULL, at INTEGER NOT NULL)
 
 Registry table admin_log: CREATE TABLE admin_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL)

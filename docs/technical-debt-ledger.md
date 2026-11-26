@@ -726,22 +726,25 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
-## An agent's computer tells its own turns
+## An agent ends someone's ask by saying so
 
-- **Shortcut:** whose ask an agent's call is (FIN-720; docs/api.md, "An
-  agent's computer proves who asked") rests on the turns its bridge tells
-  the agent's fragment (`/api/computer/turns`), and on the agent signing
-  `for` its owner, as its CLI does. The bridge and the runtime share one
-  computer, where the agent has passwordless sudo and no secret is kept
-  from it (decisions 13, 43, 44).
-- **Risk:** an injected agent, on someone else's ask, closes or clears
-  their turns, or signs as itself with no `for`, and so acts with its
-  owner's reach or its own (which mirrors its owner's, decision 64). An
-  agent that follows its tools never does. **Delete when:** whose ask a
-  call is comes from what the computer can't forge (the places' own
-  records, or turns kept outside the agent's root, as the SimpleX entry
-  above needs too), with tests where the agent clears its turns and signs
-  as itself.
+- **Shortcut:** an agent's `turn.end` in a chat closes the turn and
+  every ask there it never claimed (cell/src/asks.rs), held at least
+  `TURN_HOLD_MS` from its words, which is 0 (docs/api.md, "A place opens
+  its agents' turns").
+- **Risk:** an injected agent, on someone else's ask, says its turn
+  ended and goes on with its owner's reach; the chat shows the turn
+  ended. **Delete when:** Paul sets the hold (one constant), or the
+  turn's end is its runtime's word rather than its computer's.
+
+## A computer's turns route is answered and ignored
+
+- **Shortcut:** `/api/computer/turns` and the bridge's `driver::Turns`
+  that calls it stay, answered `{ok: true}` and changing nothing, while
+  computers run images whose bridge tells its turns.
+- **Risk:** none to whose ask a call is: a call a turn, and code nothing
+  reads. **Delete when:** every computer runs an image whose bridge no
+  longer calls it (FIN-615 PR 8, with bare `for=`).
 
 ## A paid call's charge is best effort
 

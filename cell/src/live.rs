@@ -186,19 +186,25 @@ pub(crate) struct LiveMemory {
     /// When the fragment's next draft is due at its steady pace
     /// (`presence_admit`'s, across its drafts).
     draft_at: i64,
+    /// What each agent's sockets were sent (socket id, frame) while
+    /// someone else's ask of it is told (asks.rs): sent once it is, in
+    /// order. One whose ask waits with nothing held here (it woke) is
+    /// closed at its next record instead (`broadcast_record`).
+    held: BTreeMap<String, Vec<(String, String)>>,
 }
 
 fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id, its role, the
-/// channels it follows, and when a key's socket was last asked who it is,
+/// What a broadcast reads of a socket's attachment: its id, whose it is,
+/// its role, the channels it follows, and when a key's socket was last asked who it is,
 /// and no more (its presence is any JSON a page set). Every release's
 /// attachment has carried them (`LiveState`).
 #[derive(Deserialize)]
 struct Follows {
     id: String,
+    principal: String,
     role: Role,
     subs: Vec<String>,
     checked_at: i64,
@@ -344,11 +350,24 @@ impl FragmentCell {
         }
         let (read, now) = (self.channel_read_role(&r.channel).ok(), js::now_ms());
         let frame = LiveOut::record_frame(r);
+        // an agent handed someone else's ask is sent nothing before it is
+        // told (asks.rs): held, in order, or closed when nothing holds it
+        let waiting = self.asks_waiting();
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
             if st.subs.contains(&r.channel) && sends_to(&ws, &st, read, now) {
-                let _ = ws.send_with_str(&frame);
+                if waiting.contains(&st.principal) {
+                    match self.live.borrow_mut().held.get_mut(&st.principal) {
+                        Some(held) => held.push((st.id.clone(), frame.clone())),
+                        None => {
+                            let _ = ws.close(Some(ROLE_CHANGED), Some("a turn of yours here is being opened: reconnect"));
+                            continue;
+                        }
+                    }
+                } else {
+                    let _ = ws.send_with_str(&frame);
+                }
                 found.insert(st.id);
             }
         }
@@ -454,6 +473,44 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// Whether a socket of `principal`'s follows `channel` live: what is
+    /// appended there reaches it now (asks.rs `asks_noted`).
+    pub(crate) fn follows_live(&self, principal: &str, channel: &str) -> bool {
+        self.followed(channel) && self.state.get_websockets_with_tag(&format!("who:{principal}")).iter().filter_map(follows_of).any(|st| st.subs.iter().any(|c| c == channel))
+    }
+
+    /// `agents`' sockets hold what they are sent from here (asks.rs: each
+    /// was handed someone else's ask, told next).
+    pub(crate) fn hold_live(&self, agents: &[String]) {
+        let mut memory = self.live.borrow_mut();
+        for a in agents {
+            memory.held.entry(a.clone()).or_default();
+        }
+    }
+
+    /// `agent`'s asks here were told (`told`: its sockets are sent what
+    /// they held, in order; while a newer one is still to tell, they hold
+    /// on), or were not (closed, 4001: each reconnects and catches up once
+    /// they are, asks.rs `asks_settled`).
+    pub(crate) fn asks_released(&self, agent: &str, told: bool) {
+        if told && self.asks_waiting().contains(agent) {
+            return;
+        }
+        let Some(held) = self.live.borrow_mut().held.remove(agent) else { return };
+        let sockets = self.state.get_websockets_with_tag(&format!("who:{agent}"));
+        if !told {
+            for ws in &sockets {
+                let _ = ws.close(Some(ROLE_CHANGED), Some("a turn of yours here could not be opened yet: reconnect"));
+            }
+            return;
+        }
+        for (id, frame) in held {
+            if let Some(ws) = sockets.iter().find(|ws| follows_of(ws).is_some_and(|st| st.id == id)) {
+                let _ = ws.send_with_str(&frame);
+            }
+        }
+    }
+
     /// Closes every live socket so that its page reconnects, decided afresh:
     /// what the fragment's channels let it read changed (plane.rs).
     pub(crate) fn reopen_live(&self, reason: &str) {
@@ -480,12 +537,42 @@ impl FragmentCell {
                 send(ws, &LiveOut::Result(self.live_query(&st, query).await));
                 Ok(())
             }
+            // an agent's catch-up hands it what it reads (asks.rs), sent
+            // once its turns here are told, or it reconnects to ask again
+            Ok(LiveIn::Subscribe(sub)) => match self.catch_up_handed(&st.principal, &sub).await {
+                Ok(()) => self.live_frame(ws, st, LiveIn::Subscribe(sub)),
+                Err(e) => {
+                    let _ = ws.close(Some(ROLE_CHANGED), Some(&e.message));
+                    return;
+                }
+            },
             Ok(frame) => self.live_frame(ws, st, frame),
             Err(e) => Err(CellError::invalid(format!("a live frame: {e}"))),
         };
         if let Err(e) = answered {
             send(ws, &LiveOut::Error { message: e.message });
         }
+    }
+
+    /// A subscribe's catch-up, as it hands what it reads to an agent
+    /// (asks.rs `asks_handed`): its turns told first. Nothing for anyone
+    /// else, and nothing when its channel does not read.
+    async fn catch_up_handed(&self, principal: &str, sub: &Subscribe) -> CellResult<()> {
+        let Ok(after) = self.subscribe_after(&sub.channel, &sub.from) else { return Ok(()) };
+        let records = self.read_channel(&sub.channel, after, limits::CHANNEL_PAGE)?;
+        if self.asks_handed(principal, &records, after)? || self.asks_waiting().contains(principal) {
+            self.asks_settled(principal).await?;
+        }
+        Ok(())
+    }
+
+    /// Where a subscribe reads from: after its cursor, or its last `n`
+    /// (a page opening near the end of a long channel).
+    fn subscribe_after(&self, channel: &str, from: &Cursor) -> CellResult<i64> {
+        Ok(match from {
+            Cursor::Last(n) => (self.channel_head(channel)? - (*n).clamp(0, limits::CHANNEL_PAGE as i64)).max(0),
+            Cursor::After(n) => (*n).max(0),
+        })
     }
 
     fn live_frame(&self, ws: &WebSocket, mut st: LiveState, frame: LiveIn) -> CellResult<()> {
@@ -497,11 +584,7 @@ impl FragmentCell {
                 if !live && st.subs.len() >= SUBSCRIPTIONS_MAX {
                     return Err(CellError::invalid(format!("a socket follows at most {SUBSCRIPTIONS_MAX} channels")));
                 }
-                let after = match from {
-                    // a page opening near the end of a long channel
-                    Cursor::Last(n) => (self.channel_head(&channel)? - n.clamp(0, limits::CHANNEL_PAGE as i64)).max(0),
-                    Cursor::After(n) => n.max(0),
-                };
+                let after = self.subscribe_after(&channel, &from)?;
                 let (frames, next, more) = self.live_page(&channel, after)?;
                 // live only with the last page (the module doc)
                 if more && live {
