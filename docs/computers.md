@@ -571,7 +571,8 @@ put on disks.
   failed start. A disk none of whose lives came up (its guest never ran:
   a new disk's first boot ships its format before its first read, so one
   that came up was whole; a guest's read keeps its disk as come up before
-  the read is heard or answered) holds nothing of anyone's: whatever its boot
+  the read is heard or answered, the running life's alone: a disk start's
+  API route names its life) holds nothing of anyone's: whatever its boot
   found (its device blank, `blank`; its filesystem unmountable, a format
   cut short, `unmountable`), it starts again as a new disk. So does a
   blank device none of whose heads names a checkpoint. A head that will

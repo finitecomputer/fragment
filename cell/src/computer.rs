@@ -848,6 +848,9 @@ struct GuestAsk {
     /// A disk's boot's numbers (`DiskFacts`'s), with its first read.
     #[serde(default)]
     disk: GuestDisk,
+    /// The life a disk start's guest is (its route's: `ComputerEgress::handle`).
+    #[serde(default)]
+    epoch: Option<u64>,
 }
 
 /// What a disk's boot says its mount did (`computer/guest`).
@@ -3956,19 +3959,25 @@ impl ComputerCell {
             }
             "computer/guest" => {
                 let b: GuestAsk = body_json(&mut req).await?;
-                // on a disk, a guest that reads its view runs on it: what the
-                // disk holds is someone's from here (`fpac::fallback`), kept
-                // before the read is heard or answered, so no isolate that
-                // goes after it leaves a disk that ran as one never up (Codex
-                // on #1552)
-                if self.disk()?.is_some_and(|d| !d.came_up) {
-                    self.exec("UPDATE disk SET came_up = 1 WHERE id = 0", vec![])?;
+                // on a disk, only the life that runs is heard: a read in
+                // flight from a start that ended names that start (Codex on
+                // #1552)
+                let on_disk = self.disk()?;
+                if fpac::read_is_running_lifes(on_disk.is_some(), b.epoch, self.lifecycle()?.running()) {
+                    // a guest that reads its view runs on its disk: what the
+                    // disk holds is someone's from here (`fpac::fallback`),
+                    // kept before the read is heard or answered, so no
+                    // isolate that goes after it leaves a disk that ran as
+                    // one never up (Codex on #1552)
+                    if on_disk.is_some_and(|d| !d.came_up) {
+                        self.exec("UPDATE disk SET came_up = 1 WHERE id = 0", vec![])?;
+                    }
+                    // its guest is alive: what a start that waits for it waits for
+                    let now = js::now_ms();
+                    self.heard_ms.set(Some(now));
+                    let disk = Some(DiskFacts { mount_ms: b.disk.mount_ms, misses: b.disk.misses, refetches: b.disk.refetches, slept_unshipped: None }).filter(|d| d.mount_ms.is_some() || d.misses.is_some() || d.refetches.is_some());
+                    log_start(self.starts.borrow_mut().heard(now, disk));
                 }
-                // its guest is alive: what a start that waits for it waits for
-                let now = js::now_ms();
-                self.heard_ms.set(Some(now));
-                let disk = Some(DiskFacts { mount_ms: b.disk.mount_ms, misses: b.disk.misses, refetches: b.disk.refetches, slept_unshipped: None }).filter(|d| d.mount_ms.is_some() || d.misses.is_some() || d.refetches.is_some());
-                log_start(self.starts.borrow_mut().heard(now, disk));
                 if b.simplex {
                     self.said_simplex().await?;
                 }
@@ -5061,12 +5070,14 @@ impl ComputerEgress {
         fragment_core::computer::fpac::HEAD_LINE_MAX_BYTES as f64
     }
 
-    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String) -> worker_sys::web_sys::Response {
+    pub async fn handle(request: worker_sys::web_sys::Request, env: Env, ctx: worker_sys::Context, computer: String, route: String, epoch: Option<f64>) -> worker_sys::web_sys::Response {
         let req = Request::from(request);
         let ctx = Context::new(ctx);
         let (method, path) = (req.method().to_string(), req.path());
+        // the life a disk start's route names (its props': entry.mjs)
+        let epoch = epoch.filter(|e| e.is_finite() && *e >= 1.0).map(|e| e as u64);
         let answered = match route.as_str() {
-            "api" => egress_api(req, &env, &ctx, &computer, false).await,
+            "api" => egress_api(req, &env, &ctx, &computer, epoch, false).await,
             "model" => egress_model(req, &env, &ctx, &computer).await,
             "swap" => egress_swap(req, &env, &ctx, &computer).await,
             "codestorage" => egress_codestorage(req, &env).await,
@@ -5098,7 +5109,7 @@ impl ComputerEgress {
 /// Without the header, only the computer's own routes answer. A storage
 /// token names the code.storage the guest can reach: its egress's, on a
 /// local fleet (`egress_codestorage`).
-async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, model_call: bool) -> CellResult<Response> {
+async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, epoch: Option<u64>, model_call: bool) -> CellResult<Response> {
     let cfg = Config::from_env(env);
     let url = req.url()?;
     let path = url.path().to_string();
@@ -5110,7 +5121,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             // start line"): each a number, or left out
             let number = |key: &str| url.query_pairs().find(|(k, _)| k == key).and_then(|(_, v)| v.parse::<u64>().ok());
             let disk = json!({ "mountMs": number("diskMountMs"), "misses": number("diskMisses"), "refetches": number("diskRefetches") });
-            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex, "disk": disk })).await?);
+            return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex, "disk": disk, "epoch": epoch })).await?);
         }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
@@ -5341,7 +5352,7 @@ async fn egress_model(mut req: Request, env: &Env, ctx: &Context, computer: &str
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(js_sys::Uint8Array::from(body.as_slice()).into()));
     let api = Request::new_with_init(&format!("http://api.fragment.internal{route}"), &init)?;
-    egress_api(api, env, ctx, computer, true).await
+    egress_api(api, env, ctx, computer, None, true).await
 }
 
 /// Whether `p` is its agent's person's Vault's: a key's placeholder whose

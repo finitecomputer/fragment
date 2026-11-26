@@ -104,6 +104,7 @@ test("a start on a disk also routes its daemon's host, the disk in its props; a 
   await startIntercepted(c, {}, () => intercept(c, props, [], false, disk), () => false);
   assert.deepEqual([...seen.asked].sort(), [`http://${API} → api`, `http://${MODEL} → model`, "http://fpac.fragment.internal → fpac"].sort());
   assert.deepEqual(bound.find(([route]) => route === "fpac"), ["fpac", disk], "its props carry the disk");
+  assert.deepEqual(bound.find(([route]) => route === "api"), ["api", disk], "so do its API's: its guest's reads name its life");
   assert.ok(seen.atStart.has("http://fpac.fragment.internal"), "in place at the start, as every intercept is");
   const plain = container();
   await startIntercepted(plain.c, {}, () => intercept(plain.c, egress, [], false, null), () => false);

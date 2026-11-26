@@ -207,6 +207,11 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
                 }
                 if settling > 0 {
                     Delay::from(std::time::Duration::from_millis(settling.min(deadline - now) as u64)).await;
+                    // a wait that took the call's time begins no call more:
+                    // the wipe's own goes on past its deadline (Codex on #1552)
+                    if js::now_ms() >= deadline {
+                        break;
+                    }
                 }
             }
             let note = match settled_at {

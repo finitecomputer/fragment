@@ -755,7 +755,8 @@ export class ComputerEgress extends WorkerEntrypoint {
     // a relay only where one was asked for: its route, a GET that upgrades
     // (Rust strips the relay's headers from every other answer besides)
     const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
-    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
+    // a disk start's API names its life (`disk.epoch`): its guest's reads say whose
+    const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route, this.ctx.props.disk?.epoch ?? null);
     const lease = asked ? answer.headers.get("x-fragment-relay") : null;
     if (!lease) return answer;
     const h = answer.headers;

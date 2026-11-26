@@ -170,6 +170,15 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
     }
 }
 
+/// Whether a guest's read of its view is its running life's, and so heard
+/// and, on a disk, keeps it as come up: on a disk, only a read that names
+/// the life that runs (its start's generation, its route's); one in flight
+/// from a start that ended names that start (Codex on #1552). Off a disk,
+/// every read (its route names no life).
+pub fn read_is_running_lifes(on_disk: bool, read: Option<u64>, running: Option<u64>) -> bool {
+    !on_disk || (read.is_some() && read == running)
+}
+
 /// How long after a wiped computer's container was gone its disk's objects
 /// are listed once more before the wipe is done: past any put its route
 /// took before then (R2 lands a put whose body it had within its own
@@ -428,6 +437,17 @@ mod tests {
         assert_eq!(fallback(Some(&claim), None, Unusable, false), Fallback::Fresh);
         assert_eq!(fallback(Some(&claim), None, Blank, false), Fallback::Fresh);
         assert_eq!(fallback(None, None, Unmountable, false), Fallback::Nowhere, "no head: nothing to start over from");
+    }
+
+    #[test]
+    fn on_a_disk_only_the_running_lifes_read_is_heard() {
+        assert!(read_is_running_lifes(true, Some(3), Some(3)), "valid: the life that runs");
+        assert!(!read_is_running_lifes(true, Some(2), Some(3)), "a read in flight from the start before");
+        assert!(!read_is_running_lifes(true, Some(3), None), "none runs");
+        assert!(!read_is_running_lifes(true, None, Some(3)), "a read that names no life");
+        assert!(!read_is_running_lifes(true, None, None));
+        assert!(read_is_running_lifes(false, None, Some(3)), "off a disk, every read");
+        assert!(read_is_running_lifes(false, None, None));
     }
 
     #[test]

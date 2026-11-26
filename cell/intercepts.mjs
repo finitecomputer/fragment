@@ -38,7 +38,9 @@ function swapped(c, egress, hosts) {
 // survives a stop: each start registers them again.
 export function intercept(c, egress, swapHosts, codestorage, disk) {
   const each = [
-    () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
+    // a disk's too: its guest's reads name its life (`epoch`), so one in
+    // flight from a start that ended counts for none after it
+    () => c.interceptOutboundHttp("api.fragment.internal", egress("api", disk)),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
   ];
   if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
