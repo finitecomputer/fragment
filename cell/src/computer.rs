@@ -2982,7 +2982,7 @@ impl ComputerCell {
             let (g, ms) = t.split_once(' ')?;
             (g.parse::<u64>().ok()? == generation).then(|| ms.parse::<i64>().ok()).flatten()
         });
-        told.map_or(DISK_EXIT_WAIT_MS, |ms| fpac::flush_kept_ms(ms))
+        told.map_or(DISK_EXIT_WAIT_MS, fpac::flush_kept_ms)
     }
 
     /// The test lever `fpac-refuse-at-stop`: its route refuses (503, as R2
