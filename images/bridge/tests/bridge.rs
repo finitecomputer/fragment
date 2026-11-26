@@ -1196,7 +1196,7 @@ async fn a_routine_with_no_chat_runs_at_home() {
     // its link, bound, naming its SimpleX chat (no core runs here)
     let linked = |phase: link::Phase| {
         let l = link::Link { phase, ..Default::default() };
-        let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()), moved: None, carried: vec![], unposted: false };
+        let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()), moved: None, carried: vec![] };
         run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
     };
     linked(link::Phase::Linked { contact: 3, name: "paul".into() });
@@ -1384,7 +1384,7 @@ async fn a_routine_waits_for_its_simplex_chat() {
     let dir = support::dir("routine-waits");
     // its link, bound, naming its SimpleX chat (no core runs here), whose making the platform refuses for now
     let l = link::Link { phase: link::Phase::Linked { contact: 3, name: "paul".into() }, ..Default::default() };
-    let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()), moved: None, carried: vec![], unposted: false };
+    let saved = run::Saved { identity: "npub1juniper".into(), generation: 1, link: l, used: Default::default(), abandoned: Default::default(), receiving: Default::default(), sending: Default::default(), chat: Some(simplex.clone()), moved: None, carried: vec![] };
     run::store(&dir.join("simplex").join("juniper--k3x9"), &saved).expect("its link's file");
     fake.with(|w| {
         w.refuse_makes = true;
