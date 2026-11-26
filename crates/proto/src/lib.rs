@@ -2710,9 +2710,9 @@ pub mod wipe;
 mod tests {
     use super::*;
 
-    /// Goal: a storage token says whether it writes, add-only. Method: a
-    /// host before `?access=read` names no `write` (it minted writers'
-    /// alone), a read token says false; `access` is read or left out.
+    /// Goal: "Only you" (FIN-615, PR 16b's `job.read`, PR 18's label) is
+    /// members only with no one else in it or invited. Method: each way
+    /// past it, one at a time.
     #[test]
     fn only_you_is_members_only_with_no_one_else_in_or_invited() {
         let alone = Sharing { visibility: Visibility::Members, members: 3, guests: 0, invites: Some(0), reach: false };
@@ -2724,6 +2724,9 @@ mod tests {
         assert!(!Sharing { visibility: Visibility::Public, ..alone }.only_you(), "public");
     }
 
+    /// Goal: a storage token says whether it writes, add-only. Method: a
+    /// host before `?access=read` names no `write` (it minted writers'
+    /// alone), a read token says false; `access` is read or left out.
     #[test]
     fn a_storage_token_says_whether_it_writes() {
         let older: StorageToken = serde_json::from_str(r#"{"token":"t","repo":"r","api":"https://a","expiresAt":1}"#).unwrap();
