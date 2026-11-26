@@ -2026,19 +2026,30 @@ A subscribe answers one page of backlog (at most `CHANNEL_PAGE` records and
 `CHANNEL_PAGE_MAX_BYTES`); with `more: true`, subscribe again from `next`.
 The page that reaches the end makes it live, so records arrive in order.
 
-A socket's role is fixed when it connects, and a channel's records and
-drafts reach it only while that role may read the channel as declared now:
-a deploy that raises a channel's read role, or drops the channel, stops
-them at once for the sockets below it, which still follow the channel and
-get it again should the role come back down. Removing a member, rotating the
-share link, or a fragment leaving `public` closes the sockets it admitted;
-a role change closes theirs (and an agent's owner's) with 4001, after which
-the library reconnects. A signed-in socket is checked again with the
-registry at its next frame after `LIVE_IDENTITY_MS`: a sign-out, an ended
-session or a revoked key closes it with 4001, as does a registry that
-cannot answer, or a fragment that woke from hibernation meanwhile on a
-socket signed in by cookie (its token is never stored; a key's socket is
-asked again as ever). A page's unsigned
+A socket is sent a channel's record or draft only on a decision that
+holds now: its role (the one a connect decides) may read the channel as
+declared now, and a socket signed by a key was asked who it is within
+`LIVE_IDENTITY_MS`. A follower that is not is closed with 4001, never
+skipped: the library reconnects and resubscribes from its cursor, which a
+channel above its role refuses until it may read it again, so no record
+is missed. What the fragment decides reaches every socket at once:
+removing a member, rotating the share link, or a fragment leaving `public`
+closes the sockets it admitted (4003); a role change closes theirs (and an
+agent's owner's) with 4001; a deploy that raises a channel's read role, or
+drops the channel, closes its followers below it with 4001. What the
+registry holds of who a socket is reaches it when it is asked again, its
+role decided again with the answer (a role that differs closes it with
+4001): a key's socket within `LIVE_IDENTITY_MS` plus one reconnect (an
+agent its owner holds lower, a revoked key), at its next frame once half
+that passed, or at the next record or draft sent it after it; a cookie's
+at its next frame after `LIVE_IDENTITY_MS` (a sign-out, an ended
+session). A registry that cannot answer closes it with 4001 too, as does
+a fragment that woke from hibernation meanwhile on a socket signed in by
+cookie (its token is never stored; a key's socket is asked again as
+ever). A client signed by a key that pings at least every half of
+`LIVE_IDENTITY_MS` (a computer's follower, the iOS app) is never past it
+when a broadcast comes; one that only listens is reconnected about once
+that while its channels are busy. A page's unsigned
 socket that the fragment refuses (401, 403) is opened and closed at once
 with 4003, for good, rather than refused by status (a browser would dial
 again, and Firefox holds back every socket to `/__live` after a refused

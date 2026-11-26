@@ -13,22 +13,27 @@
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
 //!
-//! A socket's role is the one a connect decides (`permit::decide` over
-//! the caller's standing), decided again each time who it is is asked
-//! again (below): a role that would differ now closes it with 4001
-//! (`ROLE_CHANGED`), and the library reconnects at the new role. So what
-//! the registry holds of who it is (an agent held lower by its owner, as
-//! a key revoked) reaches an open socket within `LIVE_IDENTITY_MS`, at its
-//! next frame. It reads a channel as `decide` says over that role and the
-//! channel as it is declared now (`socket_reads`): at its subscribe, at
-//! each record and draft sent to the channel's followers, and at each
-//! query. So a deploy that raises a channel's read role stops what reaches
-//! the sockets below it at once; they still follow it, and are sent it
-//! again should it come back down. Removing a member closes theirs, and
-//! rotating the share link closes link holders' (4003); deleting the
-//! fragment closes every socket (4004). Both codes are final: the browser
-//! library does not reconnect after them. A member whose role changes
-//! here has theirs closed with 4001 at once.
+//! A socket is sent a channel's record or draft only on a decision that
+//! holds now (`sends_to`): its role, the one a connect decides
+//! (`permit::decide` over the caller's standing), reads the channel as it
+//! is declared now (`socket_reads`), and a socket signed by a key was
+//! asked who it is within `LIVE_IDENTITY_MS`. A follower that is not is
+//! closed with 4001 (`ROLE_CHANGED`), never skipped: the library
+//! reconnects, decided afresh, and resubscribes each channel from its
+//! cursor, which a channel above its role refuses until it may read it
+//! again; so no record is missed. Each time who it is is asked again
+//! (below), its role is decided again too, and one that would differ now
+//! closes it with 4001 as well. So what the fragment decides (a member
+//! removed or their role changed, a channel's read role, the visibility,
+//! the share link) reaches every socket at once, and what the registry
+//! holds of who it is reaches a key's socket (an agent held lower by its
+//! owner, a key revoked) within `LIVE_IDENTITY_MS` plus one reconnect, and
+//! a cookie's (a sign-out) at its next frame after that. A socket asks
+//! the same `decide` at its subscribe and at each query. Removing a member
+//! closes theirs, and rotating the share link closes link holders' (4003);
+//! deleting the fragment closes every socket (4004). Both codes are final:
+//! the browser library does not reconnect after them. A member whose role
+//! changes here has theirs closed with 4001 at once.
 //!
 //! A query over the socket runs as the socket's principal and role, as its
 //! subscriptions read, and outside the public call budget (ops.rs): no
@@ -38,9 +43,11 @@
 //! budget, so reconnecting to get more is bounded as calls are.
 //!
 //! A signed-in socket acts as who it connected as, at the role it
-//! connected with, for `LIVE_IDENTITY_MS`; at its next frame after that,
-//! the registry is asked again with the credential it connected with, and
-//! its role decided again with what it answers. A key is a public key, kept in the
+//! connected with, until the registry is asked again with the credential
+//! it connected with, and its role decided again with what it answers: at
+//! its next frame once `LIVE_IDENTITY_MS` passed, or half that for a key's
+//! socket, so a client that pings that often (a computer's follower, the
+//! CLI) is never past the bound when a broadcast comes. A key is a public key, kept in the
 //! socket's attachment, so it is asked about after waking too; a cookie's
 //! token is a secret, held in this activation's memory only. A socket
 //! whose credential no longer names its principal (a sign-out, an ended
@@ -181,14 +188,35 @@ fn state_of(ws: &WebSocket) -> Option<LiveState> {
     ws.deserialize_attachment::<LiveState>().ok().flatten()
 }
 
-/// What a broadcast reads of a socket's attachment: its id, its role and
-/// the channels it follows, and no more (its presence is any JSON a page
-/// set). Every release's attachment has carried its role (`LiveState`).
+/// What a broadcast reads of a socket's attachment: its id, its role, the
+/// channels it follows, and when a key's socket was last asked who it is,
+/// and no more (its presence is any JSON a page set). Every release's
+/// attachment has carried them (`LiveState`).
 #[derive(Deserialize)]
 struct Follows {
     id: String,
     role: Role,
     subs: Vec<String>,
+    checked_at: i64,
+    #[serde(default)]
+    key: Option<String>,
+}
+
+/// Whether a follower is sent what a channel read at `read` carries (none:
+/// not declared now), on a decision that holds now: its role reads it,
+/// and a key's socket was asked who it is within `LIVE_IDENTITY_MS`. One
+/// that is not is closed (4001), never skipped (the module doc): records
+/// and drafts alike.
+fn sends_to(ws: &WebSocket, st: &Follows, read: Option<Role>, now: i64) -> bool {
+    let why = if st.key.is_some() && now - st.checked_at >= limits::LIVE_IDENTITY_MS {
+        "who you are is checked again: reconnect"
+    } else if !read.is_some_and(|read| socket_reads(st.role, read).is_ok()) {
+        "what you follow changed: reconnect"
+    } else {
+        return true;
+    };
+    let _ = ws.close(Some(ROLE_CHANGED), Some(why));
+    false
 }
 
 /// Whether a socket at `role` reads what needs `read` (a channel, a
@@ -303,23 +331,20 @@ impl FragmentCell {
         }
     }
 
-    /// A record to the sockets following its channel that read it now
-    /// (`socket_reads`): none are looked at when no socket may follow it
-    /// (`LiveMemory::followers`). One that may not read it still follows,
-    /// and a channel not declared now is read by none.
+    /// A record to the sockets following its channel, each on a decision
+    /// that holds now (`sends_to`): none are looked at when no socket may
+    /// follow it (`LiveMemory::followers`).
     pub(crate) fn broadcast_record(&self, r: &ChannelRecord) {
         if !self.followed(&r.channel) {
             return;
         }
-        let read = self.channel_read_role(&r.channel).ok();
+        let (read, now) = (self.channel_read_role(&r.channel).ok(), js::now_ms());
         let frame = LiveOut::record_frame(r);
         let mut found = BTreeSet::new();
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
             let Some(st) = follows_of(&ws) else { continue };
-            if st.subs.contains(&r.channel) {
-                if read.is_some_and(|read| socket_reads(st.role, read).is_ok()) {
-                    let _ = ws.send_with_str(&frame);
-                }
+            if st.subs.contains(&r.channel) && sends_to(&ws, &st, read, now) {
+                let _ = ws.send_with_str(&frame);
                 found.insert(st.id);
             }
         }
@@ -328,8 +353,8 @@ impl FragmentCell {
         }
     }
 
-    /// A draft to the sockets following its channel that read it now
-    /// (`socket_reads`), at most
+    /// A draft to the sockets following its channel, each on a decision
+    /// that holds now (`sends_to`), at most
     /// `limits::PRESENCE_PER_S` a second across the fragment (a poster
     /// sends only its latest): `false` when past that pace, and dropped.
     /// `thinking`: ms a text step's model has reasoned with no words yet.
@@ -344,7 +369,7 @@ impl FragmentCell {
         let read = self.channel_read_role(channel).ok();
         let frame = LiveOut::Draft { channel: channel.to_string(), principal: principal.to_string(), turn: turn.to_string(), text: text.map(str::to_string), at: now, thinking };
         for ws in self.state.get_websockets_with_tag(LIVE_TAG) {
-            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && read.is_some_and(|read| socket_reads(st.role, read).is_ok())) {
+            if follows_of(&ws).is_some_and(|st| st.subs.iter().any(|c| c == channel) && sends_to(&ws, &st, read, now)) {
                 send(&ws, &frame);
             }
         }
@@ -499,7 +524,9 @@ impl FragmentCell {
     /// answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
         let now = js::now_ms();
-        if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
+        // a key's socket before it reaches the bound at a broadcast (`sends_to`)
+        let due = if st.key.is_some() { limits::LIVE_IDENTITY_MS / 2 } else { limits::LIVE_IDENTITY_MS };
+        if !st.signed() || now - st.checked_at < due {
             return true;
         }
         let credential = match &st.key {
