@@ -60,24 +60,6 @@ export class DirectoryBackupGateway extends SandboxGateway {
   }
 }
 
-// `body` with one byte of its first chunk flipped, its length kept: the
-// lever `damage-restores`, as FIN-775's transfers came. The chunk is
-// copied, never written in place.
-function flipped(body) {
-  let done = false;
-  const flip = new TransformStream({
-    transform(chunk, out) {
-      if (!done && chunk.byteLength > 0) {
-        chunk = new Uint8Array(chunk);
-        chunk[chunk.byteLength >> 1] ^= 0xff;
-        done = true;
-      }
-      out.enqueue(chunk);
-    },
-  });
-  return body.pipeThrough(flip);
-}
-
 export default rs.default;
 
 export class Fragment extends DurableObject {
