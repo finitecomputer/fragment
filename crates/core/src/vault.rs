@@ -834,21 +834,24 @@ mod tests {
     #[test]
     fn an_ask_is_held_to_the_vaults_hosts_as_its_answer_would_be() {
         use crate::computer::egress::VAULT_HOSTS_MAX;
-        let c = catalog();
         let eight: Vec<String> = (0..VAULT_HOSTS_MAX).map(|i| format!("h{i}.example.com")).collect();
         // a new secret toward a ninth host: refused as the ask is made, in the cap's words
         let new = ask_hosts(&ask("ninth", "a ninth", &["h8.example.com"]), None);
         assert_eq!(new, strings(&["h8.example.com"]));
-        assert!(room(&new, &eight, &eight, &c).expect_err("a ninth host").to_string().contains("at most 8 hosts"));
+        let refused = room(&new, &eight, &eight).expect_err("a ninth host").to_string();
+        assert!(refused.contains("at most 8 hosts") && refused.contains("would make 9"), "{refused}");
+        // a catalog's host is one of the eight too
+        assert!(room(&ask_hosts(&ask("router", "a catalog host", &["openrouter.ai"]), None), &eight, &eight).is_err());
         // one toward a host the Vault goes to already costs nothing
-        assert_eq!(room(&ask_hosts(&ask("again", "same host", &["h0.example.com"]), None), &eight, &eight, &c), Ok(()));
+        assert_eq!(room(&ask_hosts(&ask("again", "same host", &["h0.example.com"]), None), &eight, &eight), Ok(()));
         // an Allow's hosts are the kept secret's and the asked ones together
         let kept = held(&["h7.example.com"], Place::default(), &["other"]);
         let allow = ask_hosts(&ask("site7", "and a ninth", &["h8.example.com"]), Some(&kept));
         assert_eq!(allow, strings(&["h7.example.com", "h8.example.com"]));
-        assert!(room(&allow, &eight[..7], &eight, &c).is_err(), "Allow adding a ninth host");
-        assert_eq!(room(&ask_hosts(&ask("site7", "no new host", &[]), Some(&kept)), &eight[..7], &eight, &c), Ok(()));
+        assert!(room(&allow, &eight[..7], &eight).is_err(), "Allow adding a ninth host");
+        assert_eq!(room(&ask_hosts(&ask("site7", "no new host", &[]), Some(&kept)), &eight[..7], &eight), Ok(()));
     }
+
 
     fn held(hosts: &[&str], place: Place, agents: &[&str]) -> Secret {
         Secret {
