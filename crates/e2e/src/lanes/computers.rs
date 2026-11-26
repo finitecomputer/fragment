@@ -3603,6 +3603,84 @@ pub fn computer_room(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+const DAMAGE_CHECKS: [&str; 2] = [
+    "a start whose restore comes in damaged (the lever's damage-restores) asks again and comes up from that same save: never found unusable, no rollback, no strike",
+    "a save whose copy in R2 is really bad (the lever's damage-stored) is found unusable as before, and the start comes up from the save before it",
+];
+
+/// A computer's restores (FIN-784; cell/backups.mjs): bytes damaged on
+/// their way into its container, the right length with the wrong contents
+/// (FIN-775), are asked again, and a save is found unusable only once every
+/// try came damaged. Before this, the first damaged restore marked a whole
+/// save unusable, and went back to the save before.
+/// Each start is its owner's restart, which restores the newest good save,
+/// never a snapshot (a preview keeps one at each sleep), and each check
+/// says it restored from the save.
+pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("computer-damage", &[crate::Need::Computers, crate::Need::Levers]) {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let (id, ok) = computer_saved(s, api, &owner, 1)?;
+    let within = if s.hosted() { HOSTED_WAKE } else { WAKE + WAKE };
+    let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    // the lines its nodes logged (a hosted run reads none)
+    let lines = |s: &Suite, what: &str| super::vault::logs(s).matches(what).count();
+    let generation = |v: &Value| v["generation"].as_u64().unwrap_or(0);
+    let from_save = |v: &Value, save: &Value| v["phase"] == "awake" && v["restored"]["from"] == "backup" && v["restored"]["save"] == save["id"];
+    // woken from save 1, then restarted with its home's restore damaged: its
+    // restart's save, restored from on its second try
+    let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let up = s.eventually(within, || view()["phase"] == "awake");
+    let asked = lines(s, r#""restore":"asked again""#);
+    let damaging = lever_with(api, &id, json!({ "op": "damage-restores", "times": 1 }))?;
+    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&view()), within)?;
+    let kept = lever(api, &id, "saves")?.body;
+    // its damage was spent on the way (a lever's pull answers what the last left)
+    let spent = lever_with(api, &id, json!({ "op": "damage-restores", "times": 0 }))?.body;
+    s.ok(
+        DAMAGE_CHECKS[0],
+        ok && up
+            && damaging.status == 200
+            && spent["unspent"] == 0
+            && r.status == 200
+            && done
+            && kept["saves"][0]["number"] == 2
+            && from_save(&v, &kept["saves"][0])
+            && v["restored"]["rollback"] == false
+            && kept["failures"] == 0
+            && kept["saves"].as_array().is_some_and(|l| l.iter().all(|s| s["unusable"] == false))
+            && (s.hosted() || lines(s, r#""restore":"asked again""#) > asked),
+        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body, "spent": spent }),
+    );
+    // put to sleep, its newest save's copy in R2 damaged, and restarted:
+    // asleep, it saves nothing more, so its start restores that save
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let saved = lever(api, &id, "saves")?.body;
+    let newest = saved["saves"][0].clone();
+    let damaging = lever_with(api, &id, json!({ "op": "damage-stored", "save": newest["number"] }))?;
+    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&view()), within)?;
+    let kept = lever(api, &id, "saves")?.body;
+    // the save before it a start restores: the newest not found unusable
+    let before = kept["saves"].as_array().and_then(|l| l.iter().skip(1).find(|s| s["unusable"] == false)).cloned().unwrap_or(Value::Null);
+    s.ok(
+        DAMAGE_CHECKS[1],
+        slept
+            && damaging.status == 200
+            && r.status == 200
+            && done
+            && newest["number"] == 3
+            && before["number"] == 2
+            && from_save(&v, &before)
+            && v["restored"]["rollback"] == true
+            && kept["saves"][0]["id"] == newest["id"]
+            && kept["saves"][0]["unusable"] == true
+            && kept["failures"] == 0,
+        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body }),
+    );
+    Ok(())
+}
+
 /// A computer of `owner`'s made and woken `lives` times, each life put to
 /// sleep, so saved: its id, and whether each came up and slept.
 fn computer_saved(s: &Suite, api: &Api, owner: &crate::Keys, lives: u32) -> Result<(String, bool)> {

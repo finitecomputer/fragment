@@ -206,7 +206,7 @@ const ADMIN_BUCKET: &str = "STAGE";
 /// it imports from beside it, and theirs (a deploy runs it from the source
 /// tree, so only a staged copy can miss one:
 /// `the_staged_shim_holds_what_it_imports`).
-pub const SHIM_FILES: [&str; 6] = ["entry.mjs", "backup-reads.mjs", "intercepts.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
+pub const SHIM_FILES: [&str; 6] = ["entry.mjs", "backups.mjs", "intercepts.mjs", "relay.mjs", "door.mjs", "door-rules.mjs"];
 
 /// A copy of the built cell project at `dir`: its config (without its
 /// `build` step: a staged copy has no source to build), its shim, and its

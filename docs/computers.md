@@ -533,12 +533,23 @@ the DO removes them from one started from a snapshot.
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not set aside nor found
   unusable. A
-  start whose save will never restore (its archive gone or altered)
-  marks it unusable and starts again at once from the one before, with no
-  strike against the computer. A read of its archive that storage failed
-  (R2 answered an error) is asked again a few times within the restore
-  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
-  start on one.
+  start whose save will never restore (its archive gone, or R2's own copy
+  not its record) marks it unusable and starts again at once from the one
+  before, with no strike against the computer. A read of its archive that
+  storage failed (R2 answered an error) is asked again a few times within
+  the restore (`cell/backups.mjs`), since the SDK's shim would fail the
+  whole start on one.
+- **A restore whose bytes came damaged is asked again** (FIN-784): bytes
+  have come the right length with the wrong contents on their way into a
+  container (FIN-775). The SDK's shim checks what a restore downloads
+  against its record's size and SHA-256 (the shim's own hash of what it
+  made) and reports a mismatch as `BACKUP_INTEGRITY`. Such a restore is
+  asked again at once, three tries in all within its own bound
+  (`cell/backups.mjs`), and a save is found unusable, as above, only once
+  every try came damaged, or a try after a damaged one failed otherwise.
+  Damage on the way in is rare enough that three in a row say the copy
+  itself is bad. A save is still checked for length alone as it reaches
+  R2; FPAC's checksummed blocks replace saves (FIN-744).
 - **A save too big for its disk is set aside** (Paul, 2026-11-20:
   "rollback is preferred to being stuck"). A restore can need a little
   more room than the life that saved it used: the sandbox runtime stops

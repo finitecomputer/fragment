@@ -798,7 +798,7 @@ struct RelayClosed {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s and `hold-saves`', `ms`
+/// `times` is `fail-saves`' and `damage-restores`', `on` is `always-on`'s and `hold-saves`', `ms`
 /// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
 /// `total` and `free` are `disk`'s.
 #[derive(Deserialize)]
@@ -842,7 +842,8 @@ struct TestLever {
     free: Option<u64>,
     #[serde(default)]
     data: Option<u64>,
-    /// `fail-restore`'s: the number of the save whose restores fail.
+    /// `fail-restore`'s: the number of the save whose restores fail;
+    /// `damage-stored`'s: the save whose copy in R2 it damages.
     #[serde(default)]
     save: Option<u64>,
 }
@@ -3056,6 +3057,9 @@ impl ComputerCell {
     /// `fail-restore {save}` stops the restore of each start from save
     /// `save` (its number; 0: none) for want of room, a failed start as
     /// the sandbox runtime's guard makes one on a disk too small for it;
+    /// `damage-restores {times}` damages the next restores on their way, one
+    /// byte each, and `damage-stored {save}` R2's copy of save `save`
+    /// (cell/backups.mjs);
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
@@ -3257,6 +3261,28 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
+            "damage-restores" => {
+                // the next `times` restores of its saves each come with one
+                // byte flipped on their way through the gateway, their length
+                // kept, as FIN-775's transfers came (0: none); answers how
+                // many the lever's last pull left unspent
+                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
+                let unspent = self.call("damage", &[JsValue::from_f64(f64::from(times))]).await?.as_f64().map_or(0, |n| n as u32);
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "times": times, "unspent": unspent }));
+                Ok(json!({ "computer": id, "unspent": unspent }))
+            }
+            "damage-stored" => {
+                // save `save`'s archives in R2, one byte of each flipped: a
+                // stored copy really bad, which a start finds unusable
+                let n = b.save.ok_or_else(|| CellError::invalid("damage-stored names its save's number"))?;
+                let saves = self.saves()?;
+                let save = saves.every_save().into_iter().find(|s| s.number == n).ok_or_else(|| CellError::invalid(format!("no save {n}")))?;
+                for record in &save.records {
+                    self.call("damageStored", &[js::to_js(record)]).await?;
+                }
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "save": n }));
+                Ok(json!({ "computer": id }))
+            }
             "fail-restore" => {
                 // each start that restores save `save` stops its restore for
                 // want of room, as on a disk that save no longer fits (0: none)
@@ -3341,7 +3367,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "owed": months }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, damage-restores, damage-stored, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
         }
     }
 
