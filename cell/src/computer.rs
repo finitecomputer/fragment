@@ -1995,17 +1995,8 @@ impl ComputerCell {
                 // disk it no longer fits (2026-11-20), heard as that is
                 let lever = self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string());
                 // a directory's record before any inside it, as it was taken;
-                // together within `RESTORE_MS`, each given what is left. A
-                // start after a failed one reads R2's copy of each record
-                // from the start (entry.mjs `checkAhead`): a copy damaged in
-                // R2 is found so even when a restore comes damaged too late
-                // in its time, or after the restores before it, to read it
-                // after (an 8 GB save's, say)
+                // together within `RESTORE_MS`, each given what is left
                 let until = js::now_ms() + RESTORE_MS;
-                let after_failed = self.lifecycle()?.failures() > 0;
-                if after_failed {
-                    self.call("checkAhead", &[g.clone(), js::to_js(&save.records), JsValue::from_f64(RESTORE_MS as f64)]).await?;
-                }
                 for record in &save.records {
                     let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
                     let restored = match lever {
@@ -2025,17 +2016,6 @@ impl ComputerCell {
                     }
                     if let Some(why) = answer["unusable"].as_str() {
                         return Err(Unstarted::Unusable(of(why)));
-                    }
-                    // its restore kept coming damaged, R2's copy not proven
-                    // bad: a first start fails as one that may pass (the next
-                    // reads R2's copy ahead); a start after a failed one
-                    // finds the save unusable, as master did at once, so no
-                    // computer is stuck on it
-                    if let Some(why) = answer["unconfirmed"].as_str() {
-                        return Err(match after_failed {
-                            true => Unstarted::Unusable(of(&format!("{why} (after a failed start)"))),
-                            false => CellError::host(of(why)).into(),
-                        });
                     }
                 }
                 // the image's check, behind the gate: nothing reads /data yet

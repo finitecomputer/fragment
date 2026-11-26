@@ -3608,11 +3608,11 @@ const DAMAGE_CHECKS: [&str; 2] = [
     "a save whose copy in R2 is really bad (the lever's damage-stored) is found unusable as before, and the start comes up from the save before it",
 ];
 
-/// A computer's restores, checked end to end (FIN-784; cell/backups.mjs):
-/// bytes damaged on their way into its container, the right length with
-/// the wrong contents (FIN-775), are asked again, and a save is condemned
-/// only when R2's own copy is not its record. Before this, a damaged
-/// restore marked a whole save unusable, and went back to the save before.
+/// A computer's restores (FIN-784; cell/backups.mjs): bytes damaged on
+/// their way into its container, the right length with the wrong contents
+/// (FIN-775), are asked again, and a save is found unusable only once every
+/// try came damaged. Before this, the first damaged restore marked a whole
+/// save unusable, and went back to the save before.
 /// Each start is its owner's restart, which restores the newest good save,
 /// never a snapshot (a preview keeps one at each sleep), and each check
 /// says it restored from the save.

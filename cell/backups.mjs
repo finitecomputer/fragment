@@ -1,133 +1,43 @@
-// A computer's restores, checked end to end, and asked again when their
-// bytes came damaged or storage failed them (entry.mjs's `ContainerHost`
-// and `DirectoryBackupGateway`). Kept apart from entry.mjs so Node can
-// test it.
+// A computer's restores, asked again when their bytes came damaged or
+// storage failed them (entry.mjs's `ContainerHost` and
+// `DirectoryBackupGateway`). Kept apart from entry.mjs so Node can test it.
 //
 // The Sandbox SDK's shim hashes each archive as it makes it (a record's
-// `sha256` is its producer's own) and streams it out through the egress
-// intercept in parts R2 checks for length alone; a restore streams it back
-// in, and the shim checks its size and SHA-256 before it swaps anything in.
-// Bytes on either way can come the right length with the wrong contents
-// (FIN-775). So (FIN-784) a restore whose bytes came damaged (the SDK's
-// BACKUP_INTEGRITY, a corrupt archive to a wrong SHA-256) is asked again
-// unless R2's own copy is found not to hash to its record, on two reads
-// that agree on what it holds instead: only then is a save unusable. A
-// check that cannot be made condemns nothing. A save is still checked for
-// length alone as it reaches R2 (FIN-784's other half).
+// `sha256` is its producer's own); a restore streams it back in, and the
+// shim checks its size and SHA-256 before it swaps anything in, reporting
+// any mismatch (a corrupt archive to a wrong SHA-256) as BACKUP_INTEGRITY.
+// Bytes on their way in can come the right length with the wrong contents
+// (FIN-775), so (FIN-784) a restore whose bytes came damaged is asked again
+// at once, rather than its save found unusable at the first: damage on the
+// way in is rare enough that `RESTORE_TRIES` damaged in a row say the copy
+// itself is bad, and the restore then ends as it always did, unusable.
 
-// Tries of one record's restore in all while its bytes come in damaged and
-// R2's copy is not found bad: each moves a whole archive again, within the
-// start's own bound (computer.rs `RESTORE_MS`).
+// Tries of one record's restore in all while its bytes come in damaged,
+// each moving its whole archive again within the start's own bound
+// (computer.rs `RESTORE_MS`).
 export const RESTORE_TRIES = 3;
 
-// Whether `held` (what a read of R2's copy found: `{size, sha256}`, or
-// null when it is gone) is `record`'s archive.
-export function holds(held, record) {
-  return held !== null && held.size === record.size && held.sha256 === record.sha256;
-}
-
-function against(held, record) {
-  const found = held === null ? "is gone" : `holds ${held.size} bytes of SHA-256 ${held.sha256}`;
-  return `R2's copy ${found}, not its record's ${record.size} bytes of SHA-256 ${record.sha256}`;
-}
-
-// R2's copy of `record` read (`stored()`, twice when the first is not it),
-// as a verdict that never rejects: `{bad}` (two reads agree it is not its
-// record), `{}` (a read found it whole), or `{unread}` (a read failed, or
-// two disagreed: neither proven).
-export function verdictOf(record, stored) {
-  return copyOf(record, stored).catch((e) => ({ unread: String(e?.message ?? e) }));
-}
-
 // One record's restore. `restore()` answers null once it is in place, or
-// why its bytes came damaged; `stored()` reads what R2 holds of `record`;
-// `again(tried, why)` is told of each asked again. R2's copy is read beside
-// the tries after one that came damaged (`ahead`: its verdict already under
-// way, a start's after a failed one, begun with its first record's restore
-// so a copy damaged in R2 is found even when restores before it leave no
-// time to read it after: `ContainerHost.checkAhead`), and no try ever
-// waits for it: its
-// verdict is used once it is in, and awaited only once no try is left (the
-// last came damaged, or one failed otherwise). Answers null once restored, or
-// `{unusable}` when R2's own copy is not its record: the save never will
-// restore; or `{unconfirmed}` when its tries ran out damaged (or its time,
-// after this record came damaged) with R2's copy not proven bad (whole,
-// the damage the transfer's; or read neither whole nor bad: a CPU or time
-// limit on a very large one, or R2 failing it): the cell fails a first
-// start so, one that may pass, and at a start after a failed one finds the
-// save unusable, as master did at once, so no computer is stuck on it.
-// Throws whatever `restore` throws but damage.
-export async function restoreChecked({ record, restore, stored, again = () => {}, ahead = null }) {
-  // a read of R2's copy under way or done (it never rejects), and its
-  // verdict once in: {bad}, {unread} or {} (whole)
-  let checking = null;
-  let verdict = null;
-  const check = (under = verdictOf(record, stored)) => {
-    verdict = null;
-    checking = under.then((v) => (verdict = v));
-  };
-  if (ahead !== null) check(ahead);
-  // whether this record came in damaged at a try of this start
-  let came = false;
+// why its bytes came damaged; `again(tried, why)` is told of each asked
+// again. Answers null once restored, or `{unusable}` once `RESTORE_TRIES`
+// came damaged, or once a try after a damaged one failed otherwise (its
+// time ran out, say): as the first damaged one always ended. Throws
+// whatever a first try throws but damage.
+export async function restoreChecked({ restore, again = () => {} }) {
+  let damaged = null;
   for (let tried = 1; ; tried++) {
-    let damaged;
+    let why;
     try {
-      damaged = await restore();
+      why = await restore();
     } catch (e) {
-      // a try that failed otherwise ends the start: a read under way is
-      // awaited (within the start's own bound, as the try was), and a copy
-      // found bad heard, so the start goes back at once, no strike; one cut
-      // off by its time after this record came damaged, unconfirmed (a
-      // timeout alone is no damage)
-      const v = checking !== null ? await checking : verdict;
-      if (v?.bad) return { unusable: `${e?.message ?? e}; ${v.bad}` };
-      if (came && e?.name === "Overdue") return { unconfirmed: `${e.message}, after its bytes came damaged; R2's copy ${copyIs(v)}` };
-      throw e;
+      if (damaged === null) throw e;
+      return { unusable: `${damaged}; asked again, it failed: ${e?.message ?? e}` };
     }
-    if (damaged === null) return null;
-    came = true;
-    const last = tried >= RESTORE_TRIES;
-    const v = last && checking !== null ? await checking : verdict;
-    if (v?.bad) return { unusable: `${damaged}; ${v.bad}` };
-    if (v?.unread) damaged = `${damaged}; R2's copy unread: ${v.unread}`;
-    if (last) return { unconfirmed: `the restore of ${record.dir} came in damaged ${tried} times, R2's copy ${copyIs(v)}: ${damaged}` };
-    // the first that came damaged, or a read that failed: read beside the next try
-    if (checking === null || v?.unread) check();
-    again(tried, damaged);
+    if (why === null) return null;
+    damaged = why;
+    if (tried >= RESTORE_TRIES) return { unusable: `${why} (${tried} tries, each damaged)` };
+    again(tried, why);
   }
-}
-
-// What a verdict found R2's copy to be, in words.
-function copyIs(v) {
-  if (v === null || v === undefined) return "unread in its time";
-  return v.unread ? `unread: ${v.unread}` : "whole";
-}
-
-// Reads of R2's copy in all while one fails (R2 refused it, say), each
-// within the restore's own deadline: one that failed is made again at
-// once, never left until the next try, which may leave no time for it.
-export const STORED_TRIES = 3;
-
-async function readOf(stored) {
-  for (let tried = 1; ; tried++) {
-    try {
-      return await stored();
-    } catch (e) {
-      if (tried >= STORED_TRIES) throw e;
-    }
-  }
-}
-
-// What R2's copy of `record` is, as `verdictOf` says: whole once a read
-// finds its record; bad only when two reads agree on what it holds instead
-// (a read damaged on its own way never condemns it); else unread.
-async function copyOf(record, stored) {
-  const first = await readOf(stored);
-  if (holds(first, record)) return {};
-  const second = await readOf(stored);
-  if (holds(second, record)) return {};
-  const same = first === null ? second === null : second !== null && second.size === first.size && second.sha256 === first.sha256;
-  return same ? { bad: against(first, record) } : { unread: "two reads of R2's copy disagree" };
 }
 
 // A restore's ranged reads, asked again when storage failed them. The

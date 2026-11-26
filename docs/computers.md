@@ -539,33 +539,17 @@ the DO removes them from one started from a snapshot.
   storage failed (R2 answered an error) is asked again a few times within
   the restore (`cell/backups.mjs`), since the SDK's shim would fail the
   whole start on one.
-- **A restore is checked end to end** (FIN-784): bytes have come the
-  right length with the wrong contents on their way into or out of a
+- **A restore whose bytes came damaged is asked again** (FIN-784): bytes
+  have come the right length with the wrong contents on their way into a
   container (FIN-775). The SDK's shim checks what a restore downloads
-  against its record's size and SHA-256, the shim's own hash of what it
-  made, and reports any mismatch as `BACKUP_INTEGRITY`. Such a restore is
-  asked again at once, and R2's own copy is read and hashed beside the
-  tries after it (`cell/backups.mjs`; the backups' gateway,
-  `DirectoryBackupGateway.stored`, a call of its own, never through the
-  container), which never wait for it. When two reads agree that copy is
-  not its record, the save is unusable, as above, once a try beside them
-  failed too (a read that fails is made again at once, three in all);
-  otherwise the restore is asked again, three tries in all, within its own
-  bound. A restore whose tries all came damaged (or whose time ran out
-  after it came damaged), its copy in R2 not proven bad (whole, the damage
-  the transfer's; or read neither whole nor bad: its reads failed or
-  disagreed, or a very large one's ran out of time or CPU), fails a first
-  start as one that may pass, its save kept; at a start after a failed one
-  that save is found unusable, as master found every damaged restore's at
-  once, and the save before it is next, no strike ("rollback is preferred
-  to being stuck"). A start
-  after a failed one reads R2's copy of each of its records from the start
-  of its restores (`checkAhead`), so a copy damaged in R2 is found even
-  when a long restore, or the restores before it, leave no time to read it
-  after (an 8 GB save's). A first start's restore
-  that works reads nothing more. A save is still checked for length alone
-  as it reaches R2, so one damaged on its way out is found only by the
-  restore that reads it (FIN-784's other half, a lifecycle step of its own).
+  against its record's size and SHA-256 (the shim's own hash of what it
+  made) and reports a mismatch as `BACKUP_INTEGRITY`. Such a restore is
+  asked again at once, three tries in all within its own bound
+  (`cell/backups.mjs`), and a save is found unusable, as above, only once
+  every try came damaged, or a try after a damaged one failed otherwise.
+  Damage on the way in is rare enough that three in a row say the copy
+  itself is bad. A save is still checked for length alone as it reaches
+  R2; FPAC's checksummed blocks replace saves (FIN-744).
 - **A save too big for its disk is set aside** (Paul, 2026-11-20:
   "rollback is preferred to being stuck"). A restore can need a little
   more room than the life that saved it used: the sandbox runtime stops

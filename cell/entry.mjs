@@ -7,7 +7,7 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
-import { readAgain, restoreChecked, verdictOf } from "./backups.mjs";
+import { readAgain, restoreChecked } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
@@ -56,50 +56,7 @@ export class DirectoryBackupGateway extends SandboxGateway {
     };
     return readAgain(read, again);
   }
-
-  // What R2 holds at the control props' key (`ContainerHost`'s `#stored`):
-  // the size and SHA-256 of the bytes it read, or null when it is gone; cut
-  // off past `ms`. A call of its own, as the SDK's other control calls are,
-  // so its CPU is not the computer's alarm's. Read `STORED_READ_BYTES` at a
-  // time, each into a buffer of its own (never one written over while the
-  // digest may hold it).
-  async stored(ms) {
-    const { protocolVersion, mode, binding, key } = this.ctx.props ?? {};
-    if (protocolVersion !== 1 || mode !== "control") throw new Error("a stored copy is read with control props alone");
-    // (its bound from the call: an R2 answer slow to come shortens the read)
-    const signal = AbortSignal.timeout(ms);
-    const object = await this.env[binding].get(key);
-    if (object === null) return null;
-    const digest = new crypto.DigestStream("SHA-256");
-    const hashing = digest.getWriter();
-    const reader = object.body.getReader({ mode: "byob" });
-    let size = 0;
-    try {
-      // bounded: each read takes `STORED_READ_BYTES` until the last, short one
-      for (;;) {
-        signal.throwIfAborted();
-        const { value, done } = await reader.readAtLeast(STORED_READ_BYTES, new Uint8Array(STORED_READ_BYTES));
-        if (value?.byteLength) {
-          size += value.byteLength;
-          await hashing.write(value);
-        }
-        if (done || !value || value.byteLength < STORED_READ_BYTES) break;
-      }
-    } finally {
-      await reader.cancel().catch(() => {});
-    }
-    await hashing.close();
-    const sha256 = [...new Uint8Array(await digest.digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    return { size, sha256 };
-  }
 }
-
-// A read of R2's copy of a backup (`DirectoryBackupGateway.stored`) takes
-// this much at a time. On preview (2026-11-26) a 512 MiB copy read in 8 MiB
-// reads took 5.0 s and 0.97 s of CPU; piped whole into the digest in the
-// body's own small chunks, 8.1 s and 5.1 s, which put a copy over about
-// 3 GB past a Worker call's 30 s of CPU. The hash alone took 0.31 s.
-const STORED_READ_BYTES = 8 << 20;
 
 // `body` with one byte of its first chunk flipped, its length kept: the
 // lever `damage-restores`, as FIN-775's transfers came. The chunk is
@@ -403,9 +360,6 @@ class ContainerHost {
   // The e2e's lever `damage-restores` (computer.rs): how many of the next
   // restores' grants the gateway damages, one each.
   #damage = 0;
-  // A start's reads of R2's copies begun with its restores
-  // (`checkAhead`): its generation, and each record's verdict by its id.
-  #ahead = { generation: 0, verdicts: new Map() };
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -434,12 +388,6 @@ class ContainerHost {
     if (props.mode !== "read" || !(this.#damage > 0)) return props;
     this.#damage--;
     return { ...props, damage: true };
-  }
-
-  // What R2 holds of `record` (the gateway's `stored`), within `ms`.
-  #stored(record, ms) {
-    const control = this.#ctx.exports.DirectoryBackupGateway({ props: { protocolVersion: 1, mode: "control", binding: BACKUPS_BINDING, key: this.#key(record) } });
-    return bounded(`the check of record ${record.id}`, ms, () => control.stored(ms));
   }
 
   get #c() {
@@ -625,13 +573,13 @@ class ContainerHost {
   }
 
   // Restores `record` into its directory within `ms` (`Overdue` past it),
-  // asked again while its bytes come damaged and R2's copy is not found bad
-  // (backups.mjs `restoreChecked`; its verdict begun ahead, `checkAhead`,
-  // when its start asked): null once it is in place, `{unusable}`
-  // when the save itself will never restore (its archive gone, the SDK's
-  // BACKUP_NOT_FOUND, or R2's own copy not its record), or `{noRoom}` when
-  // it found no room on the disk (a restore's SandboxFileError ENOSPC),
-  // which the Rust side tells from a failure that may pass (it throws).
+  // asked again while its bytes come damaged (backups.mjs
+  // `restoreChecked`): null once it is in place, `{unusable}` when the
+  // save itself will never restore (its archive gone, the SDK's
+  // BACKUP_NOT_FOUND, or its bytes damaged at every try: BACKUP_INTEGRITY),
+  // or `{noRoom}` when it found no room on the disk (a restore's
+  // SandboxFileError ENOSPC), which the Rust side tells from a failure that
+  // may pass (it throws).
   async restore(generation, record, ms) {
     const until = Date.now() + ms;
     const left = () => Math.max(1, until - Date.now());
@@ -646,12 +594,8 @@ class ContainerHost {
       }
     };
     try {
-      const ahead = this.#ahead.generation === generation ? (this.#ahead.verdicts.get(record.id) ?? null) : null;
       return await restoreChecked({
-        record,
-        ahead,
         restore,
-        stored: () => this.#stored(record, left()),
         again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),
       });
     } catch (e) {
@@ -663,19 +607,6 @@ class ContainerHost {
       }
       throw e;
     }
-  }
-
-  // Start `generation`'s reads of R2's copy of each of `records`, begun
-  // with its first restore, all within `ms` of now, the start's own bound
-  // for its restores (a start's after a failed one, computer.rs
-  // `try_start`): a record's restore uses its verdict, so a copy damaged in
-  // R2 is found even when the restores before it leave no time to read it
-  // after. Answers at once.
-  checkAhead(generation, records, ms) {
-    const until = Date.now() + ms;
-    const left = () => Math.max(1, until - Date.now());
-    const verdicts = new Map(records.map((record) => [record.id, verdictOf(record, () => this.#stored(record, left()))]));
-    this.#ahead = { generation, verdicts };
   }
 
   // Deletes `record`'s archive within `ms` (`Overdue` past it).
