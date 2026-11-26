@@ -471,8 +471,12 @@ impl VaultCell {
         self.binds_alone(name, &checked.apps)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, apps: checked.apps, set_at: js::now_ms() };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
+        // a value set again ends any claim a move left (the move is gone,
+        // FIN-615 PR 13; a release before it, rolled back to, reads the
+        // column: docs/technical-debt-ledger.md, "A Vault row keeps the
+        // move's claim column")
         self.sql().exec(
-            "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret",
+            "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret, claim = NULL",
             vec![name.into(), sealed.into(), text.as_str().into()],
         )?;
         if let Some(r) = receipt {
