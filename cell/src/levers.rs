@@ -205,7 +205,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             /// and `row` are `legacy-grants`', `provider` is `legacy-own-key`'s
             /// and `legacy-sign-in`'s, `key` is `legacy-own-key`'s,
             /// `row` and `month` `legacy-uses`', `total`, `free` and `data` are `disk`'s,
-            /// `save` is `fail-restore`'s.
+            /// `save` is `fail-restore`'s, `path` is `damage`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -241,6 +241,9 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 /// `fail-restore`'s: the number of the save whose restores fail.
                 #[serde(default)]
                 save: Option<u64>,
+                /// `damage`'s: its bridge's path whose next `times` answers come damaged.
+                #[serde(default)]
+                path: Option<String>,
             }
             let t: TestComputer = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             if !valid_computer_id(&t.computer) {
@@ -259,7 +262,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save });
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save, "path": t.path });
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
