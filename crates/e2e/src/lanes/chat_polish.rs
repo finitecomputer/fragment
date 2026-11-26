@@ -428,12 +428,14 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     s.ok("a start that ends past ninety seconds waits plainly for its reply, not yet late", up, chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null));
     chrome.eval(&page, &format!("new Promise(resolve => {{ const w = window.__frame.contentWindow; w.Date.now = () => window.__bootNow() + 182000; w.postMessage({awake}, location.origin); w.requestAnimationFrame(() => w.requestAnimationFrame(() => resolve(true))); }})"))?;
     s.ok("and ninety seconds after it is up, it says it hasn't picked the message up", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes(\"hasn't picked this up yet\")"), "");
-    // the line as a person sees it, wide and narrow, light and dark
+    // the line as a person sees it, wide and narrow, light and dark (a
+    // directory of its own: a later check here empties `chat-polish`)
+    let picked = s.dir("not-picked-up");
     for (width, height, mobile, size) in [(1280, 860, false, "1280"), (390, 844, true, "390")] {
         chrome.viewport(&page, width, height, mobile)?;
         for scheme in ["light", "dark"] {
             chrome.color_scheme(&page, scheme)?;
-            chrome.screenshot(&page, &shots.join(format!("not-picked-up-{size}-{scheme}.png")))?;
+            chrome.screenshot(&page, &picked.join(format!("not-picked-up-{size}-{scheme}.png")))?;
         }
     }
     chrome.color_scheme(&page, "light")?;
