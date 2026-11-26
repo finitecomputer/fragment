@@ -297,6 +297,14 @@ fn catalog_of(d: &Deployment) -> Result<(fragment_core::catalog::Catalog, Provid
         rows.push(serde_json::from_value(row).with_context(|| format!("providers: {name}"))?);
     }
     let catalog = fragment_core::catalog::Catalog::of(rows).map_err(|e| anyhow::anyhow!("providers: {e}"))?;
+    // a computer's egress has room beside them for the platform's hosts and
+    // a full Vault's (fragment_core::computer::egress): a deployment's
+    // catalog is held to it here, before anything is built
+    let caught = catalog.intercepts().len();
+    let max = fragment_core::computer::egress::CATALOG_HOSTS_MAX;
+    if caught > max {
+        bail!("providers: they catch {caught} hosts, and a computer's egress has room for at most {max} beside the platform's and a person's Vault (fragment_core::computer::egress)");
+    }
     Ok((catalog, keys))
 }
 
@@ -2706,6 +2714,10 @@ mod tests {
         assert!(checked(with(vec![row(json!({ "key": "k", "hosts": ["localhost"] }))])).is_err());
         let google = json!({ "name": "google", "kind": "connection", "hosts": ["www.googleapis.com"], "placements": [{ "header": "authorization", "format": "Bearer {}" }], "env": ["GOOGLE_OAUTH_ACCESS_TOKEN"], "key": "k" });
         assert!(checked(with(vec![google])).is_err(), "a connection has no key");
+        let caught = |n: usize| -> Vec<Value> { (0..n).map(|i| json!({ "name": format!("p{i}"), "kind": "connection", "hosts": [format!("h{i}.test")], "placements": [{ "header": "x-api-key" }], "env": [format!("P{i}_KEY")] })).collect() };
+        let max = fragment_core::computer::egress::CATALOG_HOSTS_MAX;
+        assert!(catalog_of(&with(caught(max))).is_ok());
+        assert!(catalog_of(&with(caught(max + 1))).unwrap_err().to_string().contains(&format!("catch {} hosts", max + 1)), "more than a computer's egress has room for");
         let mut d = deployment(None, None);
         d.computers = Some(Computers { default_image: "hermes".into(), images: BTreeMap::new(), unsaved_max_ms: None, disks: vec![] });
         assert!(checked(d).is_err());
