@@ -846,7 +846,7 @@ const WAKE_NAMED_MAX: usize = 20;
 fn simplex_next(step: &str) -> &'static str {
     match step {
         "" => "make its connector, hand its link over, connect its door",
-        "making" => "make its connector (by the name its record holds), hand its link over, connect its door",
+        "making" => "make its connector by the name its record holds (one a stopped move made: --back first), hand its link over, connect its door",
         "made" => "hand its link over, connect its door",
         "imported" => "bind its connector and connect its door",
         "bound" => "connect its door",
@@ -1813,7 +1813,7 @@ fn run(cli: Cli) -> Result<()> {
             // bounded: a door links within minutes; each ask goes on from its record
             let t0 = std::time::Instant::now();
             loop {
-                let v = ask("go")?;
+                let v = ask("go").map_err(|e| if e.to_string().contains("already_exists") { e.context("its connector was made by a move that stopped: --back first, then --yes") } else { e })?;
                 let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
                 if step == "done" || step == "offered" {
                     json_exit(j, &v);

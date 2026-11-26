@@ -1417,7 +1417,6 @@ impl FragmentCell {
     /// Both come together, so the hosts of a value change only with it.
     pub(crate) async fn put_secret(&self, caller: &Caller, key: &str, body: Vec<u8>) -> CellResult<Response> {
         self.require(caller, false, Role::Editor)?;
-        self.test_countdown(MetaKey::TestFailSecrets, "a secret's write")?;
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }

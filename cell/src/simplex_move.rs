@@ -77,7 +77,7 @@ pub(crate) async fn simplex_move(env: &Env, cfg: &Config, url: &Url, by: &str, p
         return Err(CellError::new(ErrorCode::NotFound, format!("no person {person}")));
     }
     let asked: Value = crate::orgs::body(bytes)?;
-    let agent = asked["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("agent: the agent fragment's name"))?.to_string();
+    let agent = asked["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name its agent"))?.to_string();
     let m = Move { env, cfg, url, by, person: Signed::new(Identity { id: person.into(), kind: IdentityKind::Person, owner: None, held: None }, None), computer: fragment_core::computer::default_computer_of(person), agent };
     match asked["act"].as_str().unwrap_or("") {
         "plan" => m.plan().await,
@@ -218,7 +218,7 @@ impl Move<'_> {
                 self.archived(chat, true).await?;
             }
             rec = self.set("connecting", None, json!({ "step": "done" })).await?;
-            self.note(format!("{}'s SimpleX moved into {connector}; {} archived", self.agent, rec["chat"].as_str().unwrap_or("no old chat"))).await?;
+            self.note(format!("{} moved into {connector}; {} archived", self.agent, rec["chat"].as_str().unwrap_or("no old chat"))).await?;
         }
         Ok(json!({ "agent": self.agent, "record": rec }))
     }
@@ -246,21 +246,19 @@ impl Move<'_> {
     }
 
     /// Its connector, by the name its record holds: made as the person's
-    /// own from the SimpleX template (made already by a `go` that stopped,
-    /// or whose answer was lost: the same one, never a second), on a
-    /// deployment whose doors run, its inbox's secret set. Bound only once
-    /// its door holds the link (`bind`).
+    /// own from the SimpleX template (made already, by a `go` that stopped
+    /// or lost its answer: refused, never a second, until `--back` deletes
+    /// it), on a deployment whose doors run, its inbox's secret set. Bound
+    /// only once its door holds the link (`bind`).
     async fn make(&self, rec: &Value) -> CellResult<Value> {
         let name = text(rec, "connector");
         let create = CreateFragment { name: name.into(), label: None, visibility: None, template: Some(TEMPLATE.into()), title: None, agent: None };
         let mut made = crate::create_fragment(self.env, self.cfg, self.url, create, self.person.clone()).await?;
-        // made, or made already by its name (409): the same connector
-        match answer(&mut made, "its connector's making").await {
-            Err(e) if e.code != ErrorCode::AlreadyExists => return Err(e),
-            _ => {}
-        }
-        let status = self.as_person(name, Method::Get, "/api/status", None).await?;
-        let door = fragment_core::door::door_id(name, text(&status, "npub")).ok_or_else(|| CellError::host(format!("{name} names no door")))?;
+        // made already (its name taken: by a `go` that stopped, or lost its
+        // answer): refused, `already_exists`, never a second (the CLI says
+        // `--back` first)
+        let made = answer(&mut made, "its connector's making").await?;
+        let door = fragment_core::door::door_id(name, text(&made, "npub")).ok_or_else(|| CellError::host(format!("{name} names no door")))?;
         // its door fenced from now until the link is given (cell/door.mjs
         // `EXPECTING`): its setup page, opened meanwhile, starts no new
         // profile. Refused (a deployment that runs no doors), its
@@ -276,17 +274,14 @@ impl Move<'_> {
         let rec = match self.set("making", Some(text(rec, "claim")), json!({ "door": door, "step": "made" })).await {
             Ok(rec) => rec,
             // its claim let go meanwhile (a `back`): the connector it made
-            // is no one's move, so it goes, its door with it; one another
-            // `go` of this claim recorded meanwhile stays
+            // is no one's move, so it goes, its door with it
             Err(e) if e.code == ErrorCode::Conflict => {
-                if self.read().await?["record"]["connector"] != name {
-                    self.delete(name).await?;
-                }
+                self.delete(name).await?;
                 return Err(e);
             }
             Err(e) => return Err(e),
         };
-        self.note(format!("made {name} for {}'s SimpleX", self.agent)).await?;
+        self.note(format!("made {name} for {}", self.agent)).await?;
         Ok(rec)
     }
 
@@ -329,7 +324,7 @@ impl Move<'_> {
             }
         };
         crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
-        self.note(format!("{}'s SimpleX handed over to {} ({sha}, {length} bytes, staged {staged})", self.agent, text(rec, "connector"))).await?;
+        self.note(format!("{} handed over to {} ({sha}, {length} B, staged {staged})", self.agent, text(rec, "connector"))).await?;
         // a staged chat waits for its person's word once bound, never
         // connected for them
         self.set("made", None, json!({ "step": "imported", "staged": staged })).await
@@ -341,7 +336,7 @@ impl Move<'_> {
     /// marks, its bridge's and its computer's, let go), then `e`, and
     /// whether it went back.
     async fn went_back(&self, e: CellError) -> CellError {
-        let back = self.back().await.err().map_or_else(|| "went back: its computer runs its link again".into(), |b| format!("its way back failed too ({}): ask `--back` again", b.message));
+        let back = self.back().await.err().map_or_else(|| "went back to its computer".into(), |b| format!("its way back failed too ({}): ask `--back` again", b.message));
         CellError::new(e.code, format!("{}; {back}", e.message))
     }
 
@@ -372,14 +367,14 @@ impl Move<'_> {
         let read = self.read().await?;
         let rec = read["record"].clone();
         if rec.is_null() {
-            return Err(CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {} to go back from", self.agent)));
+            return Err(CellError::new(ErrorCode::Conflict, format!("{} has no move to go back from", self.agent)));
         }
         // its computer runs SimpleX only awake and always on (its own word,
         // never its bridge's, which reads it a minute late): else its door
         // keeps the link, never stopped for nothing (Codex's round on
         // 8cacd32d1; the hosted check on 8c0ad40ec)
         if rec["moved"] == true && (read["awake"] != true || read["alwaysOn"] != true) {
-            return Err(CellError::new(ErrorCode::Conflict, "its computer must be awake and always on: turn always-on on, then `--back` (its door keeps the link)"));
+            return Err(CellError::new(ErrorCode::Conflict, "make its computer awake and always on, then `--back` again"));
         }
         // its door stops, saving last, and hands its newest save back, with
         // its SHA-256; a copy its computer finds damaged on its way (seen
@@ -407,7 +402,7 @@ impl Move<'_> {
                 // with it (its person unlinked it): no way back, its
                 // computer's old copy never run again
                 204 if matches!(text(&rec, "step"), "making" | "made") => (None, false, String::new()),
-                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} was unlinked: no way back; its computer's copy stays stopped"))),
+                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} was unlinked: there is no way back"))),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
             };
             match self.hand("back", save, behind, &sha).await {
@@ -429,7 +424,7 @@ impl Move<'_> {
             self.delete(connector).await?;
         } else if let Some(connector) = rec["connector"].as_str() {
             if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
-                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published (an intake run not done): ask again")));
+                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published: ask again")));
             }
             match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
@@ -438,7 +433,7 @@ impl Move<'_> {
             }
         }
         self.forget().await?;
-        self.note(format!("{}'s SimpleX went back to its computer; {} unbound and archived", self.agent, rec["connector"].as_str().unwrap_or("no connector"))).await?;
+        self.note(format!("{} went back to its computer; {} archived", self.agent, rec["connector"].as_str().unwrap_or("no connector"))).await?;
         Ok(json!({ "agent": self.agent, "back": true, "connector": rec["connector"] }))
     }
 
