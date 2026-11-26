@@ -384,10 +384,10 @@ enum Mandates {
 /// through unread (a blob, whose URL names its hash). `for` is inside the
 /// signed URL, and only an agent may name it, and only its own owner
 /// (`permit::may_act_for`): a person acts as themselves. A mandate
-/// (`fragment_core::mandate`) says the same with proof: that its owner's
-/// own words asked it. It is checked here, beside the signature, with no
-/// call but the signer's own lookup, and names only its agent's owner, as
-/// `for` does.
+/// (`fragment_core::mandate`) names whom an agent acts for with proof that
+/// their own words asked it: its owner, or anyone else, who then acts as
+/// themselves through it. It is checked here, beside the signature, with no
+/// call but the signer's own lookup.
 async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, mandates: Mandates) -> CellResult<Signed> {
     let acting_for = acting_for(url)?;
     let mandate = req.headers().get(fragment_core::mandate::HEADER)?;
@@ -403,20 +403,17 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, ma
         Caller::Session(token) => (ask_registry(env, &calls::Session { token, fragment: None, frame: false }).await?.identity, None),
     };
     let refused = |why: &str| CellError::new(ErrorCode::Forbidden, why.to_string());
-    let acting_for = match mandate {
-        None => acting_for,
-        Some(text) => {
-            let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
-            if identity.kind != IdentityKind::Agent || m.agent != identity.id {
-                return Err(refused("a mandate is carried only by the agent it names"));
-            }
-            Some(m.asker)
+    let Some(text) = mandate else {
+        if let Some(named) = &acting_for {
+            permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
         }
+        return Ok(Signed { identity, key, acting_for, mandated: false });
     };
-    if let Some(named) = &acting_for {
-        permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
+    let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
+    if identity.kind != IdentityKind::Agent || m.agent != identity.id {
+        return Err(refused("a mandate is carried only by the agent it names"));
     }
-    Ok(Signed { identity, key, acting_for })
+    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -1360,8 +1357,11 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let body = read_body(&mut req, limits::BODY_MAX_BYTES).await?;
             let create: CreateFragment = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
             let principal = signer_for(env, &req, &url, &body).await?;
-            // what an agent makes is its owner's: `for` names no one else (`signer_of`)
-            assert!(principal.acting_for.is_none() || principal.acting_for == principal.owner, "an agent acts only for its own owner");
+            // what an agent makes is its owner's: `for` names no one else
+            // (`signer_of`), and someone else's ask makes nothing
+            if principal.other_asker().is_some() {
+                return Err(CellError::new(ErrorCode::Forbidden, "an agent makes fragments only for its owner, never for someone else who asked it"));
+            }
             create_fragment(env, cfg, &url, create, principal).await
         }
         (Method::Get, ["api", "fragments", "watch"]) => watch_list(&req, env, cfg, &url).await,

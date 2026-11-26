@@ -977,9 +977,10 @@ impl FragmentCell {
     /// holds one is its own (`permit::acts_as_itself`): from here it reads,
     /// acts and is named as the agent alone, as if it had signed without
     /// `for`, so an app is never told its owner with the agent's role.
+    /// Anyone else who asked it is themselves here, never the agent (FIN-720).
     fn as_whom(&self, signed: Option<Signed>) -> CellResult<Option<Signed>> {
         let Some(mut signed) = signed else { return Ok(None) };
-        let Some(owner) = signed.acting_for.as_deref() else { return Ok(Some(signed)) };
+        let Some(owner) = signed.acting_for.as_deref().filter(|_| signed.other_asker().is_none()) else { return Ok(Some(signed)) };
         #[derive(serde::Deserialize)]
         struct Row {
             owner: Option<String>,
@@ -1119,6 +1120,7 @@ impl FragmentCell {
             DoorCheck::PATH => reply::<DoorCheck>(self.door_check(decode(body)?)),
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
+            calls::LendOf::PATH => reply::<calls::LendOf>(self.lend_here(&decode(body)?)),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
             calls::AgentJoined::PATH => reply::<calls::AgentJoined>(self.agent_joined(decode(body)?).await),
@@ -1164,7 +1166,7 @@ impl FragmentCell {
                 return Err(CellError::new(ErrorCode::NotFound, format!("no route {path}")));
             }
             if route == "grants" {
-                return json_response(&self.grants(&req.bytes().await?)?);
+                return json_response(&self.grants(&req.bytes().await?).await?);
             }
             let route = route.to_string();
             let body = req.bytes().await?;
@@ -1232,6 +1234,10 @@ impl FragmentCell {
                 self.set_member(&caller, who, body).await
             }
             (Method::Delete, ["api", "members", who]) => self.remove_member(&caller, who).await,
+            (Method::Put, ["api", "members", agent, "lend"]) => {
+                let lend: fragment_proto::Lend = body_json(&mut req).await?;
+                self.set_lend(&caller, agent, lend).await
+            }
             (Method::Post, ["api", "invites"]) => {
                 let body = body_json(&mut req).await?;
                 self.create_invite(&caller, body).await

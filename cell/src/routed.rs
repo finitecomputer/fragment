@@ -54,12 +54,23 @@ pub struct Signed {
     /// agent is, as the agent itself (`FragmentCell::as_whom`).
     #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
     pub acting_for: Option<String>,
+    /// A mandate proves `acting_for` asked the agent
+    /// (`fragment_core::mandate`, checked by the router): then it may be
+    /// anyone, not only the agent's owner.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub mandated: bool,
 }
 
 impl Signed {
     /// Who signed, acting as themselves.
     pub fn new(identity: Identity, key: Option<String>) -> Signed {
-        Signed { identity, key, acting_for: None }
+        Signed { identity, key, acting_for: None, mandated: false }
+    }
+
+    /// Whom an agent's request acts for when that is not its owner, proven
+    /// by a mandate: another person, as themselves (FIN-720).
+    pub fn other_asker(&self) -> Option<&str> {
+        self.acting_for.as_deref().filter(|a| self.owner.as_deref() != Some(*a))
     }
 }
 
@@ -166,8 +177,10 @@ impl Routed {
                 if !npub::is_identity(&signed.id) || signed.key.as_deref().is_some_and(|k| !npub::is_hex_key(k)) {
                     return Err(CellError::host("the router named a malformed signer"));
                 }
-                // the router honors `for` for an agent only, naming its owner
-                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || fragment_core::permit::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err()) {
+                // the router honors `for` for an agent only, naming its
+                // owner, and a mandate's asker for the agent it names
+                let unproven = |f: &str| !signed.mandated && fragment_core::permit::may_act_for(signed.kind, signed.owner.as_deref(), f).is_err();
+                if signed.acting_for.as_deref().is_some_and(|f| !npub::is_identity(f) || unproven(f)) || (signed.mandated && (signed.acting_for.is_none() || signed.kind != IdentityKind::Agent)) {
                     return Err(CellError::host("the router named a malformed `for`"));
                 }
                 Some(signed)

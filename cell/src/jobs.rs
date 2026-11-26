@@ -111,6 +111,14 @@ pub(crate) struct NewRun<'a> {
     pub via: Via,
     pub trigger: Option<String>,
     pub principal: &'a str,
+    /// Whose ask it is when that is someone else than its agent's owner
+    /// (`Invocation::other`): its own replays, and its paid steps capped
+    /// (ai.rs `paying`). App code's runs have none.
+    pub asker: Option<&'a str>,
+    /// Whom an agent's run acts for, its owner too (`Invocation::asker`):
+    /// whom its app is told it runs for (`ops::told`), and its calls'. No
+    /// key nor charge reads it. App code's runs have none.
+    pub acting_for: Option<&'a str>,
     pub role: Role,
     pub depth: u32,
     /// (operation id, input hash) when a caller named the run: calling
@@ -173,6 +181,12 @@ pub(crate) struct RunRow {
     pub trigger: Option<String>,
     /// Who it acts as: an identity, an anonymous visitor, or the fragment's own key.
     pub principal: String,
+    /// Whose ask it is, when that is someone else than its agent's owner
+    /// (`NewRun::asker`; Fragment step 15).
+    pub asker: Option<String>,
+    /// Whom an agent's run acts for (`NewRun::acting_for`): read through
+    /// `RunRow::acting_for`.
+    acting_for: Option<String>,
     pub role: Role,
     pub depth: u32,
     pub status: RunStatus,
@@ -184,7 +198,16 @@ pub(crate) struct RunRow {
     pub code: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, op, via, trigger, principal, role, depth, status, attempt, created_at, finished_at, error, code";
+impl RunRow {
+    /// Whom it acts for, as its app is told (`ops::told`) and its calls
+    /// ask: whom its agent acted for, its owner too; one from before the
+    /// column has its other asker alone, if any (no evidence of more).
+    pub fn acting_for(&self) -> Option<&str> {
+        self.acting_for.as_deref().or(self.asker.as_deref())
+    }
+}
+
+const RUN_COLUMNS: &str = "id, op, via, trigger, principal, asker, acting_for, role, depth, status, attempt, created_at, finished_at, error, code";
 /// What a run's paid steps were charged (`charges`, ai.rs).
 const RUN_COST: &str = "(SELECT SUM(micros) FROM charges WHERE charges.run = runs.id) AS cost_micros";
 
@@ -201,6 +224,8 @@ fn run_row(r: &Value) -> RunRow {
         via: Via::from(text("via").to_string()),
         trigger: r["trigger"].as_str().map(str::to_string),
         principal: text("principal").to_string(),
+        asker: r["asker"].as_str().map(str::to_string),
+        acting_for: r["acting_for"].as_str().map(str::to_string),
         role: Role::parse(text("role")).unwrap_or_else(|| panic!("runs.role is a role: {r}")),
         depth: count("depth"),
         status: RunStatus::parse(text("status")).unwrap_or_else(|| panic!("runs.status is a run status: {r}")),
@@ -289,10 +314,10 @@ pub(crate) enum Admits {
 
 /// What app code is handed of a record (a trigger's run, an inbox's
 /// answer query): `{channel, record}`, the record as it was before the
-/// platform stamped who wrote it (FIN-615), so an app's own input schema
-/// reads it as it always has.
+/// platform stamped who wrote it and whose ask it was (FIN-615), so an
+/// app's own input schema reads it as it always has.
 fn app_input(record: &ChannelRecord) -> Value {
-    let unstamped = ChannelRecord { author: None, ..record.clone() };
+    let unstamped = ChannelRecord { author: None, asker: None, mandate: None, ..record.clone() };
     json!({ "channel": record.channel, "record": unstamped })
 }
 
@@ -354,7 +379,11 @@ impl FragmentCell {
     /// runs (`launch_queued`), armed once the caller is done writing.
     pub(crate) fn start_run(&self, r: NewRun<'_>) -> CellResult<Started> {
         if let Some((id, sha)) = r.call {
-            let prior = self.rows("SELECT id, status, input_sha FROM runs WHERE principal = ? AND call_id = ?", vec![r.principal.into(), id.into()])?;
+            // keyed by its caller, and the asker they act for if another
+            let prior = self.rows(
+                "SELECT id, status, input_sha FROM runs WHERE principal = ? AND call_id = ? AND asker IS ?",
+                vec![r.principal.into(), id.into(), r.asker.map_or(SqlStorageValue::Null, Into::into)],
+            )?;
             if let Some(p) = prior.first() {
                 if p["input_sha"].as_str() != Some(sha) {
                     return Err(CellError::new(ErrorCode::ConflictingBody, "this operation id was already used with a different input"));
@@ -396,13 +425,15 @@ impl FragmentCell {
         let opt = |s: Option<&str>| s.map_or(SqlStorageValue::Null, SqlStorageValue::from);
         let finished = if blocked.is_some() { SqlStorageValue::Integer(now) } else { SqlStorageValue::Null };
         let rows = self.rows(
-            "INSERT INTO runs (op, via, trigger, principal, role, depth, call_id, input_sha, input, status, attempt, error, created_at, finished_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) RETURNING id",
+            "INSERT INTO runs (op, via, trigger, principal, asker, acting_for, role, depth, call_id, input_sha, input, status, attempt, error, created_at, finished_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?) RETURNING id",
             vec![
                 r.op.into(),
                 r.via.as_str().into(),
                 opt(r.trigger.as_deref()),
                 r.principal.into(),
+                opt(r.asker),
+                opt(r.acting_for),
                 r.role.as_str().into(),
                 SqlStorageValue::Integer(r.depth.into()),
                 call_id,
@@ -664,8 +695,12 @@ impl FragmentCell {
             OpKind::Job => {
                 let facet = self.facet()?;
                 self.sweep(&facet).await?;
+                // told whose ask it runs, as an op is (`ops::told`): its
+                // asker, beside its agent; its signer stays the ledger's
+                let (told, agent) = crate::ops::told(&run.principal, run.acting_for());
                 let meta = json!({
-                    "principal": npub::display(&run.principal),
+                    "principal": told,
+                    "agent": agent,
                     "role": run.role,
                     "run": run_id,
                     "attempt": attempt,
@@ -953,9 +988,12 @@ impl FragmentCell {
             return Err(permanent(format!("{op} needs the {} role; this run acts as {}", decl.role.as_str(), run.role.as_str())));
         }
         let child = decl.kind == OpKind::Job;
+        // whom the run acts for is its call's too; its asker, if another
+        // than its agent's owner, keys and caps the call as it does the run
         let inv = Invocation {
             principal: &run.principal,
-            asker: None,
+            asker: run.acting_for(),
+            other: run.asker.as_deref(),
             role: run.role,
             op,
             decl,
@@ -1210,7 +1248,7 @@ impl FragmentCell {
         fragment_core::effects::check_record(channel, kind, &body, decl.as_ref(), hosted.as_ref()).map_err(permanent)?;
         let author = self.code_author(run.code.as_deref(), hosted.is_some()).map_err(retry)?;
         let key = format!("{JOB_ID_PREFIX}{}", run.id);
-        let (record, appended) = self.append_once(channel, &run.principal, author, kind, &body, (&key, i64::from(index))).map_err(retry)?;
+        let (record, appended) = self.append_once(channel, (&run.principal, author, None), kind, &body, (&key, i64::from(index))).map_err(retry)?;
         self.published(&record, appended, run.depth + 1, &mut js::Laps::start()).await.map_err(retry)?;
         Ok(json!({ "seq": record.seq }))
     }
@@ -1268,6 +1306,8 @@ impl FragmentCell {
                 via: Via::Channel,
                 trigger: Some(record.channel.clone()),
                 principal: &own,
+                asker: None,
+                acting_for: None,
                 role: Role::Editor,
                 depth,
                 call: Some((&call_id, &sha)),
@@ -1293,6 +1333,8 @@ impl FragmentCell {
                 via: Via::Files,
                 trigger: Some(pattern.clone()),
                 principal: &self.own_key()?,
+                asker: None,
+                acting_for: None,
                 role: Role::Editor,
                 depth,
                 call: None,
@@ -1321,6 +1363,8 @@ impl FragmentCell {
                 via: Via::Installed,
                 trigger: Some(code.to_string()),
                 principal: &self.own_key()?,
+                asker: None,
+                acting_for: None,
                 role: Role::Editor,
                 depth: self.commit_depth(Some(sha))?,
                 call: None,
@@ -1478,6 +1522,8 @@ impl FragmentCell {
                 via: Via::Woke,
                 trigger: None,
                 principal: &self.own_key()?,
+                asker: None,
+                acting_for: None,
                 role: Role::Editor,
                 depth: 0,
                 call: None,
@@ -1571,6 +1617,8 @@ impl FragmentCell {
                     via: Via::Cron,
                     trigger: Some(expr.to_string()),
                     principal: &self.own_key()?,
+                    asker: None,
+                    acting_for: None,
                     role: Role::Editor,
                     depth: 0,
                     call: None,
@@ -1899,7 +1947,7 @@ impl FragmentCell {
         assert!(decl.kind == OpKind::Query, "an inbox's answer is a query (manifest::parse)");
         let own = self.own_key()?;
         let input = app_input(record);
-        let inv = Invocation { principal: &own, asker: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
+        let inv = Invocation { principal: &own, asker: None, other: None, role: Role::Editor, op, decl, id: format!("record:inbox:{}:{op}", record.seq), input, depth, via: Via::Channel, trigger: Some("inbox".into()) };
         let result: Value = crate::json_text(self.invoke(inv).await?.result.get()).map_err(|e| CellError::host(format!("{op}'s result is not JSON: {e}")))?;
         fragment_core::inbox::answer(&result).map_err(|why| CellError::new(ErrorCode::AppFailed, format!("{op}: {why}")))
     }

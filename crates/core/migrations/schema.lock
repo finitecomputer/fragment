@@ -18,6 +18,7 @@ step Fragment 11 record_author 290ff9dff6040cbf
 step Fragment 12 pending_code a323b22a2f946eb7
 step Fragment 13 ended_doors 6b677d38c0350a38
 step Fragment 14 trigger_kinds e4accb2c78ba5f08
+step Fragment 15 askers 14b4892acdccbe6a
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -89,7 +90,7 @@ Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table making: CREATE TABLE making (key TEXT PRIMARY KEY, run INTEGER NOT NULL, attempt INTEGER NOT NULL, at INTEGER NOT NULL)
-Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT)
+Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, lend INTEGER)
 Fragment index members_owner: CREATE INDEX members_owner ON members (owner) WHERE owner IS NOT NULL
 Fragment table meta: CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 Fragment table meter_batches: CREATE TABLE meter_batches (id INTEGER PRIMARY KEY AUTOINCREMENT, sent_at INTEGER)
@@ -106,12 +107,12 @@ Fragment table pending: CREATE TABLE pending ( seq INTEGER PRIMARY KEY AUTOINCRE
 Fragment index pending_due: CREATE INDEX pending_due ON pending (next_at)
 Fragment table pointers: CREATE TABLE pointers ( ref TEXT NOT NULL, path TEXT NOT NULL, sha TEXT NOT NULL, size INTEGER NOT NULL, PRIMARY KEY (ref, path))
 Fragment table push_subs: CREATE TABLE push_subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, endpoint TEXT NOT NULL UNIQUE, p256dh TEXT NOT NULL, auth TEXT NOT NULL, who TEXT NOT NULL, principal TEXT NOT NULL, created_at INTEGER NOT NULL)
-Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER)
+Fragment table record_schedules: CREATE TABLE record_schedules ( id INTEGER PRIMARY KEY AUTOINCREMENT, cron TEXT NOT NULL, channel TEXT NOT NULL, body TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL, next_at INTEGER, last_at INTEGER, asker TEXT)
 Fragment index record_schedules_due: CREATE INDEX record_schedules_due ON record_schedules (next_at) WHERE next_at IS NOT NULL
-Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, author TEXT, PRIMARY KEY (channel, seq))
+Fragment table records: CREATE TABLE records ( channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, body TEXT NOT NULL, op TEXT, idx INTEGER, outboxed INTEGER NOT NULL DEFAULT 1, author TEXT, asker TEXT, PRIMARY KEY (channel, seq))
 Fragment index records_effect: CREATE UNIQUE INDEX records_effect ON records (op, idx) WHERE op IS NOT NULL
-Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT)
-Fragment index runs_call: CREATE UNIQUE INDEX runs_call ON runs (principal, call_id) WHERE call_id IS NOT NULL
+Fragment table runs: CREATE TABLE runs ( id INTEGER PRIMARY KEY AUTOINCREMENT, op TEXT NOT NULL, via TEXT NOT NULL, trigger TEXT, principal TEXT NOT NULL, role TEXT NOT NULL, depth INTEGER NOT NULL, call_id TEXT, input_sha TEXT, input TEXT NOT NULL, status TEXT NOT NULL, attempt INTEGER NOT NULL, output TEXT, error TEXT, created_at INTEGER NOT NULL, launched_at INTEGER, finished_at INTEGER, code TEXT, asker TEXT, acting_for TEXT)
+Fragment index runs_asked: CREATE UNIQUE INDEX runs_asked ON runs (principal, call_id, COALESCE(asker, '')) WHERE call_id IS NOT NULL
 Fragment index runs_status: CREATE INDEX runs_status ON runs (status, op)
 Fragment table schedules: CREATE TABLE schedules (idx INTEGER PRIMARY KEY, op TEXT NOT NULL, cron TEXT NOT NULL, next_at INTEGER NOT NULL)
 Fragment table search_forget: CREATE TABLE search_forget (source TEXT PRIMARY KEY, next_at INTEGER NOT NULL)
@@ -124,6 +125,8 @@ Fragment table sent: CREATE TABLE sent (key TEXT PRIMARY KEY, at INTEGER NOT NUL
 Fragment table steps: CREATE TABLE steps ( run INTEGER NOT NULL, attempt INTEGER NOT NULL, idx INTEGER NOT NULL, kind TEXT NOT NULL, value TEXT, error TEXT, CHECK ((value IS NULL) <> (error IS NULL)), PRIMARY KEY (run, attempt, idx))
 Fragment table subs: CREATE TABLE subs ( id INTEGER PRIMARY KEY AUTOINCREMENT, principal TEXT NOT NULL, channel TEXT NOT NULL, url TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table tree: CREATE TABLE tree ( ref TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL, mode TEXT NOT NULL, last_commit TEXT NOT NULL, PRIMARY KEY (ref, path))
+Fragment table turn_lives: CREATE TABLE turn_lives (life TEXT PRIMARY KEY, computer TEXT NOT NULL, generation INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table turns: CREATE TABLE turns ( turn TEXT PRIMARY KEY, place TEXT NOT NULL, asker TEXT NOT NULL, mandate TEXT, until INTEGER NOT NULL, life TEXT NOT NULL, at INTEGER NOT NULL)
 
 Registry table admin_log: CREATE TABLE admin_log ( n INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, operator TEXT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL, detail TEXT NOT NULL)
 Registry table agent_fragments: CREATE TABLE agent_fragments ( identity TEXT PRIMARY KEY, fragment TEXT NOT NULL)
