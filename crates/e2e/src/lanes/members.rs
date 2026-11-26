@@ -972,8 +972,14 @@ pub fn secrets(s: &mut Suite, api: &Api) -> Result<()> {
     let held = api.signed(&owner, "GET", "/api/vault", None)?;
     let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/secrets"), None)?;
     s.ok(
-        "a move out of the Vault is no request now: fromVault, from the API or its page, is refused (400), the Vault keeping the secret as it was and the fragment given nothing",
-        asked.status == 400 && paged.status == 400 && held.body == before.body && !listed.text.contains("TELEGRAM_BOT_TOKEN") && ![&asked, &paged, &held, &listed].iter().any(|r| r.text.contains(&bot)),
+        "a move out of the Vault is no request now: fromVault, from the API or its page, is refused (400) saying to lend it instead, the Vault keeping the secret as it was and the fragment given nothing",
+        asked.status == 400
+            && asked.message().contains("lent now, not moved")
+            && asked.message().contains("fragment vault set <secret> --app <app>=<KEY>")
+            && paged.status == 400
+            && held.body == before.body
+            && !listed.text.contains("TELEGRAM_BOT_TOKEN")
+            && ![&asked, &paged, &held, &listed].iter().any(|r| r.text.contains(&bot)),
         format!("{asked} {paged}"),
     );
     api.signed(&owner, "DELETE", "/api/vault/telegram-e2e", None)?;

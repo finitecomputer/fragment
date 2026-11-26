@@ -1421,8 +1421,12 @@ impl FragmentCell {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
         // a person's secret stays in their Vault, which lends it (FIN-615,
-        // option B): no move brings one here
-        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}}: {e}")))?;
+        // option B): no move brings one here, and a client from before the
+        // move went (`--from-vault`) is told what to do instead
+        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| match e.to_string().contains("unknown field `fromVault`") {
+            true => CellError::invalid(MOVED_TO_LEND),
+            false => CellError::invalid(format!("a secret is {{value, hosts}}: {e}")),
+        })?;
         let hosts = secret_hosts(&put.hosts)?;
         if put.value.is_empty() {
             return Err(CellError::invalid("a secret's value is empty"));
@@ -1508,6 +1512,10 @@ impl FragmentCell {
         Ok(names)
     }
 }
+
+/// Why a body naming `fromVault` is refused: the move is gone (FIN-615,
+/// PR 13), and a person's secret is lent from their Vault instead.
+const MOVED_TO_LEND: &str = "Vault secrets are lent now, not moved: `fragment vault set <secret> --app <app>=<KEY>`";
 
 /// The hosts a `PUT secrets` names, each as a URL names it, without
 /// repeats: at least one (a secret that may go nowhere is no use), and at
