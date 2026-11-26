@@ -71,8 +71,9 @@ with its default. What an image sets:
   `BRIDGE_RESTORED` before anything else (docs/computers.md).
 - `BRIDGE_MOUNTS_DISK=1`: the bridge is its image's PID 1 (the stub's),
   so with `FRAGMENT_DISK=fpac` it mounts `/data` from the computer's disk
-  before anything else and waits for its final flush before it exits
-  (`disk.rs`; docs/computers.md, "A disk"); a head that will not open it
+  before anything else and waits for its final flush before it exits, as
+  long as `FRAGMENT_DISK_FLUSH_MS` says (140 s when unset; `disk.rs`;
+  docs/computers.md, "A disk"); a head that will not open it
   says on its disk's route (`POST /unusable`). An image whose boot mounts it
   (our Hermes image's) leaves it unset.
 - `BRIDGE_HOLD` and `BRIDGE_HELD`, the platform's hold before a save

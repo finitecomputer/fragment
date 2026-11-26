@@ -16,6 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::computer::limits::{DISK_EXIT_WAIT_MS, SLEEP_DEADLINE_MS, STOP_LOOK_MS};
+
 /// A disk's volume, as FPAC sees it: the computer's 20 GB (decision 18's
 /// disk, docs/computers.md "An image's share of the disk"), a whole number
 /// of FPAC's 64 KiB extents.
@@ -168,6 +170,25 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
         (_, Some(b)) => Fallback::To(*b),
         _ => Fallback::Nowhere,
     }
+}
+
+/// Whether a disk's sleep, signalled at `since_ms`, still keeps its
+/// container for its final flush at `now_ms` (FIN-783): until that flush
+/// lands, within the deployment's unsaved bound (`unsaved_max_ms`, the
+/// time a sleep that cannot save stays awake and tries again). Past it,
+/// the container goes and that life ends unsaved, saying so: what its
+/// guest wrote after the drain did not ship.
+pub fn flush_kept(since_ms: i64, now_ms: i64, unsaved_max_ms: i64) -> bool {
+    assert!(unsaved_max_ms >= 0, "a bound is a span of time");
+    now_ms < since_ms.saturating_add(unsaved_max_ms)
+}
+
+/// How long a disk's guest waits for its final flush, at most
+/// (`FRAGMENT_DISK_FLUSH_MS`): past the platform's own wait (`flush_kept`'s
+/// bound, then a stop looked at again at its deadline and its exit wait),
+/// so the platform's destroy, never the guest, ends one that cannot land.
+pub fn guest_flush_ms(unsaved_max_ms: i64) -> i64 {
+    unsaved_max_ms.saturating_add(SLEEP_DEADLINE_MS + DISK_EXIT_WAIT_MS + STOP_LOOK_MS)
 }
 
 /// Whether a guest's read of its view is its running life's, and so heard
@@ -437,6 +458,20 @@ mod tests {
         assert_eq!(fallback(Some(&claim), None, Unusable, false), Fallback::Fresh);
         assert_eq!(fallback(Some(&claim), None, Blank, false), Fallback::Fresh);
         assert_eq!(fallback(None, None, Unmountable, false), Fallback::Nowhere, "no head: nothing to start over from");
+    }
+
+    #[test]
+    fn a_disks_sleep_keeps_its_container_for_its_final_flush_within_the_unsaved_bound() {
+        let bound = 30 * 60_000;
+        assert!(flush_kept(1_000, 1_000, bound), "valid: just signalled");
+        assert!(flush_kept(1_000, 1_000 + DISK_EXIT_WAIT_MS, bound), "past its exit wait, still kept (R2 down: FPAC tries again)");
+        assert!(flush_kept(1_000, 1_000 + bound - 1, bound));
+        assert!(!flush_kept(1_000, 1_000 + bound, bound), "past the bound: it goes, unsaved");
+        assert!(!flush_kept(1_000, 1_000, 0), "a bound of none keeps nothing past the exit wait");
+        assert!(flush_kept(i64::MAX - 1, i64::MAX - 1, bound), "no overflow");
+        // the guest outwaits the platform: its destroy, never the guest, ends it
+        assert!(guest_flush_ms(bound) > bound + SLEEP_DEADLINE_MS + DISK_EXIT_WAIT_MS);
+        assert_eq!(guest_flush_ms(i64::MAX), i64::MAX, "no overflow");
     }
 
     #[test]

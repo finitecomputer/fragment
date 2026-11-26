@@ -206,6 +206,34 @@ async fn write_data(root: &std::path::Path, rest: &str) -> String {
     }
 }
 
+/// The writes `at-stop` keeps for its bridge's stop, at most `AT_STOP_MAX`.
+static AT_STOP: std::sync::Mutex<Vec<(std::path::PathBuf, String)>> = std::sync::Mutex::new(Vec::new());
+const AT_STOP_MAX: usize = 16;
+
+/// `at-stop <path> <text>`: `write`'s, made when its bridge stops, before
+/// its disk's final flush: a write only that flush ships (FIN-783's lane).
+fn at_stop(root: &std::path::Path, rest: &str) -> String {
+    let (rel, _) = rest.split_once(' ').unwrap_or((rest, ""));
+    if data_path(root, rel).is_none() {
+        return format!("at-stop refused: {rel:?} is no path under the data");
+    }
+    let mut kept = AT_STOP.lock().expect("the at-stop writes' lock");
+    if kept.len() >= AT_STOP_MAX {
+        return format!("at-stop refused: {AT_STOP_MAX} kept already");
+    }
+    kept.push((root.to_path_buf(), rest.to_string()));
+    format!("at stop: {rel}")
+}
+
+/// The writes `at-stop` kept, made now (its bridge's stop), each synced.
+pub async fn write_at_stop() {
+    let kept: Vec<_> = std::mem::take(&mut *AT_STOP.lock().expect("the at-stop writes' lock"));
+    for (root, rest) in kept {
+        let said = write_data(&root, &rest).await;
+        crate::ev!("script.at_stop", { "said": said });
+    }
+}
+
 /// `fill-data <path> <MiB>`: a file of that many MiB under the data root, of
 /// bytes that do not compress, at most `FILL_MIB_MAX`.
 async fn fill_data(root: &std::path::Path, rest: &str) -> String {
@@ -937,6 +965,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("write ") {
         reply = write_data(&cfg.data, rest.trim()).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("at-stop ") {
+        reply = at_stop(&cfg.data, rest.trim());
     }
     if let Some(rest) = ts.text.strip_prefix("fill-data ") {
         reply = fill_data(&cfg.data, rest.trim()).await;

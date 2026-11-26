@@ -430,6 +430,7 @@ What every image may rely on, and must do.
 | `FRAGMENT_IMAGE` | the pinned image's name and digest |
 | `RESTORE_PENDING` | `1` when `/data` is being restored |
 | `FRAGMENT_DISK` | `fpac` when it mounts `/data` from its disk (below, "A disk") |
+| `FRAGMENT_DISK_FLUSH_MS` | on a disk, how long its boot waits for its final flush at its stop: past the platform's own wait (below, "A disk") |
 
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
@@ -594,9 +595,14 @@ put on disks.
   programs and its daemon's final flush ships what is left and posts a
   clean head; the DO waits for the container to exit
   (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A final
-  flush that posted no clean head (its store unreachable as it stopped)
-  ends its life unsaved, saying its last moments' writes may not have
-  shipped. A crash loses at most what its daemon had not shipped, about a
+  flush that cannot land (its store unreachable: FPAC tries again) keeps
+  the container, signalled once, its stop looked at again every minute,
+  until the flush lands and it exits, within the unsaved bound from that
+  signal (`fpac::flush_kept`, FIN-783); its boot waits longer still
+  (`FRAGMENT_DISK_FLUSH_MS`), so the platform's destroy, not the guest,
+  ends one that never lands. That one, or any final flush that posted no
+  clean head, ends its life unsaved, saying its last moments' writes may
+  not have shipped. A wake meanwhile starts once the stop has ended. A crash loses at most what its daemon had not shipped, about a
   second of synced writes: the next mount replays the life's segments
   past its last checkpoint.
 - **No saves of its own.** A disk is saved only for its owner's export:
