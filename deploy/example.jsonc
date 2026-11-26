@@ -162,10 +162,15 @@
     // Transcription (docs/api.md, Models): an agent's voice memos, here on
     // Workers AI's Whisper at its neurons a minute of audio. A self-hosted
     // deployment names its own OpenAI-compatible server, at its dollars a
-    // minute (docs/self-host.md, "Use your own models"):
+    // minute or a request (docs/self-host.md, "Use your own models"):
     //   "transcription": { "provider": "openai", "base_url": "https://stt.example.internal/v1",
     //                      "key": "fragment-transcription-key", "model": "whisper-large-v3",
     //                      "price": { "audio_minute": 0 } }
+    // A deployment whose routes are private (Private and Standard, below)
+    // names a private one, or refuses every memo: Tinfoil's Whisper,
+    //   "transcription": { "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1",
+    //                      "key": "fragment-tinfoil-api-key", "model": "whisper-large-v3-turbo",
+    //                      "price": { "request": 0.01 }, "private": true }
     "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo",
                        "price": { "neurons_a_minute": 46.63 } }
     // Embeddings (docs/api.md, Models): BGE-M3 on Workers AI unnamed, as

@@ -3118,6 +3118,11 @@ mod tests {
         refused(json!({ "transcription": plain }), "models.transcription: base_url:");
         refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo" } }), "models.transcription: price is {\"neurons_a_minute\"");
         refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 }, "key": "k" } }), "models.transcription: only an OpenAI-compatible API (provider openai) names a key");
+        refused(json!({ "transcription": { "provider": "workers_ai", "model": "@cf/openai/whisper-large-v3-turbo", "price": { "neurons_a_minute": 46.63 }, "private": true } }), "models.transcription: Workers AI and OpenRouter are not private");
+        // Tinfoil's Whisper, private, at its price a request: as preview names it
+        let mut ears = json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "whisper-large-v3-turbo", "price": { "request": 0.01 }, "private": true });
+        ears["key"] = json!("fragment-tinfoil-api-key");
+        assert_eq!(with(json!({ "transcription": ears })), "", "a private slot on a confidential API");
         // a private tier whose fallback is not private is refused before anything is made (Paul, 2026-10-22)
         let mut private = row(json!({ "private": true }));
         private["vision"] = private["cheap"].clone();

@@ -254,19 +254,23 @@ shape, so any server that answers that API serves it.
   ```
 
 - **Transcription**, `transcription`: `POST <base_url>/audio/transcriptions`,
-  OpenAI's form, asked for `verbose_json`, whose `duration` (or OpenAI's
-  `usage` of type `duration`) is the length charged, so its server answers
-  that format (every Whisper server does); its `price` dollars a minute of
-  audio, by the second.
+  OpenAI's form; its `price` dollars a minute of audio (by the second), a
+  request, or both. A slot priced by the minute asks for `verbose_json`,
+  whose `duration` (or OpenAI's `usage` of type `duration`) is the length
+  charged, so its server answers that format (every Whisper server does);
+  one that is not asks for `json`. A box whose routes are private marks
+  its slot `"private": true` too, or its memos are refused, never sent to
+  a model that is not.
 
   ```jsonc
   "transcription": { "provider": "openai", "base_url": "http://127.0.0.1:8082/v1", "key": "local-key",
-                     "model": "whisper-large-v3", "price": { "audio_minute": 0 } }
+                     "model": "whisper-large-v3", "price": { "request": 0 }, "private": true }
   ```
 
   The code names no transcription model. A config that names none is given
   Workers AI's Whisper for now (the debt ledger), which a box without
-  Workers AI cannot run: its agents' voice memos fail.
+  Workers AI cannot run, and a box whose routes are private refuses: its
+  agents' voice memos fail.
 
 Not yet: a job's decisions (`ai.decide`, Clef) and its image step
 (`ai.image`, FLUX) still name Workers AI's models in code; they become

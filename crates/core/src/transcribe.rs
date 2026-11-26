@@ -17,15 +17,25 @@
 //!   AI's own unit for speech recognition);
 //! - a model on an OpenAI-compatible API (`openai`): the audio sent on in
 //!   OpenAI's own form (`openai_form`) to `<base_url>/audio/transcriptions`
-//!   with the slot's key, asked for `verbose_json`, its answer's
-//!   `usage.seconds` (OpenAI's duration usage) or `duration` the length,
-//!   priced at the dollars a minute its slot names (`price.audio_minute`),
-//!   by the second, rounded up: as OpenAI's API bills transcription (a
-//!   minute's price, "rounded to the nearest second"), so a self-hosted
-//!   slot at zero and a vendor's at its list both read as the vendor's
-//!   price page does. Its model answers `verbose_json` (every Whisper
-//!   server does; OpenAI's token-billed gpt-4o transcription models do not,
-//!   and refuse the call, which is passed on and charged nothing).
+//!   with the slot's key, priced as its vendor lists it
+//!   (`price.audio_minute`, `price.request`, or both): a minute's price
+//!   by the second, rounded up, as OpenAI bills transcription ("rounded to
+//!   the nearest second"), and a request's (Tinfoil's Whisper, $0.01 a
+//!   request), so a self-hosted slot at zero and a vendor's at its list
+//!   both read as the vendor's price page does. A slot priced by the minute
+//!   asks for `verbose_json` (`upstream_format`) and reads its answer's
+//!   `usage.seconds` (OpenAI's duration usage) or `duration` as the length:
+//!   every Whisper server says one there; OpenAI's token-billed gpt-4o
+//!   transcription models answer no `verbose_json` and refuse the call,
+//!   which is passed on and charged nothing. One that is not asks for
+//!   `json`, which every OpenAI-compatible server answers.
+//!
+//! A slot may be private (`"private": true`, as a chat slot: confidential
+//! inference that keeps nothing, never Workers AI or OpenRouter). A
+//! deployment with a private route transcribes only on a private slot,
+//! and refuses a memo otherwise, never sending it to one that is not
+//! (`Models::transcription_refused`, as its embeddings: an agent's speech
+//! client says no route, so a memo is never known to be a Standard agent's).
 //!
 //! The code names no model: a deployment that names no slot transcribes
 //! nothing (the route answers 404, saying so). A deploy of a config that
@@ -66,8 +76,9 @@ pub const COST: &str = "transcription/sixtieth-microusd";
 /// speech model's in its catalog (Whisper large v3 turbo's 46.63 on
 /// 2026-10-07), so one higher is a typo, refused rather than charged.
 pub const NEURONS_A_MINUTE_MAX: f64 = 100_000.0;
-/// The most an OpenAI-compatible slot names a minute, in dollars: far past
-/// any vendor's list (OpenAI's $0.006 a minute for whisper-1).
+/// The most an OpenAI-compatible slot names a minute, or a request, in
+/// dollars: far past any vendor's list (OpenAI's $0.006 a minute for
+/// whisper-1, Tinfoil's $0.01 a request for Whisper large v3 turbo).
 pub const USD_A_MINUTE_MAX: f64 = 1.0;
 /// The largest audio a call takes (Paul, 2026-10-07): an hour of a voice
 /// note at 24 kbps, five minutes of 16 kHz WAV. Its base64 (about 13.3
@@ -81,9 +92,12 @@ pub const PROMPT_MAX_CHARS: usize = 1_024;
 /// An answer's audio is at most a day long: a duration past it is not a
 /// model's, and no usage.
 pub const DURATION_MAX_SECONDS: f64 = 86_400.0;
-/// What an OpenAI-compatible API is asked to answer in: the one form of
-/// OpenAI's that says the audio's `duration` on every Whisper server.
+/// What an OpenAI-compatible API is asked to answer in when its slot
+/// prices by the minute: the one form of OpenAI's that says the audio's
+/// `duration` on every Whisper server (`upstream_format`).
 pub const UPSTREAM_FORMAT: &str = "verbose_json";
+/// What one that does not is asked for: OpenAI's own default.
+pub const UPSTREAM_FORMAT_PLAIN: &str = "json";
 /// The path the route adds to an OpenAI-compatible slot's `base_url`.
 pub const OPENAI_PATH: &str = "/audio/transcriptions";
 /// A try that failed within this long of being sent is made once more
@@ -98,58 +112,82 @@ pub const AGAIN_AFTER_MS: u64 = 1_000;
 /// the header) instead of half a second.
 pub const RETRY_AFTER_S: u32 = 5;
 
-/// Where a deployment's transcriptions run, and their price.
+/// Where a deployment's transcriptions run, their price, and whether its
+/// model is private.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     pub upstream: Upstream,
     pub price: Price,
+    pub private: bool,
 }
 
-/// A transcription slot's price, a minute of audio, in its kind's unit.
+/// A transcription slot's price, in its kind's unit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Price {
-    /// Workers AI's: thousandths of a neuron (the ledger's unit, as FLUX's
-    /// tiles and steps are: crate::media), which the book prices.
+    /// Workers AI's, a minute of audio: thousandths of a neuron (the
+    /// ledger's unit, as FLUX's tiles and steps are: crate::media), which
+    /// the book prices.
     Neurons { milli_a_minute: u64 },
-    /// An OpenAI-compatible API's: micro-dollars at list, charged by the
-    /// second (as `COST`) with the margin, as an operator key's use is.
-    Usd { micros_a_minute: i64 },
+    /// An OpenAI-compatible API's: micro-dollars at list, a minute of audio
+    /// (charged by the second) and a request, charged as `COST` with the
+    /// margin, as an operator key's use is.
+    Usd { micros_a_minute: i64, micros_a_request: i64 },
 }
 
 /// A deployment's `models.transcription`, taken off `models` (`None` when
-/// unnamed: it transcribes nothing): an `Upstream` and its `price`, which a
+/// unnamed: it transcribes nothing): an `Upstream`, its `price`, which a
 /// Workers AI slot names as `{"neurons_a_minute": <n>}` and an
-/// OpenAI-compatible one as `{"audio_minute": <$>}`. Refused, saying why:
-/// no price, a price of the other kind or out of range, a chat slot's or an
-/// embeddings slot's field. Where it runs is checked as every slot's is
+/// OpenAI-compatible one as `{"audio_minute"?: <$>, "request"?: <$>}`, at
+/// least one, and whether it is private (`"private": true`). Refused,
+/// saying why: no price, a price of the other kind or out of range, a chat
+/// slot's or an embeddings slot's field. Where it runs, and that only a
+/// confidential API is private, are checked as every slot's are
 /// (`Models::parse`).
 pub fn slot_of(models: &mut Value) -> Result<Option<Slot>, String> {
     let Some(mut row) = models.as_object_mut().and_then(|m| m.remove(TRANSCRIPTION)) else { return Ok(None) };
     let o = row.as_object_mut().ok_or("models.transcription: a slot is where a model runs, an object")?;
     let price = o.remove("price");
-    for key in ["body", "images", "private", "fallback", "label", "vision", "reasoning", "max_tokens", "deep", "dimensions", "version"] {
+    let private = match o.remove("private") {
+        None => false,
+        Some(Value::Bool(b)) => b,
+        Some(other) => return Err(format!("models.transcription: private is true (its model is private: confidential inference that keeps nothing) or false, not {other}")),
+    };
+    for key in ["body", "images", "fallback", "label", "vision", "reasoning", "max_tokens", "deep", "dimensions", "version"] {
         if o.contains_key(key) {
             return Err(format!("models.transcription: {key} is a chat or embeddings slot's, not a transcription slot's"));
         }
     }
     // through the one decoder an `Upstream` has, as the other slots'
     let upstream: Upstream = serde_json::from_slice(row.to_string().as_bytes()).map_err(|e| format!("models.transcription: {e}"))?;
-    let (field, max, unit) = match upstream {
-        Upstream::WorkersAi { .. } => ("neurons_a_minute", NEURONS_A_MINUTE_MAX, "neurons a minute of audio, as Workers AI's pricing lists its speech models"),
-        Upstream::Openai { .. } => ("audio_minute", USD_A_MINUTE_MAX, "dollars a minute of audio, as its API lists it (0 for a box's own)"),
+    let (fields, max, says): (&[&str], f64, &str) = match upstream {
+        Upstream::WorkersAi { .. } => (&["neurons_a_minute"], NEURONS_A_MINUTE_MAX, "{\"neurons_a_minute\": <neurons a minute of audio, as Workers AI's pricing lists its speech models>}"),
+        Upstream::Openai { .. } => (&["audio_minute", "request"], USD_A_MINUTE_MAX, "{\"audio_minute\"?: <$ a minute of audio>, \"request\"?: <$ a request>}, at least one, as its API lists them (0 for a box's own)"),
     };
-    let named = match price {
-        Some(Value::Object(p)) if p.len() == 1 => p.get(field).and_then(Value::as_f64).filter(|n| (0.0..=max).contains(n)),
+    // each field it names, a number in range; none other, and at least one
+    let named: Option<Vec<f64>> = match &price {
+        Some(Value::Object(p)) if !p.is_empty() && p.keys().all(|k| fields.contains(&k.as_str())) => {
+            fields.iter().map(|f| p.get(*f).map_or(Some(0.0), |v| v.as_f64().filter(|n| (0.0..=max).contains(n)))).collect()
+        }
         _ => None,
     };
-    let Some(n) = named else { return Err(format!("models.transcription: price is {{\"{field}\": <{unit}>}}, from 0 to {max}")) };
+    let Some(n) = named else { return Err(format!("models.transcription: price is {says}, from 0 to {max}")) };
     // never below what was named, past a float's last digit
     let up = |v: f64| (v - 1e-6).ceil().max(0.0);
     let price = match upstream {
-        Upstream::WorkersAi { .. } => Price::Neurons { milli_a_minute: up(n * 1e3) as u64 },
-        Upstream::Openai { .. } => Price::Usd { micros_a_minute: up(n * 1e6) as i64 },
+        Upstream::WorkersAi { .. } => Price::Neurons { milli_a_minute: up(n[0] * 1e3) as u64 },
+        Upstream::Openai { .. } => Price::Usd { micros_a_minute: up(n[0] * 1e6) as i64, micros_a_request: up(n[1] * 1e6) as i64 },
     };
-    Ok(Some(Slot { upstream, price }))
+    Ok(Some(Slot { upstream, price, private }))
+}
+
+/// What an OpenAI-compatible slot's API is asked to answer in: `verbose_json`
+/// when its slot prices a minute of audio (its length is the charge), else
+/// `json`, which every OpenAI-compatible server answers.
+pub fn upstream_format(slot: &Slot) -> &'static str {
+    match slot.price {
+        Price::Usd { micros_a_minute: 0, .. } => UPSTREAM_FORMAT_PLAIN,
+        _ => UPSTREAM_FORMAT,
+    }
 }
 
 /// The book's row for `COST`: a micro-dollar each sixty, at list (an
@@ -290,12 +328,14 @@ pub fn workers_ai_input(b: &Bounded<'_>) -> Value {
 }
 
 /// What an OpenAI-compatible slot's API is sent: OpenAI's transcription
-/// form, `model` the slot's (`id`), the audio as `file` with its name and
-/// type, its language and prompt, and `response_format` `UPSTREAM_FORMAT`;
-/// `None` when `boundary` occurs in it (a random one does not).
-pub fn openai_form(b: &Bounded<'_>, id: &str, boundary: &str) -> Option<Vec<u8>> {
+/// form, `model` the slot's, the audio as `file` with its name and type,
+/// its language and prompt, and `response_format` the slot's
+/// (`upstream_format`); `None` when `boundary` occurs in it (a random one
+/// does not), or the slot is no OpenAI-compatible API's.
+pub fn openai_form(slot: &Slot, b: &Bounded<'_>, boundary: &str) -> Option<Vec<u8>> {
+    let Upstream::Openai { model: id, .. } = &slot.upstream else { return None };
     let plain = |name, data: &'static str| Field { name, filename: None, content_type: None, data: data.as_bytes() };
-    let mut fields = vec![Field { name: "model", filename: None, content_type: None, data: id.as_bytes() }, plain("response_format", UPSTREAM_FORMAT)];
+    let mut fields = vec![Field { name: "model", filename: None, content_type: None, data: id.as_bytes() }, plain("response_format", upstream_format(slot))];
     for (name, value) in [("language", b.language), ("prompt", b.prompt)] {
         if let Some(v) = value {
             fields.push(Field { name, filename: None, content_type: None, data: v.as_bytes() });
@@ -308,10 +348,19 @@ pub fn openai_form(b: &Bounded<'_>, id: &str, boundary: &str) -> Option<Vec<u8>>
 /// What a call cost, from its model's answer: its audio's length, where
 /// the slot's kind says it (Whisper's `transcription_info.duration` on
 /// Workers AI; OpenAI's `usage` of type `duration`, else `verbose_json`'s
-/// `duration`), at the slot's price. An answer that does not say, or says
-/// what no audio is, is `None`: charged nothing, said aloud
-/// (cell/src/models.rs; decision 62).
+/// `duration`), at the slot's price, and its request's price. A slot that
+/// prices no minute needs no length, and is charged for an answer that
+/// carries its text (`answer`'s), never for one in another shape. An
+/// answer that does not say a length when its price needs it, or says what
+/// no audio is, is `None`: charged nothing, said aloud (cell/src/models.rs;
+/// decision 62).
 pub fn usage_of(slot: &Slot, answer: &Value) -> Option<Usage> {
+    // exact, in sixtieths of a micro-dollar: a request at USD_A_MINUTE_MAX
+    // is 6 * 10^7
+    if let Price::Usd { micros_a_minute: 0, micros_a_request } = slot.price {
+        answer["text"].as_str()?;
+        return Some(Usage::Key { key: COST.to_string(), units: 60 * micros_a_request as u64 });
+    }
     let seconds = match &slot.upstream {
         Upstream::WorkersAi { .. } => answer["transcription_info"]["duration"].as_f64(),
         Upstream::Openai { .. } => match &answer["usage"] {
@@ -327,7 +376,7 @@ pub fn usage_of(slot: &Slot, answer: &Value) -> Option<Usage> {
         // of audio at the highest price: far under QUANTITY_MAX
         Price::Neurons { milli_a_minute } => Usage::Neurons { milli: ((seconds * 1_000.0).ceil() as u64 * milli_a_minute).div_ceil(60_000) },
         // exact: a day at USD_A_MINUTE_MAX is under 10^11
-        Price::Usd { micros_a_minute } => Usage::Key { key: COST.to_string(), units: seconds.ceil() as u64 * micros_a_minute as u64 },
+        Price::Usd { micros_a_minute, micros_a_request } => Usage::Key { key: COST.to_string(), units: seconds.ceil() as u64 * micros_a_minute as u64 + 60 * micros_a_request as u64 },
     })
 }
 
@@ -392,9 +441,20 @@ mod tests {
         assert_eq!(models, json!({ "default": "cheap" }), "taken off models");
         let o = openai();
         assert!(matches!(&o.upstream, Upstream::Openai { base_url, model, body: None, price: None } if base_url == "http://127.0.0.1:8000/v1" && model == "local-whisper"));
-        assert_eq!(o.price, Price::Usd { micros_a_minute: 6_000 });
+        assert_eq!((o.price, o.private), (Price::Usd { micros_a_minute: 6_000, micros_a_request: 0 }, false));
         let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
-        assert_eq!(free.price, Price::Usd { micros_a_minute: 0 }, "a box's own, at zero");
+        assert_eq!(free.price, Price::Usd { micros_a_minute: 0, micros_a_request: 0 }, "a box's own, at zero");
+        let t = tinfoil();
+        assert_eq!((t.price, t.private), (Price::Usd { micros_a_minute: 0, micros_a_request: 10_000 }, true), "Tinfoil's Whisper: $0.01 a request, private");
+        let both = slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "audio_minute": 0.006, "request": 0.001 } })).unwrap().unwrap();
+        assert_eq!(both.price, Price::Usd { micros_a_minute: 6_000, micros_a_request: 1_000 });
+        assert_eq!((upstream_format(&o), upstream_format(&t), upstream_format(&free), upstream_format(&both)), ("verbose_json", "json", "json", "verbose_json"), "the length asked for only when it is priced");
+    }
+
+    /// Tinfoil's Whisper large v3 turbo (inference.tinfoil.sh, its pricing
+    /// page read 2026-11-25: $0.01 a request), private.
+    fn tinfoil() -> Slot {
+        slot(json!({ "provider": "openai", "base_url": "https://inference.tinfoil.sh/v1", "model": "whisper-large-v3-turbo", "price": { "request": 0.01 }, "private": true })).unwrap().unwrap()
     }
 
     /// Invalid: a slot out of shape is refused, saying why.
@@ -412,6 +472,11 @@ mod tests {
             (oai(json!({ "audio_minute": 2 })), "from 0 to 1"),
             (wai(json!({ "neurons_a_minute": 1e6 })), "neurons_a_minute"),
             (oai(json!({ "audio_minute": "0.006" })), "audio_minute"),
+            (oai(json!({})), "at least one"),
+            (oai(json!({ "request": 2 })), "from 0 to 1"),
+            (oai(json!({ "request": 0.01, "minute": 1 })), "request"),
+            (wai(json!({ "request": 0.01 })), "neurons_a_minute"),
+            (slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "request": 0 }, "private": "yes" })), "private is true"),
             (slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "audio_minute": 0 }, "body": {} })), "body is a chat"),
             (slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "audio_minute": 0 }, "fallback": "x" })), "fallback is a chat"),
             (slot(json!({ "provider": "openai", "model": "m", "price": { "audio_minute": 0 } })), "base_url"),
@@ -438,7 +503,7 @@ mod tests {
         let input = workers_ai_input(&b);
         assert_eq!((input["language"].clone(), input["initial_prompt"].clone(), b.format), (json!("de"), json!("Paul, fragment"), Format::Text));
         assert!(input.get("temperature").is_none(), "what Whisper has no input for is let go");
-        let form = openai_form(&b, "local-whisper", "fragment-0123").unwrap();
+        let form = openai_form(&openai(), &b, "fragment-0123").unwrap();
         let sent = crate::multipart::parts(&form, "fragment-0123").unwrap();
         let fields: Vec<(&str, &[u8])> = sent.iter().map(|p| (p.name.as_str(), p.data)).collect();
         assert_eq!(fields, [("model", &b"local-whisper"[..]), ("response_format", b"verbose_json"), ("language", b"de"), ("prompt", b"Paul, fragment"), ("file", &audio[..])], "the slot's model, never the route's name; the format the route reads its length from");
@@ -446,13 +511,16 @@ mod tests {
         let parts = [part("model", b"whisper"), part("file", &audio), part("language", b""), part("prompt", b"  ")];
         let b = bound(&parts).unwrap();
         assert_eq!(workers_ai_input(&b), json!({ "audio": base64::engine::general_purpose::STANDARD.encode(&audio), "task": "transcribe", "vad_filter": true }), "empty is none");
-        assert_eq!(crate::multipart::parts(&openai_form(&b, "m", "b").unwrap(), "b").unwrap().len(), 3, "nor sent on");
+        assert_eq!(crate::multipart::parts(&openai_form(&openai(), &b, "b").unwrap(), "b").unwrap().len(), 3, "nor sent on");
+        let plain = crate::multipart::parts(&openai_form(&tinfoil(), &b, "b").unwrap(), "b").unwrap().into_iter().map(|p| (p.name, p.data.to_vec())).collect::<Vec<_>>();
+        assert_eq!(plain[..2], [("model".to_string(), b"whisper-large-v3-turbo".to_vec()), ("response_format".to_string(), b"json".to_vec())], "a slot priced by the request asks for json");
+        assert_eq!(openai_form(&workers_ai(), &b, "b"), None, "Workers AI takes Whisper's input, no form");
         // a file name no header may carry is sent as `audio`, and the
         // boundary found in the audio writes no form
         let odd = [Part { name: "file".into(), filename: Some("a\"; name=\"model".into()), content_type: Some("audio/ogg; codecs=opus".into()), data: b"--fragment-x" }, part("model", b"whisper")];
         let b = bound(&odd).unwrap();
         assert_eq!((b.filename, b.content_type), ("audio", None));
-        assert_eq!(openai_form(&b, "m", "fragment-x"), None);
+        assert_eq!(openai_form(&openai(), &b, "fragment-x"), None);
     }
 
     /// Invalid: what is no transcription the route takes is refused before
@@ -519,10 +587,21 @@ mod tests {
         let odd = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0.0001 } })).unwrap().unwrap();
         assert_eq!(usage_of(&odd, &json!({ "duration": 1.0 })), Some(cost(100)), "$0.0001 a minute: 100 sixtieths of a micro-dollar a second");
         let free = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": 0 } })).unwrap().unwrap();
-        assert_eq!(usage_of(&free, &json!({ "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
+        assert_eq!(usage_of(&free, &json!({ "text": "hi", "duration": 30.0 })), Some(cost(0)), "a box's own, at zero");
         let day = slot(json!({ "provider": "openai", "base_url": "http://127.0.0.1:8000/v1", "model": "m", "price": { "audio_minute": USD_A_MINUTE_MAX } })).unwrap().unwrap();
         let most = usage_of(&day, &json!({ "duration": DURATION_MAX_SECONDS })).unwrap();
         assert!(most.validate().is_ok() && keyed.price(&most).is_ok(), "a day at the dearest price is a charge the book takes: {most:?}");
+        // a request's price: no length needed, whatever the answer says
+        let t = tinfoil();
+        let request = usage_of(&t, &json!({ "text": "hi" })).unwrap();
+        assert_eq!((request.clone(), keyed.price(&request).unwrap().list, keyed.price(&request).unwrap().charge), (cost(600_000), 10_000, 15_000), "$0.01 a request, with the margin");
+        assert_eq!(usage_of(&t, &json!({ "text": "hi", "duration": 3600.0 })), Some(request), "its length is no part of its price");
+        for other in [json!({}), json!(null), json!({ "result": { "text": "hi" } }), json!({ "text": 7 })] {
+            assert_eq!(usage_of(&t, &other), None, "an answer in another shape (502) is charged nothing: {other}");
+        }
+        let both = slot(json!({ "provider": "openai", "base_url": "https://a.example/v1", "model": "m", "price": { "audio_minute": 0.006, "request": 0.001 } })).unwrap().unwrap();
+        assert_eq!(usage_of(&both, &json!({ "duration": 2.04 })), Some(cost(18_000 + 60_000)), "3 s at $0.006 a minute and a request at $0.001");
+        assert_eq!(usage_of(&both, &json!({ "text": "hi" })), None, "a minute's price needs the length: none said, charged nothing, said aloud");
         for bad in [json!({ "text": "hi" }), json!({ "usage": { "type": "tokens", "input_tokens": 10 } }), json!({ "duration": f64::NAN }), json!({ "duration": 90_000 }), json!({ "transcription_info": { "duration": 2.0 } })] {
             assert_eq!(usage_of(&o, &bad), None, "{bad}");
         }

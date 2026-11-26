@@ -72,6 +72,10 @@ enum Shape {
     /// fallback Tinfoil's DeepSeek V4.1 Flash on a key of its own, priced by
     /// its slot, reading images (each the model fake's OpenAI-compatible face).
     PrivateTier,
+    /// As `PrivateTier`, its transcriptions on Workers AI's Whisper, which
+    /// is not private (`private_tier_open_ears_models`): a deployment whose
+    /// config names no private transcription slot, whose memos are refused.
+    PrivateTierOpenEars,
     /// As `Plain`, with no Stripe (no `stripe` in its config): billing
     /// off, as finite.chat launched, every seat an operator's comp.
     SellsNothing,
@@ -134,8 +138,10 @@ pub const WHISPER_NEURONS_A_MINUTE: f64 = 46.63;
 pub const TRANSCRIPTION_KEY: &str = "tk_transcribe_e2e";
 
 /// The price of the private tier's transcription slot, dollars a minute of
-/// audio: OpenAI's whisper-1 list (2026-11-24), a test value.
+/// audio (OpenAI's whisper-1 list, 2026-11-24) and a request: test values,
+/// each part of a slot's price.
 pub const TRANSCRIPTION_AUDIO_MINUTE: f64 = 0.006;
+pub const TRANSCRIPTION_REQUEST: f64 = 0.001;
 
 /// A config's `models` of the shape before routes were a list, as the cell
 /// reads it (xtask's deploy reads it so: `fragment_core::models::legacy`).
@@ -179,9 +185,10 @@ pub const TINFOIL_KEY: &str = "tk_e2e0c0ffee";
 /// (`private_deep`), falling back to Private's Fast; Standard's
 /// OpenRouter's (`standard_deep`, at its own ceiling,
 /// `openrouter_deep_routing`), falling back to Cloudflare. Its
-/// transcriptions on an OpenAI-compatible API, a self-hosted Whisper
-/// server (the fake's face), on a key of their own (`TRANSCRIPTION_KEY`),
-/// at `TRANSCRIPTION_AUDIO_MINUTE`.
+/// transcriptions on an OpenAI-compatible API marked private, as Tinfoil's
+/// Whisper is on preview (the fake's face), on a key of their own
+/// (`TRANSCRIPTION_KEY`), at `TRANSCRIPTION_AUDIO_MINUTE` and
+/// `TRANSCRIPTION_REQUEST`.
 pub fn private_tier_models(fake: &str) -> Value {
     let mut private = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_core::models::FINITE_PRIVATE_FLASH, "private": true });
     let tinfoil = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::TINFOIL_FLASH, "price": tinfoil_price(), "images": true, "private": true });
@@ -192,10 +199,18 @@ pub fn private_tier_models(fake: &str) -> Value {
     let mut private_deep = tinfoil.clone();
     private_deep.as_object_mut().unwrap().extend([("reasoning".into(), json!("max")), ("max_tokens".into(), json!(DEEP_MAX_TOKENS)), ("fallback".into(), json!("cheap"))]);
     private.as_object_mut().unwrap().extend([("label".into(), json!("Private (recommended)")), ("reasoning".into(), json!("high")), ("deep".into(), json!("private_deep")), ("fallback".into(), json!("private_deep"))]);
-    // its transcriptions on a self-hosted Whisper server, the fake's
-    // OpenAI-compatible face, at the dollars a minute its slot names
-    let transcription = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": TRANSCRIPTION_AUDIO_MINUTE } });
+    // its transcriptions on a private Whisper server, the fake's
+    // OpenAI-compatible face, at the price its slot names
+    let transcription = json!({ "provider": "openai", "base_url": format!("{fake}/v1"), "model": fragment_fakes::workers_ai::OPENAI_TRANSCRIBE_MODEL, "price": { "audio_minute": TRANSCRIPTION_AUDIO_MINUTE, "request": TRANSCRIPTION_REQUEST }, "private": true });
     listed(json!({ "cheap": private, "medium": standard, "fallback": tinfoil, "vision": vision, "cloudflare": cloudflare, "private_deep": private_deep, "standard_deep": standard_deep, "transcription": transcription }))
+}
+
+/// `private_tier_models`, its transcriptions on Workers AI's Whisper
+/// (`whisper_slot`), which is not private (`Shape::PrivateTierOpenEars`).
+pub fn private_tier_open_ears_models(fake: &str) -> Value {
+    let mut models = private_tier_models(fake);
+    models["transcription"] = whisper_slot();
+    models
 }
 
 /// The most one call of a Deep slot writes on a node shaped as the private
@@ -894,6 +909,15 @@ impl Suite {
         started
     }
 
+    /// Starts the node shaped as the private tier, its transcriptions on a
+    /// slot that is not private (`Shape::PrivateTierOpenEars`).
+    pub fn start_as_private_tier_open_ears(&mut self) -> Result<Api> {
+        self.shape = Shape::PrivateTierOpenEars;
+        let started = self.start(false);
+        self.shape = Shape::Plain;
+        started
+    }
+
     /// Starts the node with no Stripe (`Shape::SellsNothing`): billing off.
     pub fn start_selling_nothing(&mut self) -> Result<Api> {
         self.shape = Shape::SellsNothing;
@@ -974,13 +998,15 @@ impl Suite {
             ai_gateway: None,
             models: match self.shape {
                 Shape::PrivateTier => Some(private_tier_models(&self.ai.node().url).to_string()),
+                Shape::PrivateTierOpenEars => Some(private_tier_open_ears_models(&self.ai.node().url).to_string()),
                 Shape::Plain | Shape::TwoSites | Shape::SellsNothing | Shape::OneKeyMore | Shape::Door => Some(plain_models().to_string()),
                 Shape::EmbeddingsRepinned => Some(repinned_models().to_string()),
             },
             model_keys: {
                 let key = |slot: &str, name: &str, value: &str| devstack::ModelKey { slot: slot.into(), name: name.into(), value: value.into() };
+                let ears = matches!(self.shape, Shape::PrivateTier);
                 match self.shape {
-                    Shape::PrivateTier => vec![
+                    Shape::PrivateTier | Shape::PrivateTierOpenEars => vec![
                         key("cheap", "fragment-finite-private-key", FINITE_PRIVATE_KEY),
                         // OpenRouter's, the key the model fake lets in for every model but Tinfoil's
                         key("medium", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
@@ -989,7 +1015,10 @@ impl Suite {
                         key("private_deep", "fragment-tinfoil-api-key", TINFOIL_KEY),
                         key("standard_deep", "fragment-openrouter-key", FINITE_PRIVATE_KEY),
                         key("transcription", "fragment-transcription-key", TRANSCRIPTION_KEY),
-                    ],
+                    ]
+                    .into_iter()
+                    .filter(|k| ears || k.slot != "transcription")
+                    .collect(),
                     _ => vec![],
                 }
             },
@@ -1020,7 +1049,7 @@ impl Suite {
             }),
             platform_url: match self.shape {
                 Shape::TwoSites => format!("http://{SUFFIX}:{}", self.port),
-                Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
+                Shape::Plain | Shape::PrivateTier | Shape::PrivateTierOpenEars | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => format!("http://127.0.0.1:{}", self.port),
             },
             operators: Some(
                 std::iter::once(&self.operator).chain(self.wiper.as_ref()).map(|k| fragment_core::npub::encode(k.pubkey_hex())).collect::<Vec<_>>().join(","),
@@ -1102,7 +1131,7 @@ impl Suite {
     fn suffix(&self) -> &'static str {
         match self.shape {
             Shape::TwoSites => BOATS,
-            Shape::Plain | Shape::PrivateTier | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => SUFFIX,
+            Shape::Plain | Shape::PrivateTier | Shape::PrivateTierOpenEars | Shape::SellsNothing | Shape::OneKeyMore | Shape::EmbeddingsRepinned | Shape::Door => SUFFIX,
         }
     }
 

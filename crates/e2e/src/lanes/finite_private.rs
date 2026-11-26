@@ -42,13 +42,17 @@
 //! Tinfoil, its `vision` and `fallback` there too, a job's step the same.
 //!
 //! What `transcription_checks` proves: the node's transcription slot, on
-//! an OpenAI-compatible API (a self-hosted Whisper server, the fake's
-//! face), is where an agent's voice memo goes: OpenAI's form at the slot's
-//! `base_url`, its model and its key, never Workers AI's and never the
-//! route's name; answered in OpenAI's shape, charged at the slot's dollars
-//! a minute by the second; a fast refusal for capacity tried once more and
+//! an OpenAI-compatible API marked private (a Whisper server as Tinfoil's,
+//! the fake's face), is where an agent's voice memo goes: OpenAI's form at
+//! the slot's `base_url`, its model and its key, never Workers AI's and
+//! never the route's name; answered in OpenAI's shape, charged at the
+//! slot's dollars a minute by the second and its request's price; a fast refusal for capacity tried once more and
 //! charged once; a redirect from it never followed; a refusal of the
 //! request passed through, charged nothing.
+//!
+//! What `open_ears_checks` proves, on the same tiers with Workers AI's
+//! Whisper as their transcription slot, which is not private: a memo is
+//! refused, sent to no model, charged nothing.
 //!
 //! The fallback of each status (429, 5xx, a model down) and "the fallback
 //! fails too" are crates/core's (models.rs) and the ledger lane's.
@@ -144,13 +148,38 @@ pub fn finite_private(s: &mut Suite, _: &Api) -> Result<()> {
     let tiered = tier_checks(s, &api);
     s.ai.clear_script();
     let transcribed = transcription_checks(s, &api);
+    // its transcriptions on a slot that is not private: refused
+    s.stop()?;
+    let api = s.start_as_private_tier_open_ears()?;
+    let refused = open_ears_checks(s, &api);
     // the node as the lanes after it expect it: every tier on Workers AI
     s.ai.clear_script();
     s.ai.down(&[]);
     s.ai.transcripts(false);
     s.stop()?;
     s.start(false)?;
-    checked.and(tiered).and(transcribed)
+    checked.and(tiered).and(transcribed).and(refused)
+}
+
+/// A node shaped as the private tier, its transcription slot Workers AI's
+/// Whisper, which is not private: an agent's memo is refused, saying why,
+/// sent to no model and charged nothing (`Models::transcription_refused`).
+fn open_ears_checks(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let owner_id = api.identity(&owner)?;
+    let hand = Keys::generate();
+    let reg = "/api/identities";
+    let r = api.signed(&owner, "POST", reg, Some(&json!({ "kind": "agent", "proof": api.proof(&hand, "POST", reg, &owner) })))?;
+    anyhow::ensure!(r.status == 200, "an agent of the owner's: {r}");
+    let memo = fragment_fakes::workers_ai::spoken_wav("hello from a voice memo", 3);
+    let (calls, before) = (s.ai.calls().len(), quiet(api, &owner_id, "aig:"));
+    let r = transcription_call(api, &hand, &[("model", "whisper"), ("response_format", "json")], &memo)?;
+    s.ok(
+        "a deployment with a private route and a transcription slot that is not private refuses a memo, 403, saying why: it reaches no model and is charged nothing",
+        r.status == 403 && r.message().contains("not private") && s.ai.calls().len() == calls && entries(api, &owner_id, "aig:").len() == before,
+        json!({ "status": r.status, "message": r.message(), "calls": s.ai.calls().len() - calls, "entries": entries(api, &owner_id, "aig:") }),
+    );
+    Ok(())
 }
 
 /// The private tier's transcriptions (the module's doc), on a node of its
@@ -172,7 +201,8 @@ fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let parsed = Models::parse(Some(&models), &PriceBook::defaults(), true).expect("the node's models");
     let mut book = parsed.priced(PriceBook::defaults());
     book.keys.extend(parsed.cost_keys());
-    let sixtieths = |n: u64| n * (crate::TRANSCRIPTION_AUDIO_MINUTE * 1e6).round() as u64;
+    let micros = |usd: f64| (usd * 1e6).round() as u64;
+    let sixtieths = |n: u64| n * micros(crate::TRANSCRIPTION_AUDIO_MINUTE) + 60 * micros(crate::TRANSCRIPTION_REQUEST);
     let seconds = |n: u64| Usage::Key { key: COST.into(), units: sixtieths(n) };
     let charge = |usage: &Usage| book.price(usage).expect("the node's book prices its slot's cost").charge;
     let settled_at = |before: usize, n: u64| {
@@ -198,7 +228,7 @@ fn transcription_checks(s: &mut Suite, api: &Api) -> Result<()> {
     };
     let settled = s.eventually(wait, || settled_at(before, 3));
     s.ok(
-        "a voice memo on an OpenAI-compatible transcription slot is OpenAI's form at its base_url (its model, never `whisper`; its own key; the audio and its name as they came; the language passed on), answered in OpenAI's shape and charged at the slot's dollars a minute for the 3 s it heard",
+        "a voice memo on a private OpenAI-compatible transcription slot is OpenAI's form at its base_url (its model, never `whisper`; its own key; the audio and its name as they came; the language passed on), answered in OpenAI's shape and charged at the slot's dollars a minute for the 3 s it heard and its price a request",
         r.status == 200 && r.body == json!({ "text": "hello from a voice memo" }) && sent && settled,
         json!({ "status": r.status, "answer": r.text, "made": made.iter().map(|c| json!({ "face": format!("{:?}", c.face), "model": c.model, "format": c.body["response_format"], "keyed": c.authorization.as_deref() == Some(slot_key.as_str()) })).collect::<Vec<_>>(), "charge": charge(&seconds(3)), "entries": aig() }),
     );

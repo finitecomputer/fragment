@@ -775,9 +775,10 @@ pub(crate) async fn embedded(env: &Env, inputs: &[String], payer: &str, agent: O
 /// `POST /api/models/v1/audio/transcriptions`: an agent's transcription
 /// (the module's doc), signed by the agent; OpenAI's multipart shape, its
 /// `model` `whisper`, run on the deployment's transcription slot. Its owner
-/// pays, after its answer. A deployment that names no slot answers 404,
-/// and audio past `transcribe::AUDIO_MAX_BYTES` is 413, before anything is
-/// sent.
+/// pays, after its answer. A deployment that names no slot answers 404, one
+/// with a private route and a slot that is not private 403
+/// (`Models::transcription_refused`), and audio past
+/// `transcribe::AUDIO_MAX_BYTES` is 413, before anything is sent.
 pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, after: &dyn Background) -> CellResult<Response> {
     let body = read_body(&mut req, transcribe::BODY_MAX_BYTES).await?;
     let agent = crate::signer_for(env, &req, url, &body).await?;
@@ -789,6 +790,10 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     let Some(slot) = &cfg.models.transcription else {
         return Err(CellError::new(ErrorCode::NotFound, "this deployment transcribes nothing: its models name no transcription slot (models.transcription)"));
     };
+    // a private route's memo goes to a private model, or nowhere
+    if let Some(why) = cfg.models.transcription_refused() {
+        return Err(CellError::new(ErrorCode::Forbidden, why));
+    }
     let content_type = req.headers().get("content-type")?.unwrap_or_default();
     let malformed = |m: multipart::Malformed| CellError::invalid(m.message());
     let boundary = multipart::boundary(&content_type).map_err(malformed)?;
@@ -801,10 +806,10 @@ pub(crate) async fn transcription_route(mut req: Request, env: &Env, url: &Url, 
     let format = bounded.format;
     let sent = match &slot.upstream {
         Upstream::WorkersAi { model } => Sent::WorkersAi { model, input: transcribe::workers_ai_input(&bounded) },
-        Upstream::Openai { base_url, model, .. } => {
+        Upstream::Openai { base_url, .. } => {
             // the platform's own: 128 random bits no audio carries
             let boundary = format!("fragment-{}", js::random_hex::<16>());
-            let form = transcribe::openai_form(&bounded, model, &boundary).ok_or_else(|| CellError::host("a form's boundary was found in its audio: send it again"))?;
+            let form = transcribe::openai_form(slot, &bounded, &boundary).ok_or_else(|| CellError::host("a form's boundary was found in its audio: send it again"))?;
             Sent::Openai { base_url, content_type: format!("multipart/form-data; boundary={boundary}"), form }
         }
     };
