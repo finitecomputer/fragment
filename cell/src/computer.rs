@@ -1995,13 +1995,18 @@ impl ComputerCell {
                 // disk it no longer fits (2026-11-20), heard as that is
                 let lever = self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string());
                 // a directory's record before any inside it, as it was taken;
-                // together within `RESTORE_MS`, each given what is left
+                // together within `RESTORE_MS`, each given what is left. A
+                // start after a failed one reads R2's copy beside its first
+                // try (backups.mjs `restoreChecked`): a copy damaged in R2 is
+                // found so even when a restore comes damaged too late in its
+                // time to read it after (an 8 GB save's, say)
                 let until = js::now_ms() + RESTORE_MS;
+                let read_first = JsValue::from_bool(self.lifecycle()?.failures() > 0);
                 for record in &save.records {
                     let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
                     let restored = match lever {
                         true => Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number))),
-                        false => self.call("restore", &[g.clone(), js::to_js(record), left]).await,
+                        false => self.call("restore", &[g.clone(), js::to_js(record), left, read_first.clone()]).await,
                     };
                     let of = |why: &str| format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"));
                     // a save that no longer fits its disk (the host's typed
@@ -2346,16 +2351,16 @@ impl ComputerCell {
         // fails, tried again: an awake save's backup could hold up the one
         // an owner's sleep or restart asks meanwhile (the container takes
         // one backup at a time), which an awake save's failure costs nothing
-        let sleeping = matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { .. }));
-        let snapshot_after = sleeping && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
+        // still a sleep's own save, its lifecycle read as it is asked (a wake
+        // during its checks makes it an awake save, which goes on)
+        let sleeps = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
+        let snapshot_after = sleeps() && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
         let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
             // bounded: at its last try `after_check` answers no Again
             for tried in 1..=fragment_core::computer::SAVE_TRIES {
                 let checked = self.stored(&records[at], checks_until).await;
-                // still the save its lifecycle asked for: a sleep's own
-                let own = sleeping && matches!(self.lifecycle().map(|l| l.saving()), Ok(Some(Saving::Save { seq: s, .. })) if s == seq);
-                let next = fragment_core::computer::after_check(checked, tried, own);
+                let next = fragment_core::computer::after_check(checked, tried, sleeps());
                 let why = match next {
                     AfterCheck::Keep => break,
                     AfterCheck::Unchecked(why) => {

@@ -37,14 +37,17 @@ function against(held, record) {
 // One record's restore. `restore()` answers null once it is in place, or
 // why its bytes came damaged; `stored()` reads what R2 holds of `record`;
 // `again(tried, why)` is told of each asked again. R2's copy is read beside
-// the tries after one that came damaged, and no try ever waits for it: its
+// the tries after one that came damaged (`readFirst`: beside the first
+// too, a start's after a failed one, so a copy damaged in R2 is found even
+// when a long restore comes damaged with no time left to read it after),
+// and no try ever waits for it: its
 // verdict is used once it is in, and awaited only once no try is left (the
 // last came damaged, or one failed otherwise). Answers null once restored, or
 // `{unusable}` when R2's own copy is not its record: the save never will
 // restore. Throws once `RESTORE_TRIES` came in damaged while R2's copy was
 // not found bad (a failed start, which may pass: the save is kept), and
 // whatever `restore` throws.
-export async function restoreChecked({ record, restore, stored, again = () => {} }) {
+export async function restoreChecked({ record, restore, stored, again = () => {}, readFirst = false }) {
   // a read of R2's copy under way or done (it never rejects), and its
   // verdict once in: {bad}, {unread} or {} (not found bad)
   let checking = null;
@@ -56,6 +59,7 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
       (e) => (verdict = { unread: String(e?.message ?? e) }),
     );
   };
+  if (readFirst) check();
   for (let tried = 1; ; tried++) {
     let damaged;
     try {

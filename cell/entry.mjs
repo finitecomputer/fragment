@@ -70,9 +70,10 @@ export class DirectoryBackupGateway extends SandboxGateway {
   async stored(ms) {
     const { protocolVersion, mode, binding, key } = this.ctx.props ?? {};
     if (protocolVersion !== 1 || mode !== "control") throw new Error("a stored copy is read with control props alone");
+    // (its bound from the call: an R2 answer slow to come shortens the read)
+    const signal = AbortSignal.timeout(ms);
     const object = await this.env[binding].get(key);
     if (object === null) return null;
-    const signal = AbortSignal.timeout(ms);
     const digest = new crypto.DigestStream("SHA-256");
     const hashing = digest.getWriter();
     const reader = object.body.getReader({ mode: "byob" });
@@ -634,12 +635,13 @@ class ContainerHost {
 
   // Restores `record` into its directory within `ms` (`Overdue` past it),
   // asked again while its bytes come damaged and R2's copy is not found bad
-  // (backups.mjs `restoreChecked`): null once it is in place, `{unusable}`
+  // (backups.mjs `restoreChecked`; `readFirst`: R2's copy read beside its
+  // first try, a start's after a failed one): null once it is in place, `{unusable}`
   // when the save itself will never restore (its archive gone, the SDK's
   // BACKUP_NOT_FOUND, or R2's own copy not its record), or `{noRoom}` when
   // it found no room on the disk (a restore's SandboxFileError ENOSPC),
   // which the Rust side tells from a failure that may pass (it throws).
-  async restore(generation, record, ms) {
+  async restore(generation, record, ms, readFirst = false) {
     const until = Date.now() + ms;
     const left = () => Math.max(1, until - Date.now());
     const restore = async () => {
@@ -655,6 +657,7 @@ class ContainerHost {
     try {
       return await restoreChecked({
         record,
+        readFirst,
         restore,
         stored: () => this.#stored(record, left()),
         again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),

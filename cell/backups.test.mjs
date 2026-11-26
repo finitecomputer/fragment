@@ -29,12 +29,13 @@ const DAMAGED = "BACKUP_INTEGRITY: the backup is corrupt: Data corruption detect
 // Error: thrown), and `copies` each read of R2's copy at once (an Error:
 // thrown; "never": a read that never answers; `{late: copy}`: that copy,
 // 40 ms after it is asked).
-function restores(tries, copies) {
+function restores(tries, copies, readFirst = false) {
   const seen = { restores: 0, reads: 0, again: [] };
   const later = (ms) => new Promise((r) => setTimeout(r, ms));
   const run = () =>
     restoreChecked({
       record: r,
+      readFirst,
       restore: async () => {
         const t = tries[Math.min(seen.restores++, tries.length - 1)];
         await later(5);
@@ -113,6 +114,22 @@ test("a check of R2's copy that fails condemns nothing, and is made again beside
   const later = restores([DAMAGED], [fails, bad]);
   assert.match((await later.run()).unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
   assert.equal(later.seen.restores, 3);
+});
+
+test("a start after a failed one reads R2's copy beside its first try: a copy bad is found though no try is left to read it after", async () => {
+  // its first try came damaged late in a long restore, and the next ran out of time
+  const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
+  const late = restores([DAMAGED, overdue], [bad], true);
+  assert.match((await late.run()).unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
+  assert.deepEqual([late.seen.restores, late.seen.reads], [1, 2], "found at its first try");
+  // a copy whole: restored at its first try, the read beside it unused, never waited for
+  const fine = restores([null], ["never"], true);
+  assert.equal(await fine.run(), null);
+  assert.deepEqual([fine.seen.restores, fine.seen.reads], [1, 1]);
+  // a first start reads nothing beside its first try
+  const first = restores([null], [whole]);
+  assert.equal(await first.run(), null);
+  assert.equal(first.seen.reads, 0);
 });
 
 test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {

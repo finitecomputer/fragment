@@ -564,7 +564,10 @@ the DO removes them from one started from a snapshot.
   unusable, as above, once a try beside them failed too; otherwise (a read
   that failed too) the restore is asked again, three tries in all, within
   its own bound, and a start whose tries all came damaged fails as one that
-  may pass, its save kept. A later start's save kept, an earlier start's
+  may pass, its save kept. A start after a failed one reads R2's copy
+  beside its first try too, so a copy damaged in R2 is found even when a
+  long restore comes damaged with no time left to read it after (an 8 GB
+  save's): the next wake goes back, as it must. A later start's save kept, an earlier start's
   that lands after it is never kept ahead of it (`Saves::overtaken`). A restore that works reads nothing more. R2's
   copy is read and hashed by the backups' gateway
   (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
