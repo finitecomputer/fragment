@@ -3306,9 +3306,10 @@ impl ComputerCell {
             return Err(CellError::host("its container is still running: the wipe goes on once it is gone"));
         }
         // when its container was first seen gone: its disk's settle runs from
-        // then (no put its route takes after it)
+        // then (no put its route takes after it). The wipe's own write, as
+        // its mark is: past `exec`, which refuses a wiped computer's writes
         if self.meta(MetaKey::WipeGone)?.is_none() {
-            self.set_meta(MetaKey::WipeGone, &js::now_ms().to_string())?;
+            self.sql().exec("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING", vec![MetaKey::WipeGone.key().into(), js::now_ms().to_string().into()])?;
         }
         let records = self.saves()?.every_record();
         // bounded: a computer's records are (Saves::every_record), each
