@@ -726,19 +726,6 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
-## A mandate of the first form still opens
-
-- **Shortcut:** mandates are made as `fm2.` (FIN-615, PR 16a: they name
-  their place's fragment name and the agent lent there), but `mandate::open`
-  still reads an `fm1.` one, which names neither: its lend is read at the
-  turn's own place, for the agent itself, and it is carried to no other
-  agent (`Mandate::carried`: the ask goes on unproven, as before).
-- **Risk:** none beyond what the first form was: an ask on one carried
-  between agents is unproven for at most its day.
-- **Delete when:** one `limits::MANDATE_LIFE_MS` (a day) after this release
-  reaches production, when no turn can hold one: drop `PREFIX_V1` and its
-  branch in `open` and `lent_at`.
-
 ## An agent's computer tells its own turns
 
 - **Shortcut:** whose ask an agent's call is (FIN-720; docs/api.md, "An

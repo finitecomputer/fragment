@@ -946,23 +946,25 @@ impl FragmentCell {
     /// are a person's own here (`mandate::asker_of`), to this agent
     /// (`mandate::addressed`) and within a mandate's life, carries their
     /// mandate for it (docs/api.md, "Who asked: mandates"): the proof that
-    /// they asked it, which its calls carry in place of `for`. And each an
-    /// agent of the same owner's said to it on someone's proven ask (a
-    /// `fragment ask`: `carried`), that ask carried on (`Mandate::carried`):
-    /// the same asker, lent where they asked. Whose words each is and the
-    /// membership are read before the await, as the page was.
+    /// they asked it, which its calls carry in place of `for`. And beside
+    /// each an agent of the same owner's said to it on their owner's own
+    /// proven ask (a `fragment ask`, a hand-off: `carried_to`), that ask
+    /// carried on (`Mandate::carried`): the same asker, place, record and
+    /// day. Anyone else's ask is carried to no one (it is lent and capped
+    /// per agent: the agent asked goes on as itself). Whose words each is
+    /// and the membership are read before the await, as the page was.
     async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
         let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) else { return Ok(()) };
         if self.member_role(&agent.id)?.is_none() {
             return Ok(());
         }
-        let (place, name, now) = (self.must(MetaKey::Npub)?, self.name()?, js::now_ms());
+        let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
         let firsts: Vec<Option<Mandate>> = page
             .records
             .iter()
             .map(|r| {
                 let asker = mandate::asker_of(&r.principal, r.author, r.asker.as_deref(), r.body.get()).filter(|_| mandate::addressed(r.body.get(), &agent.id))?;
-                Mandate::of_record(&asker, &agent.id, &place, &name, &r.channel, r.seq, r.at).filter(|m| m.until >= now)
+                Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at).filter(|m| m.until >= now)
             })
             .collect();
         let carried = self.carried_to(page, agent)?;
@@ -971,9 +973,11 @@ impl FragmentCell {
         }
         let keys = crate::keys::mandate_keys(&self.env).await?;
         for ((record, first), carried) in page.records.iter_mut().zip(firsts).zip(carried) {
-            // an ask carried on is its poster's own, unexpired, and to this agent
+            // an ask carried on is its poster's own, unexpired, and their
+            // owner's own words (its owner this agent's too: `carried_to`)
+            let owners = |m: &Mandate| agent.owner.as_deref().is_some_and(|o| npub::display(o) == npub::display(&m.asker));
             let carried_on = || -> Option<Mandate> {
-                let m = mandate::open(&keys, carried.as_deref()?, now).ok().filter(|m| npub::display(&m.agent) == record.principal)?;
+                let m = mandate::open(&keys, carried.as_deref()?, now).ok().filter(|m| npub::display(&m.agent) == record.principal && owners(m))?;
                 m.carried(&agent.id)
             };
             record.mandate = first.or_else(carried_on).map(|m| m.text(&keys[0]));
@@ -984,9 +988,9 @@ impl FragmentCell {
     /// For each record of `page`, the ask its poster's words were said on
     /// (`records.carried`), where `reader` may carry it on: an agent's own
     /// words to it here (`addressed`), the poster an agent of the same
-    /// owner's as `reader` (their member rows say so: `fragment ask` asks
-    /// one's own agents alone; another owner's agent carries nothing on,
-    /// and goes on as itself). One query, over the page's span.
+    /// owner's as `reader` (their member rows say so; another owner's agent
+    /// carries nothing on, and goes on as itself, SHIP IT 2026-11-26). One
+    /// query, over the page's span.
     fn carried_to(&self, page: &ChannelPage, reader: &crate::routed::Signed) -> CellResult<Vec<Option<String>>> {
         let mut out = vec![None; page.records.len()];
         let asked = |r: &ChannelRecord| r.author == Some(Author::Agent) && mandate::addressed(r.body.get(), &reader.id);

@@ -199,20 +199,19 @@ one carried by any key but its agent's, 403; one beside `for`, or where
 `for` is not honored, 400, as are the identity routes and the invite
 routes (which take `for` through the registry, and no mandate). Only the
 platform can make one: its mark is a MAC under a key derived from the
-host secret. Its text (`fm2.`) names the place by its key and its name,
-and the agent the place lends for it (`via`); one of the first form
-(`fm1.`, before FIN-615 PR 16a) still opens, lent at its turn's own place.
+host secret.
 
 **An ask carried on** (FIN-615, PR 16a; `fragment ask`, a hand-off). An
-agent's post made on a mandate keeps that mandate (`records.carried`). An
-agent member of the same owner's that the post is to (`to` names it, or no
-one), reading it as itself, is given beside it that ask carried on
-(`Mandate::carried`): the same asker, place, record and day, lent by the
-same agent there (`via`), so it acts for them within what the place where
-they asked lends that agent, and can only narrow it. Another owner's agent
-is given none, and goes on as itself. Under its owner's own ask this is
-`fragment ask`'s own chat; under someone else's, a chat they may post in,
-since the agent acts there as them.
+agent's post made on a mandate keeps that mandate (`records.carried`).
+Where that mandate is its owner's own ask, an agent member of the same
+owner's that the post is to (`to` names it, or no one), reading it as
+itself, is given beside it that ask carried on (`Mandate::carried`): the
+same asker, place, record and day, for itself, so it acts for its owner,
+proven, no longer than the ask it came from. Anyone else's ask is carried
+to no one: what an agent may do for them is its own cap, hold, grants and
+lend, which a second agent would not be held to, so the agent asked goes
+on unproven, as itself, in the place it was asked alone (SHIP IT,
+2026-11-26). Nor is another owner's agent given one.
 
 **An agent's computer proves who asked** (FIN-720). Its bridge tells the
 agent's fragment each turn it runs, before its runtime hears of it

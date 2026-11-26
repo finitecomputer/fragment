@@ -101,10 +101,7 @@ struct TurnRow {
 /// A turn's row read as `mandate::proof` reads one: its mandate only while
 /// it holds.
 fn turn_of(r: &TurnRow, now: i64) -> mandate::Turn<'_> {
-    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).and_then(|text| {
-        let (place, name, via) = mandate::lent_at(text)?;
-        Some(mandate::Held { text, until: r.until, place, name, via })
-    });
+    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).and_then(|text| Some(mandate::Held { text, until: r.until, place: mandate::place_of(text)? }));
     mandate::Turn { place: &r.place, asker: &r.asker, mandate }
 }
 
@@ -369,12 +366,10 @@ impl FragmentCell {
 
     /// What of its owner's its open turns lend it now: `None` while only
     /// its owner's own ask is open (or none is), everything of theirs; one
-    /// other person's, the narrowest of what each place their asks began in
-    /// lends now, read there (`LendOf`: a lend is kept on its member row
-    /// alone, so a switch turned off holds from the next use), for the agent
-    /// asked there: itself, or for an ask carried to it by another agent of
-    /// its owner's (`fragment ask`), the one first asked (`mandate::LentAt`);
-    /// no one proven's, nothing. A place that does not answer lends nothing.
+    /// other person's, the narrowest of what each place their turns are in
+    /// lends it now, read there (`LendOf`: a lend is kept on its member row
+    /// alone, so a switch turned off holds from the next use); no one
+    /// proven's, nothing. A place that does not answer lends nothing.
     async fn lent_now(&self) -> CellResult<Option<Lend>> {
         let now = js::now_ms();
         let rows = self.turn_rows(now)?;
@@ -385,8 +380,9 @@ impl FragmentCell {
             Proof::Itself(_) => return Ok(Some(Lend::NONE)),
             Proof::Asker { at, .. } => at,
         };
+        let agent = self.must(MetaKey::AgentIdentity)?;
         // bounded: the places of its open turns, at most `TURNS_HELD_MAX`
-        let calls: Vec<(&str, LendOf)> = at.iter().map(|l| (l.name, LendOf { agent: l.agent.to_string(), place: l.place.to_string() })).collect();
+        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string() })).collect();
         let asked = calls.iter().map(|(name, call)| crate::fragment::call(&self.env, name, call));
         let lent = futures_util::future::join_all(asked).await.into_iter().fold(Lend::OWNER, |lent, here| {
             let here = here.unwrap_or(Lend::NONE);

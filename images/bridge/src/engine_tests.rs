@@ -5315,7 +5315,8 @@ fn a_hand_off_carries_on_the_ask_it_came_from() {
     let skylers = Record { mandate: Some("fm1.skyler".into()), ..rec_at(1, 10, "npub1skyler", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
     let jt = to_all(&mut e, &[&j], &v, talk, skylers, T0)[0].0.turn.clone();
     let on = handed(&mut e, 2, "npub1juniper", "rowan, over to you", &jt);
-    assert_eq!(on, vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: None, unproven: None }], "Skyler's ask, carried on, unproven");
+    let cause = records::Cause { fragment: talk.into(), channel: records::CHAT.into(), seq: 2 };
+    assert_eq!(on, vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: None, unproven: Some(cause) }], "Skyler's ask, carried on: heard live with no proof, its record read once for one");
     let ended = e.step(heard(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0 + 2);
     answered(&mut e, ended, T0 + 2);
     let pauls = rec_at(3, 30, "npub1paul", json!({ "text": "ask rowan too", "to": ["npub1juniper"] }));
@@ -5345,22 +5346,24 @@ fn a_hand_off_carries_on_the_ask_it_came_from() {
 }
 
 /// Goal (FIN-615, PR 16a): a hand-off whose record carries its place's
-/// mandate for the agent asked (an ask carried on between one owner's
-/// agents) is told with that proof, and its start names the ask it carries
-/// on beside the agent that said it: "Rowan is working for Skyler (via
-/// Juniper)". One whose record carries none goes on unproven, as before
-/// (`a_hand_off_carries_on_the_ask_it_came_from`).
+/// mandate for the agent asked (its owner's own ask, carried on between its
+/// agents) is told with that proof, read no more, and its start names whose
+/// ask it carries on, as the mandate says, beside the agent that said it:
+/// "Rowan is working for Paul (via Juniper)". One heard live with none is
+/// read once for one (`a_hand_off_carries_on_the_ask_it_came_from`).
 #[test]
 fn a_hand_off_its_place_carried_is_told_with_that_proof() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
     let talk = "talk--k3x9";
-    let skylers = Record { mandate: Some("fm2.skyler".into()), ..rec_at(1, 10, "npub1skyler", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
-    let jt = to_all(&mut e, &[&j], &v, talk, skylers, T0)[0].0.turn.clone();
-    let words = Record { mandate: Some("fm2.carried".into()), ..rec_at(2, 20, "npub1juniper", json!({ "text": "rowan, over to you", "to": ["npub1rowan"], "turn": jt, "hop": 1 })) };
+    let paul = Record { mandate: Some("fm1.npub1paul.npub1juniper.npub1room.chat.1.99.mark".into()), ..rec_at(1, 10, "npub1paul", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
+    let _ = to_all(&mut e, &[&j], &v, talk, paul, T0);
+    let carried = "fm1.npub1paul.npub1rowan.npub1room.chat.1.99.mark".to_string();
+    let words = Record { mandate: Some(carried.clone()), ..rec_at(2, 20, "npub1juniper", json!({ "text": "rowan, over to you", "to": ["npub1rowan"], "hop": 1 })) };
     let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: words, view: Some(v.clone()), since: 0 }, T0 + 2);
     let start = s.effects.iter().find_map(|x| match x { Effect::Claim { body, .. } => Some(body.clone()), _ => None }).expect("Rowan's turn claimed");
-    assert_eq!((start["asker"].clone(), start["carried"].clone()), (json!("npub1juniper"), json!("npub1skyler")), "its start names the ask it carries on: {start}");
-    assert_eq!(told(&answered(&mut e, s, T0 + 2)), vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: Some("fm2.carried".into()), unproven: None }], "Skyler's ask, carried on, proven");
+    assert_eq!((start["asker"].clone(), start["carried"].clone()), (json!("npub1juniper"), json!("npub1paul")), "its start names whose ask it carries on, as its mandate says: {start}");
+    let on = told(&answered(&mut e, s, T0 + 2));
+    assert!(on.len() == 1 && on[0].mandate.as_deref() == Some(carried.as_str()) && on[0].unproven.is_none(), "told with its place's proof, read no more: {on:?}");
 }

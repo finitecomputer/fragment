@@ -523,6 +523,14 @@ enum Ask<'a> {
 }
 
 impl Turn {
+    /// A hand-off's: whose ask its words were on, as its start names it
+    /// (`records::carrying`): the asker the mandate its place gave says, else
+    /// the one this computer saw it said in; none for any other turn.
+    fn carried(&self) -> Option<&str> {
+        let ask = self.handed_ask.as_deref()?;
+        Some(self.mandate.as_deref().and_then(records::mandate_asker).unwrap_or(ask))
+    }
+
     /// This life's claim was answered, and the runtime has it.
     fn active(&self) -> bool {
         matches!(self.phase, Phase::Running | Phase::Waiting)
@@ -1644,7 +1652,7 @@ impl Engine {
                 // refused) are posted and not kept: a crash before they land
                 // loses them.
                 crate::ev!("owed.unkept", { "turn": id, "why": "the computer holds as many turns as it may" });
-                let start = records::carrying(records::turn_start(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life), turn.handed_ask.as_deref());
+                let start = records::carrying(records::turn_start(&id, asker, turn.by_code, &agent.identity, &turn.cause, &self.life), turn.carried());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "start"), start, Vec::new());
                 self.post(&agent.fragment, fragment, records::WORK, records::work_id(&id, "end"), records::turn_end(&id, &outcome), Vec::new());
                 if let Some(answer) = self.answer_of(&id, &turn, &outcome, true) {
@@ -1674,7 +1682,7 @@ impl Engine {
         let life = self.life.clone();
         let t = self.state.turns.get_mut(id).expect("held");
         assert_eq!(t.phase, Phase::Queued, "a turn ends unrun only from the queue");
-        let start = Owed { id: records::work_id(id, "start"), body: records::carrying(records::turn_start(id, &t.asker, t.by_code, &identity, &t.cause, &life), t.handed_ask.as_deref()), to: None };
+        let start = Owed { id: records::work_id(id, "start"), body: records::carrying(records::turn_start(id, &t.asker, t.by_code, &identity, &t.cause, &life), t.carried()), to: None };
         let end = Owed { id: records::work_id(id, "end"), body: records::turn_end(id, &outcome), to: None };
         t.phase = Phase::Ended;
         t.owed = vec![start.clone(), end.clone()];
@@ -1930,7 +1938,7 @@ impl Engine {
         let Some(id) = next else { return };
         let identity = self.agent(agent).expect("a held turn's agent is on this computer").identity.clone();
         let t = &self.state.turns[&id];
-        let body = records::carrying(records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life), t.handed_ask.as_deref());
+        let body = records::carrying(records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life), t.carried());
         let fragment = t.fragment.clone();
         let told = self.told_as(t);
         self.claiming.insert(id.clone());
@@ -1959,11 +1967,13 @@ impl Engine {
     /// code's words; anyone else's as them, with the proof its cause carried.
     fn told_as(&self, t: &Turn) -> Told {
         // a hand-off is the ask it carries on: proven by the mandate its
-        // place gave this agent beside the words (an ask carried on between
-        // one owner's agents, FIN-615 PR 16a; its agent's fragment checks
-        // it, and it names whose ask it is), else held unproven
+        // place gave this agent beside the words (its owner's own ask,
+        // carried on between its agents: FIN-615 PR 16a; its agent's
+        // fragment checks it, and it names whose ask it is), read once for
+        // it when heard live with none; else held unproven
         if let Some(asker) = &t.handed_ask {
-            return Told { place: t.fragment.clone(), asker: (!asker.is_empty()).then(|| asker.clone()), mandate: t.mandate.clone(), unproven: None };
+            let unproven = t.mandate.is_none().then(|| t.cause.clone());
+            return Told { place: t.fragment.clone(), asker: (!asker.is_empty()).then(|| asker.clone()), mandate: t.mandate.clone(), unproven };
         }
         let owner = self.agent(&t.agent).map(|a| a.owner.clone()).unwrap_or_default();
         let ours = t.asker == owner || self.agents.iter().any(|a| a.identity == t.asker);
