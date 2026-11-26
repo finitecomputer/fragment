@@ -5648,7 +5648,9 @@ fn someone_heard_in_a_room_carries_no_mandate() {
     let by_door = Record { author: Some(records::DOOR.into()), mandate: Some("fm1.owner".into()), ..rec(1, SLACK, heard_in(&a, "C0123", "deploys", "U0456", "Maple", "ship it")) };
     let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.clone(), record: by_door, view: Some(door.clone()), since: 0 }, T0);
     let s = answered(&mut e, s, T0);
-    assert_eq!(told(&s), vec![Asked { place: chat.clone(), asker: Some("slack:U0456".into()), mandate: None, unproven: None }], "theirs, unproven, and no proof looked for");
+    // the platform holds a turn as an identity's, or no one's (cell
+    // runs_on.rs `turns`): someone heard is no one there
+    assert_eq!(told(&s), vec![Asked { place: chat.clone(), asker: None, mandate: None, unproven: None }], "no one's on the platform, and no proof looked for");
     let t = started(&s).expect("a turn").turn;
     let ended = e.step(heard(Event::End { turn: t, outcome: Outcome::Idle }), T0 + 1);
     answered(&mut e, ended, T0 + 1);

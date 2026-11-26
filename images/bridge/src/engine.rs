@@ -2068,16 +2068,16 @@ impl Engine {
         }
         let owner = self.agent(&t.agent).map(|a| a.owner.clone()).unwrap_or_default();
         let ours = t.asker == owner || self.agents.iter().any(|a| a.identity == t.asker);
-        let asker = match (t.by_code, ours) {
+        // someone a door heard (`slack:U0456`) is no one on the platform:
+        // told as no one's, as app code's words are, with no proof looked for
+        let heard = !ours && !records::is_identity(&t.asker);
+        let asker = match (t.by_code || heard, ours) {
             (true, _) => None,
             (false, true) => Some(owner),
             (false, false) => Some(t.asker.clone()),
         };
-        // someone a door heard (`slack:U0456`) is no one on the platform:
-        // theirs, with no proof, and none looked for
-        let heard = !ours && !records::is_identity(&t.asker);
-        let mandate = t.mandate.clone().filter(|_| !t.by_code && !heard);
-        let unproven = (!t.by_code && !ours && !heard && mandate.is_none()).then(|| t.cause.clone());
+        let mandate = t.mandate.clone().filter(|_| asker.is_some());
+        let unproven = (asker.is_some() && !ours && mandate.is_none()).then(|| t.cause.clone());
         Told { place: t.fragment.clone(), asker, mandate, unproven }
     }
 

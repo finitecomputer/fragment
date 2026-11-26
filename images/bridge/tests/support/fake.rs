@@ -825,6 +825,11 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         let mut w = world.lock().unwrap();
+        // who asked is an identity, or no one (cell runs_on.rs `turns`)
+        if method == Method::PUT && v["asker"].as_str().is_some_and(|a| !a.starts_with("npub1")) {
+            w.turns.push((agent, "INVALID".into(), v));
+            return refuse(StatusCode::BAD_REQUEST, "a turn is its id, the fragment it runs in, and who asked (an identity, or no one)");
+        }
         // as one bridge life of its computer's start: a new one of that
         // start or a later one takes the agent's turns (every other life's
         // forgotten), and a retired one's word is refused, changing nothing
