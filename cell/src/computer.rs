@@ -2871,6 +2871,13 @@ impl ComputerCell {
                 None => {
                     // the lever's outage of its route, from this signal
                     self.refuse_at_stop(generation, id).await;
+                    // its runtime's idle stop past the flush's own bound, which
+                    // it would otherwise cut short (`RUNTIME_IDLE_MS` from its
+                    // last use, about 10 minutes into a sleep)
+                    let idle = fpac::guest_flush_ms(self.rules().unsaved_max_ms);
+                    if self.call("idleFor", &[g.clone(), JsValue::from_f64(idle as f64)]).await.ok().and_then(|r| r.as_bool()) != Some(true) {
+                        console_error!("{}", json!({ "computer": id, "disk": "idle stop unmoved", "generation": generation }));
+                    }
                     let now = js::now_ms();
                     if let Err(e) = self.set_meta(MetaKey::DiskFlushing, &format!("{generation} {now}")) {
                         console_error!("{}", json!({ "computer": id, "disk": "flushing unkept", "generation": generation, "error": e.message }));

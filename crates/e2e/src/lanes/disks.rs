@@ -283,10 +283,12 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
     let clean = head_of(&after["head"]).is_some_and(|(e, c)| e == life && c);
     let read = talk.said(s, "read disk/last-words.txt")?;
     let last_sleep = lines(s).1.into_iter().rev().find(|l| l["sleep"]["generation"] == life).map(|l| l["sleep"].clone());
+    // asleep again, as every check before leaves it
+    let (slept_again, _) = put_to_sleep(s, api, &owner, &id);
     s.ok(
         DISK_CHECKS[14],
-        at_stop == "at stop: disk/last-words.txt" && armed.status == 200 && slept && took_ms >= REFUSE_MS && clean && first_line(&read) == "read disk/last-words.txt: said at the stop" && (!local || last_sleep.as_ref().is_some_and(|l| l["clean"] == true)),
-        json!({ "atStop": at_stop, "armed": armed.body, "slept": slept, "tookMs": took_ms, "head": after["head"], "read": read, "sleepLine": last_sleep }),
+        at_stop == "at stop: disk/last-words.txt" && armed.status == 200 && slept && took_ms >= REFUSE_MS && clean && first_line(&read) == "read disk/last-words.txt: said at the stop" && (!local || last_sleep.as_ref().is_some_and(|l| l["clean"] == true)) && slept_again,
+        json!({ "atStop": at_stop, "armed": armed.body, "slept": slept, "tookMs": took_ms, "head": after["head"], "read": read, "sleepLine": last_sleep, "sleptAgain": slept_again }),
     );
     wiped(s, api, &owner, &id)
 }

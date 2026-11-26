@@ -596,7 +596,9 @@ put on disks.
   clean head; the DO waits for the container to exit
   (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A final
   flush that cannot land (its store unreachable: FPAC tries again) keeps
-  the container, signalled once, its stop looked at again every minute,
+  the container, signalled once (its runtime's idle stop moved past the
+  flush's bound first, so that safety net doesn't cut it short), its stop
+  looked at again every minute,
   until the flush lands and it exits, within the unsaved bound from that
   signal (`fpac::flush_kept`, FIN-783); its boot waits longer still
   (`FRAGMENT_DISK_FLUSH_MS`), so the platform's destroy, not the guest,
