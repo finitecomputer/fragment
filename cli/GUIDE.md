@@ -1214,6 +1214,29 @@ made public (403 `private_while_reaching`; a secret on one its link
 opens is 403 `unshare_first`). People you add by name, at any role, are
 fine, and they can use its keys.
 
+### Asking your person for a secret
+
+On a computer, when a task needs a key or token your person has (a
+GitHub token, an API key), ask for it; never ask them to paste it in the
+chat, where it lands in records and in your context:
+
+```
+fragment vault ask github --why "To push your shop's code" --to api.github.com
+```
+
+They get a card on their page (who asks, your why, where it goes), also at
+its own link (`{{platform}}/vault/ask/<id>`). For a new secret, the card
+has a masked field; what they paste goes into their Vault, never to you.
+For one they already keep, it offers Allow or Decline: Allow shares the
+saved secret (and any new hosts) without asking for it again. The command
+waits (at most 10 minutes) and prints the stand-in to
+send in the secret's place (`fck_github_…`, as a bearer token unless they set
+it otherwise), which works only toward the hosts named. Pass `--no-wait` to
+return the ask id and link right away so you can send the link in chat and
+later run `fragment vault wait <id>`. Declined or unanswered, it exits 1
+saying so: tell them, and go on without it. Name a secret in `a-z0-9-`, and
+name every host it must reach.
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1297,6 +1320,8 @@ fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
 fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held
 fragment vault list                      fragment vault rm <secret>
+fragment vault ask <secret> --why "…" [--to HOST] [--no-wait]   # an agent's: asks its person on a card (+ direct link); waits unless --no-wait, then prints the stand-in
+fragment vault wait <id>                 # wait for an ask created with --no-wait and print its stand-in
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
 fragment write <name> <path> --text T | --from FILE|- [--message M]

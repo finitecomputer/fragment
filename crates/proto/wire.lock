@@ -6,6 +6,9 @@
 # client would feel (xtask/src/wire/lock.rs). Never edit it by hand: a
 # fact gone on purpose is retired in wire.retired.
 
+bound AnswerAsk.allow default false
+bound AnswerAsk.value default null
+bound AskSecret.hosts default []
 bound ChannelPage.more default false
 bound ChannelPage.next range i64
 bound ChannelRecord.asker default null
@@ -84,11 +87,13 @@ bound MessageHit.at range i64
 bound MessageHit.seq range i64
 bound Notice.actions default []
 bound Notice.detail default null
+bound Notice.field default null
 bound Notice.image default null
 bound Notice.mustAnswer default false
 bound Notice.text default null
 bound Notice.until default null
 bound NoticeAction.body default null
+bound NoticeAction.field default false
 bound NoticeAction.open default null
 bound NoticeAction.post default null
 bound Offer.agent default null
@@ -127,6 +132,7 @@ bound RosterAgent.sites default []
 bound RosterTaken.bound range u32
 bound RosterTaken.withdrawn range u32
 bound Secret.setAt range i64
+bound SecretAsk.expiresAt range i64
 bound Seen.unread range u32
 bound Sharing.guests range u64
 bound Sharing.invites default null
@@ -160,8 +166,14 @@ branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
+field AnswerAsk.allow optional boolean
+field AnswerAsk.held required string
+field AnswerAsk.value optional string|null
 field Archived.archived required boolean
 field Archived.name required string
+field AskSecret.hosts optional array<string>
+field AskSecret.name required string
+field AskSecret.why required string
 field ChannelNewest.channel required string
 field ChannelNewest.records required array<ChannelRecord>
 field ChannelPage.channel required string
@@ -369,6 +381,7 @@ field MessageHit.snippet required string
 field MoveAt.state required MoveState
 field Notice.actions required array<NoticeAction>
 field Notice.detail optional string|null
+field Notice.field optional NoticeField|null
 field Notice.id required string
 field Notice.image optional string|null
 field Notice.kind required string
@@ -378,9 +391,11 @@ field Notice.text optional string|null
 field Notice.title required string
 field Notice.until optional Until|null
 field NoticeAction.body optional any
+field NoticeAction.field optional boolean
 field NoticeAction.label required string
 field NoticeAction.open optional string|null
 field NoticeAction.post optional string|null
+field NoticeField.placeholder required string
 field NoticeList.notices required array<Notice>
 field Offer.agent optional string|null
 field Offer.image optional string|null
@@ -465,6 +480,11 @@ field Secret.hosts required array<string>
 field Secret.name required string
 field Secret.place required Place
 field Secret.setAt required integer
+field SecretAsk.expiresAt required integer
+field SecretAsk.id required string
+field SecretAsk.name required string
+field SecretAsk.state required AskState
+field SecretAsk.url required string
 field SecretList.secrets required array<Secret>
 field SecretRemoved.name required string
 field SecretRemoved.removed required boolean
@@ -544,7 +564,11 @@ field migrations.report.path.old required string
 field migrations.secrets.path.old required string
 field migrations.yes.path.old required string
 field migrations.zip.path.stage required string
+field notices.list.query.field optional string
 field search.find.query.q required string
+field vault.answer.path.ask required string
+field vault.asked.path.ask required string
+field vault.decline.path.ask required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
 other Author other
@@ -753,6 +777,32 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
+route vault.answer POST /api/vault/asks/{ask}
+route vault.answer accepts nip98
+route vault.answer accepts session
+route vault.answer path vault.answer.path
+route vault.answer query vault.answer.query
+route vault.answer request AnswerAsk
+route vault.answer response SecretAsk
+route vault.ask POST /api/vault/asks
+route vault.ask accepts nip98
+route vault.ask accepts session
+route vault.ask path vault.ask.path
+route vault.ask query vault.ask.query
+route vault.ask request AskSecret
+route vault.ask response SecretAsk
+route vault.asked GET /api/vault/asks/{ask}
+route vault.asked accepts nip98
+route vault.asked accepts session
+route vault.asked path vault.asked.path
+route vault.asked query vault.asked.query
+route vault.asked response SecretAsk
+route vault.decline POST /api/vault/asks/{ask}/decline
+route vault.decline accepts nip98
+route vault.decline accepts session
+route vault.decline path vault.decline.path
+route vault.decline query vault.decline.query
+route vault.decline response SecretAsk
 route vault.list GET /api/vault
 route vault.list accepts nip98
 route vault.list accepts session
@@ -772,7 +822,10 @@ route vault.remove accepts session
 route vault.remove path vault.remove.path
 route vault.remove query vault.remove.query
 route vault.remove response SecretRemoved
+type AnswerAsk in object closed
 type Archived out object
+type AskSecret in object closed
+type AskState out enum
 type Author out enum open
 type ChannelNewest out object
 type ChannelPage out object
@@ -857,6 +910,7 @@ type MoveAt out object
 type MoveState out enum open
 type Notice out object
 type NoticeAction out object
+type NoticeField out object
 type NoticeLevel out enum open
 type NoticeList out object
 type Offer out object
@@ -888,6 +942,7 @@ type RosterPerson in object
 type RosterTaken out object
 type SearchAnswer out object
 type Secret out object
+type SecretAsk out object
 type SecretKind both enum
 type SecretList out object
 type SecretRemoved out object
@@ -974,12 +1029,24 @@ type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
+type vault.answer.path in object
+type vault.answer.query in object
+type vault.ask.path in object
+type vault.ask.query in object
+type vault.asked.path in object
+type vault.asked.query in object
+type vault.decline.path in object
+type vault.decline.query in object
 type vault.list.path in object
 type vault.list.query in object
 type vault.put.path in object
 type vault.put.query in object
 type vault.remove.path in object
 type vault.remove.query in object
+value AskState declined
+value AskState expired
+value AskState saved
+value AskState waiting
 value Author agent
 value Author code
 value Author door

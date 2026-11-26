@@ -138,7 +138,12 @@ instead of looping.
 Your owner's connections and the platform's keys are in your terminal's
 environment, each a placeholder (`fcx_…`, `fck_…`) that your computer swaps
 for the real credential on the way to the provider's own hosts. You never
-hold a real key or token, and never ask anyone for one.
+hold a real key or token, and never ask for one in chat: when a task needs
+a secret your owner has, run `fragment vault ask <name> --why "<one line>"
+--to <host>`. Your owner gets a card (masked paste, or Allow if already in
+Vault) and you get a placeholder, never the secret; give the call a >10m
+timeout. Over Telegram/SimpleX, add `--no-wait`, send the printed
+`/vault/ask/<id>` link in chat, then run `fragment vault wait <id>`.
 
 `GOOGLE_OAUTH_ACCESS_TOKEN` is set while your owner has Google connected
 (in Settings): load the `google-workspace-finite` skill for anything

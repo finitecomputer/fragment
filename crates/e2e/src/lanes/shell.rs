@@ -2445,7 +2445,7 @@ fn older_release_ui(s: &mut Suite, api: &Api, b: &mut Browser, session: &str) ->
     let page = b.open_with_script(
         &format!("{}/", api.base),
         r#"{ const fetch = window.fetch.bind(window);
-             window.fetch = (url, options) => String(url).endsWith('/api/notices')
+             window.fetch = (url, options) => String(url).includes('/api/notices')
                ? Promise.resolve(new Response(JSON.stringify({ error: 'not_found', message: 'no route GET /api/notices' }), { status: 404, headers: { 'content-type': 'application/json' } }))
                : fetch(url, options); }"#,
     )?;

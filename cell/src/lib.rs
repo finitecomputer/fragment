@@ -1330,6 +1330,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
         // their brains, `/history` every chat they have had, `/schedules` every scheduled job of theirs,
         // `/skills` what their agents know and the optional skills to turn on, `/welcome` a new person's welcome
         (Method::Get, [""] | ["settings"] | ["apps"] | ["brains"] | ["history"] | ["schedules"] | ["skills"] | ["welcome"] | ["move"]) => shell::page(&req, env, cfg, &url).await,
+        (Method::Get, ["vault", "ask", id]) if fragment_core::vault::ask_id_ok(id) => shell::page(&req, env, cfg, &url).await,
         // the operators' admin, its page and API, and its probe of every
         // object class: the admin Worker's (admin.rs), handed to it as they
         // came. It answers anyone else the 404 below, word for word.

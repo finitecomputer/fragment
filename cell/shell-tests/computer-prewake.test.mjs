@@ -245,6 +245,6 @@ test("shell.js: Continue's chats are picks (`pickChat`); the chat its start open
   const continuing = shell.slice(shell.indexOf("const continuing = createContinue("), shell.indexOf("const sessionArchive = createSessionArchive("));
   assert.match(continuing, /navigation: \{ openChat: pickChat, leaveSidebar \}/, "Continue opens its chats as picks");
   const start = shell.slice(shell.indexOf("async function start(open)"), shell.indexOf("// ---- a guest"));
-  assert.match(start, /else if \(pick\) openChat\(pick\);/, "start opens its chat as a load, not a pick");
+  assert.match(start, /else if \(pick\) openChat\(pick, !state\.focusAsk\);/, "start opens its chat as a load, not a pick");
   assert.doesNotMatch(start, /\b(pickChat|prewake)\(/, "nothing in start wakes the computer");
 });

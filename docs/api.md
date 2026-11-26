@@ -2198,13 +2198,24 @@ authorization is browser-bound (docs/pipes-browser-binding.md).
 A person's secrets, which their agents use without holding them
 (docs/secrets.md, "A person's Vault"): one `Vault` object a person. Every
 route is the person's own, signed or from the shell; an agent's, theirs
-included, is 403. No answer names a value.
+included, is 403, but its asks (below). No answer names a value.
+
+**An agent asks** (`fragment vault ask`; docs/secrets.md, "An agent
+asks"): its ask is a card on its owner's notices with a masked field
+(Notices, `field`), drawn by the platform's own page, never by a chat or
+an app, so what they paste goes to their Vault alone: no record, model or
+agent ever holds it. Their answer is the ask's route, posted from the
+card.
 
 | method & path | who | body → answer |
 | --- | --- | --- |
 | `GET /api/vault` | a person | → `SecretList {secrets: [{name, hosts, place, agents, setAt}]}`, by name |
 | `PUT /api/vault/{secret}` | a person | `PutSecret {value?, hosts, place?, agents}` → `Secret {name, hosts, place, agents, setAt}`: set, or set again whole. `{secret}` 1 to 32 of `a-z0-9-`, none a catalog key's (a connection's name may be one: its placeholder is `fcx_`, the secret's `fck_`). `value` 1 to 4096 printable characters with no space, or with `place.sign` a Nostr secret key as 64 hex. No `value`: the one held is kept and all else set, `setAt` unchanged; 400 for a secret not held, and between `place.sign` and any other place. `hosts` 0 to 8 exact public DNS names (none: parked, it fills nothing). `place` one of `{header, format?}`, `{query}`, `{basic: "user"\|"password"}`, `{sign: "nip98"}`, held to the catalog's placement rules; none, `Authorization: Bearer {}`. `agents` 1 to 16 agent fragments' names. At most 64 secrets, and at most 8 distinct hosts across them, a catalog's host counted as any other (400 past either; a host already in the Vault costs nothing more, and a Vault over 8 from before the cap is refused only a host that would leave it over 8); anything else wrong 400, nothing written |
 | `DELETE /api/vault/{secret}` | a person | → `SecretRemoved {name, removed}` |
+| `POST /api/vault/asks` | an agent | `AskSecret {name, why, hosts?}` → `SecretAsk {id, name, state, expiresAt, url}`: an ask of its owner for a secret, a card on their notices (Notices) and reachable directly at `url` (`/vault/ask/{id}`) that waits ten minutes (`state` `waiting`). `why` one line of 1 to 200 characters; `hosts` as a secret's, and held to the Vault as its answer's write would be (64 secrets for a new one; a kept secret's own 8 hosts and 16 agents for an Allow; 8 distinct hosts across the Vault, the catalog's too, with a kept secret's own for an Allow): 400 past them, in the write's words, no card drawn. Otherwise taken the same whether they keep one of that name or not (its card tells them: masked paste for a new secret, or Allow/Decline keeping the saved value for an existing one). The same agent's ask of the same name again ends the one before (`expired`); at most 8 waiting a person, and 64 kept, ended ones for an hour (429). Only an agent made from an agent fragment asks (409); a person, 403 |
+| `GET /api/vault/asks/{ask}` | the agent that asked | → `SecretAsk`: `waiting`, `saved`, `declined` or `expired` (unanswered in time, or asked again since), read an hour after it ended, then 404 |
+| `POST /api/vault/asks/{ask}` | the person asked | `AnswerAsk {held, value?, allow?}` → `SecretAsk`, `saved`: for a new secret (`held: "none"`, `value` pasted, `allow: false`), put as `PUT /api/vault/{name}` would make a new secret: the hosts asked, the default place, the asking agent alone. For an existing secret (`held` matching its current revision, `allow: true`, no `value`), keeps its sealed value and place, adds the asking agent, and unions any asked hosts. Refused as that put would be (400), the ask still waiting; one that ended, or whose secret changed since its card showed it (`held` mismatch), 409, nothing written, checked again after the value is sealed; another's, 404 |
+| `POST /api/vault/asks/{ask}/decline` | the person asked | → `SecretAsk`, `declined`; one that ended answers as it stands |
 
 ## The shell
 
@@ -2283,6 +2294,7 @@ works them out when asked and the router joins them, keeping none: the
 person's ledger's (their agents stopped for want of credit, or their
 fragments read-only past the overdraft, in Settings' words, with Buy
 credit where packs are sold and they hold an active seat; docs/ledger.md),
+the person's Vault's (each agent's ask still waiting, A person's Vault),
 the person's computer's (docs/computers.md, "What its owner is told"),
 then the registry's: their seat, lapsed ("Your seat lapsed", Pay again
 for its admin where seats are sold) or a Stripe trial in its last three
@@ -2304,7 +2316,16 @@ say), which the client opens once that read has it: one of the person's
 fragments in place, any other address as a page. A post refused shows the
 server's own words for it (its `message`) on the notice, with its button
 back. `until`: when what a notice tells ends by the clock alone; a client
-counts down to it and drops the notice then. `mustAnswer`: it must be
+counts down to it and drops the notice then. `field` (`{placeholder}`):
+a masked field the person pastes a secret into (a Vault ask's); an action
+with `field: true` posts what it holds as `value` beside its `body`, and
+an empty one posts nothing. The client keeps it in its input alone, for
+as long as its notice shows, and empties it once posted; a client from
+before it draws none, and the server refuses the empty answer. A client
+that draws `field`, and every word of a notice before its actions, reads
+`GET /api/notices?field=1` (the shell's band); any other is sent a Vault
+ask's card with Open (the ask's own page, which draws all of it) and
+Decline, never its field or a grant it may not show. `mustAnswer`: it must be
 answered; a client shows it alone over everything (a guest's welcome
 too), never in the band, until the read after one of its actions has it
 no more, the first such in the list first (each owner lists its own
@@ -2318,7 +2339,7 @@ in place. Their pages are told when notices change (`watch`'s `changed`).
 
 | method & path | who | answer |
 | --- | --- | --- |
-| `GET /api/notices` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites), then the move's offers |
+| `GET /api/notices[?field=1]` | a person (an agent 403) | → `NoticeList {notices: [Notice]}`: their ledger's (their agents stopped for want of credit), their computer's (none while they have none), then the registry's (their seat, then their invites), then the move's offers |
 
 ## The finite.computer move (docs/migrations.md)
 

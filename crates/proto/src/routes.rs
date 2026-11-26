@@ -18,7 +18,7 @@ use serde_json::Value;
 use crate::live::{LiveIn, LiveOut};
 use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageCopied, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
-use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
+use crate::vault::{AnswerAsk, AskSecret, PutSecret, Secret, SecretAsk, SecretList, SecretRemoved};
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
     SetDock, SetPinned,
@@ -193,6 +193,7 @@ const OLD: Param = Param { name: "old", at: ParamAt::Path, required: true, schem
 const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The stage's id, `<old>.<phase>.<attempt>`, as its command and its routine name it." };
 const PART: Param = Param { name: "n", at: ParamAt::Path, required: true, schema: shape::<u32>, doc: "The part's number, 1 to `PARTS_MAX`." };
 const SECRET: Param = Param { name: "secret", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The secret's name: 1 to 32 of a-z, 0-9 and -." };
+const ASK: Param = Param { name: "ask", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The ask's id: 32 lower-case hex." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
 
 pub const ROUTES: &[Route] = &[
@@ -230,7 +231,13 @@ pub const ROUTES: &[Route] = &[
         path: "/api/notices",
         summary: "What the signer is told now, the most pressing first: each owner's notices, in the server's words, with their actions.",
         auth: SIGNED,
-        params: &[],
+        params: &[Param {
+            name: "field",
+            at: ParamAt::Query,
+            required: false,
+            schema: shape::<String>,
+            doc: "`1`: the client draws a notice's `field`, and every word of a notice before its actions (the shell's band). Otherwise a Vault ask's card comes with Open (its own page) in place of its field and its Save or Allow.",
+        }],
         request: None,
         answer: Answer::Json(ty::<NoticeList>()),
         errors: &[Unauthenticated, Forbidden],
@@ -618,6 +625,50 @@ pub const ROUTES: &[Route] = &[
         request: None,
         answer: Answer::Json(ty::<SecretRemoved>()),
         errors: &[Unauthenticated, Forbidden],
+    },
+    Route {
+        operation: "vault.ask",
+        method: Method::Post,
+        path: "/api/vault/asks",
+        summary: "An agent asks its person for a new secret: a card on their notices, with a masked field, that waits ten minutes.",
+        auth: SIGNED,
+        params: &[],
+        request: Some(Body::Json(ty::<AskSecret>())),
+        answer: Answer::Json(ty::<SecretAsk>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, Conflict, RateLimited],
+    },
+    Route {
+        operation: "vault.asked",
+        method: Method::Get,
+        path: "/api/vault/asks/{ask}",
+        summary: "How the signing agent's own ask stands: waiting, saved, declined or expired.",
+        auth: SIGNED,
+        params: &[ASK],
+        request: None,
+        answer: Answer::Json(ty::<SecretAsk>()),
+        errors: &[Unauthenticated, Forbidden, NotFound],
+    },
+    Route {
+        operation: "vault.answer",
+        method: Method::Post,
+        path: "/api/vault/asks/{ask}",
+        summary: "The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault as a new secret for the agent toward the hosts asked; never one that replaces a secret they keep.",
+        auth: SIGNED,
+        params: &[ASK],
+        request: Some(Body::Json(ty::<AnswerAsk>())),
+        answer: Answer::Json(ty::<SecretAsk>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
+    },
+    Route {
+        operation: "vault.decline",
+        method: Method::Post,
+        path: "/api/vault/asks/{ask}/decline",
+        summary: "The person's Decline of an ask; again, it answers as the ask stands.",
+        auth: SIGNED,
+        params: &[ASK],
+        request: None,
+        answer: Answer::Json(ty::<SecretAsk>()),
+        errors: &[Unauthenticated, Forbidden, NotFound],
     },
 ];
 

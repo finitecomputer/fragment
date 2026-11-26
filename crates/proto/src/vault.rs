@@ -89,3 +89,92 @@ pub struct SecretRemoved {
     pub name: String,
     pub removed: bool,
 }
+
+/// `POST /api/vault/asks`: an agent asks its person for a secret. The
+/// person answers in a card the
+/// platform draws (a notice, `GET /api/notices`, also reached directly at
+/// `SecretAsk.url`), never in a chat's
+/// records, so no agent, model or app ever reads what they paste.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AskSecret {
+    /// The secret's name in its person's Vault (1 to 32 of `a-z0-9-`).
+    pub name: String,
+    /// Why, in the agent's words, shown on the card: 1 to 200 characters.
+    pub why: String,
+    /// The hosts it would go to (exact DNS names, at most 8); none, kept
+    /// and sent nowhere until its person says where.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
+    pub hosts: Vec<String>,
+}
+
+/// Where an ask stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AskState {
+    /// On its person's card, not answered yet.
+    Waiting,
+    /// Answered: the secret is in their Vault, bound to the agent.
+    Saved,
+    /// Their Decline.
+    Declined,
+    /// Not answered in time, or asked again since.
+    Expired,
+}
+
+impl AskState {
+    /// Its name, as the wire and the Vault's rows say it.
+    pub fn name(self) -> &'static str {
+        match self {
+            AskState::Waiting => "waiting",
+            AskState::Saved => "saved",
+            AskState::Declined => "declined",
+            AskState::Expired => "expired",
+        }
+    }
+
+    /// The state `name` names (`name`'s inverse).
+    pub fn named(name: &str) -> Option<AskState> {
+        [AskState::Waiting, AskState::Saved, AskState::Declined, AskState::Expired].into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// An ask, as its agent and its person read it: never a value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(rename_all = "camelCase")]
+pub struct SecretAsk {
+    /// 32 hex.
+    pub id: String,
+    pub name: String,
+    pub state: AskState,
+    /// When it expires unanswered, in ms since the epoch.
+    pub expires_at: i64,
+    /// Platform-origin URL the person can open directly (`/vault/ask/{id}`)
+    /// to enter or approve this secret on the platform's own page.
+    pub url: String,
+}
+
+/// `POST /api/vault/asks/{id}`: the person's answer — what they pasted for a
+/// new secret, or `allow: true` to share or widen a secret they already keep.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AnswerAsk {
+    /// Which secret its card showed held under the ask's name (its
+    /// revision, `"none"` for none), as the card's action carries it: the
+    /// answer grants what the card said, or nothing (409).
+    pub held: String,
+    /// What the person pasted (required for a new secret; refused with `allow`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub value: Option<String>,
+    /// True on an Allow card for an existing secret: keeps its sealed value
+    /// and place, adds the asking agent, and unions any asked hosts.
+    #[serde(default)]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub allow: bool,
+}

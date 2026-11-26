@@ -103,6 +103,11 @@
 //!   linked`, `door said <seq>`, `door bound`, `door poked <what>` (and
 //!   `, its share link shown` when the answer holds it), or `door
 //!   refused: <why>`;
+//! - `vault-ask <name> <host|-> <why>`: its person asked for a secret
+//!   with the fragment CLI, `fragment vault ask <name> --to <host> --why
+//!   <why>` (`-`: no host), as the agent,
+//!   the turn waiting on their card: the reply is `vault-asked <state>
+//!   <placeholder, or none>`, or `vault-ask refused: <why>`;
 //! - `ask <agent> <words>`: another agent of its computer asked `<words>`
 //!   with the fragment CLI, `fragment ask --return-to <this chat>`, as the
 //!   agent acting for its owner, as our Hermes image's `fragment_ask` runs
@@ -560,6 +565,65 @@ async fn ask_another(agent: &crate::runtime::Agent, chat: &str, turn: &str, rest
     format!("asked {}", asked["title"].as_str().or(asked["name"].as_str()).unwrap_or(who))
 }
 
+/// A Vault ask waits on its person's card, at most ten minutes, and the
+/// CLI a minute past: this a little more.
+const VAULT_ASK_WAIT: Duration = Duration::from_secs(12 * 60);
+
+/// `vault-ask <name> <host|-> <why>`: the CLI's ask, as the agent
+/// (`vault-ask-nowait`: `--no-wait`, answered with the ask's id and link).
+async fn vault_ask(agent: &crate::runtime::Agent, rest: &str, no_wait: bool) -> String {
+    let mut words = rest.trim().splitn(3, char::is_whitespace);
+    let (Some(name), Some(host), Some(why)) = (words.next(), words.next(), words.next()) else {
+        return "say `vault-ask <name> <host|-> <why>`".into();
+    };
+    let mut args = vec!["--json", "vault", "ask", name, "--why", why.trim()];
+    if host != "-" {
+        args.extend(["--to", host]);
+    }
+    if no_wait {
+        args.push("--no-wait");
+    }
+    match vault_cli(agent, &args, "vault-ask").await {
+        Err(refused) => refused,
+        Ok(d) if no_wait => format!("vault-ask-started {} {}", d["ask"]["id"].as_str().unwrap_or("?"), d["ask"]["url"].as_str().unwrap_or("?")),
+        Ok(d) => vault_asked(&d),
+    }
+}
+
+/// `vault-wait <id>`: `fragment vault wait <id>`, as the agent.
+async fn vault_wait(agent: &crate::runtime::Agent, id: &str) -> String {
+    let id = id.trim();
+    if id.is_empty() {
+        return "say `vault-wait <id>`".into();
+    }
+    match vault_cli(agent, &["--json", "vault", "wait", id], "vault-wait").await {
+        Err(refused) => refused,
+        Ok(d) => vault_asked(&d),
+    }
+}
+
+/// How an ask the CLI followed ended: its state, and the stand-in if saved.
+fn vault_asked(d: &serde_json::Value) -> String {
+    format!("vault-asked {} {}", d["ask"]["state"].as_str().unwrap_or("?"), d["placeholder"].as_str().unwrap_or("none"))
+}
+
+/// The CLI run with `args` as the agent: its JSON answer's `data`, or
+/// `<what> refused: <why>`.
+async fn vault_cli(agent: &crate::runtime::Agent, args: &[&str], what: &str) -> Result<serde_json::Value, String> {
+    let run = tokio::process::Command::new(CLI).args(args).env("FRAGMENT_AS_AGENT", &agent.fragment).env("FRAGMENT_FOR", &agent.owner).kill_on_drop(true).output();
+    let out = match tokio::time::timeout(VAULT_ASK_WAIT, run).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(e)) => return Err(format!("{what} refused: the CLI did not run ({e})")),
+        Err(_) => return Err(format!("{what} refused: no answer in {} s", VAULT_ASK_WAIT.as_secs())),
+    };
+    let said: serde_json::Value = String::from_utf8_lossy(&out.stdout).lines().last().and_then(|l| serde_json::from_str(l).ok()).unwrap_or_default();
+    if said["ok"] != true {
+        let why = said["error"]["message"].as_str().map(str::to_string).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).chars().take(300).collect());
+        return Err(format!("{what} refused: {why}"));
+    }
+    Ok(said["data"].clone())
+}
+
 /// A sync of a large file is the CLI hashing it, uploading its bytes and
 /// committing its pointer: at most this long.
 const SYNC_WAIT: Duration = Duration::from_secs(180);
@@ -955,6 +1019,15 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     }
     if let Some(rest) = ts.text.strip_prefix("schedule ") {
         reply = schedule(&ts.agent, &ts.fragment, rest).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("vault-ask ") {
+        reply = vault_ask(&ts.agent, rest, false).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("vault-ask-nowait ") {
+        reply = vault_ask(&ts.agent, rest, true).await;
+    }
+    if let Some(rest) = ts.text.strip_prefix("vault-wait ") {
+        reply = vault_wait(&ts.agent, rest).await;
     }
     if let Some(rest) = ts.text.strip_prefix("ask ") {
         reply = ask_another(&ts.agent, &ts.fragment, &id, rest).await;

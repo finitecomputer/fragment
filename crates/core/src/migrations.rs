@@ -1038,7 +1038,7 @@ pub fn include(m: &Move, bound: bool, now: i64) -> Outcome {
 /// own routes. `picture`: the roster has one, which the platform reads for
 /// them.
 pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
-    let post = |label: &str, verb: &str| NoticeAction { label: label.into(), post: Some(format!("/api/migrations/offers/{old}/{verb}")), body: None, open: None };
+    let post = |label: &str, verb: &str| NoticeAction { label: label.into(), post: Some(format!("/api/migrations/offers/{old}/{verb}")), body: None, open: None, field: false };
     // a nameless agent: "your agent", "Your agent" where a line starts
     let (name, lead) = match name.trim() {
         "" => ("your agent", "Your agent"),
@@ -1055,6 +1055,7 @@ pub fn offer(old: &str, name: &str, picture: bool, page: &str) -> Notice {
         actions: vec![NoticeAction::open(format!("Upgrade {name}"), page), post("Not now", "later"), post("Never", "never")],
         must_answer: true,
         image: picture.then(|| format!("/api/migrations/offers/{old}/picture")),
+        field: None,
     }
 }
 

@@ -1307,7 +1307,10 @@ provider's own hosts.
   The intercept asks the Vault for it per
   request, plans it beside the catalog's rows, and names each value it
   filled in the answer (`{{name}}`); a Nostr key's is a signature the
-  Vault makes. A Vault's calls are not counted in usage.
+  Vault makes. A Vault's calls are not counted in usage. An agent asks
+  its person for one (`fragment vault ask`; docs/secrets.md, "An agent
+  asks"); once saved, its CLI reads the view, which arms the new hosts,
+  and prints the placeholder.
 
 ### An agent's own model
 

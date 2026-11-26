@@ -43,7 +43,7 @@ fn seen_too_big(life: u64) -> Value {
 }
 
 fn notice(id: String, kind: &str, level: NoticeLevel, title: String) -> Notice {
-    Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![], must_answer: false, image: None }
+    Notice { id, kind: kind.into(), level, title, text: None, detail: None, until: None, actions: vec![], must_answer: false, image: None, field: None }
 }
 
 fn one(n: &ComputerNotice, f: &Facts) -> Notice {

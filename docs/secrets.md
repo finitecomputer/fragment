@@ -172,6 +172,53 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   (`fragment_core::vault::within`, 400 otherwise, before it is claimed);
   a parked one's move names them.
 
+### An agent asks
+
+An agent that needs a secret asks its person for it (`fragment vault ask
+<name> --why "…" [--to <host>]`; docs/api.md, "A person's Vault"), the
+way T3 Code's secret prompt does: the agent never sees what they give.
+
+- **The card is the platform's.** The ask waits in the person's Vault and
+  shows as one of their notices (`vault/notices`), in the band the shell
+  draws above their chat, and at its own link on the platform
+  (`SecretAsk.url`, `/vault/ask/{id}`): an agent chatting through Telegram
+  or SimpleX asks with `--no-wait`, sends the link, and waits with
+  `fragment vault wait <id>`. A client that draws no field (iOS today)
+  is sent that link (Open) in place of the field and the grant, so
+  nothing is granted from a card that may hide what it grants. A chat, an
+  app or a fork of either draws no part of the card, so no app code ever
+  has the field.
+- **The paste goes to the Vault alone**: from the shell's page to `POST
+  /api/vault/asks/{id}`, sealed there in the same turn, never in a chat's
+  records, a log or an answer. The page keeps it in its input only while
+  that card shows (a card whose grant changed is a new, empty field), and
+  empties it once posted.
+- **Only the person asked answers**, from their own session; an agent,
+  theirs or another's, is refused, and anyone else finds no ask.
+- **A new secret, or one already kept.** For a new name (`held: "none"`)
+  the card has the masked field, Save and Decline: Save makes the secret
+  toward the hosts asked, for the asking agent alone. For a name the
+  person keeps, it has Allow and Decline and no field, and says what an
+  Allow adds (this agent, new hosts, and that its other agents could send
+  there too): Allow keeps the sealed value and its place. Either answer
+  carries the secret's revision as the card showed it (`held`); one that
+  changed since is refused (409), checked again after a seal. An ask is
+  checked as its answer's write will be, and refused as the agent asks,
+  in the same words, with no card drawn, when that write would be: a new
+  secret in a Vault that keeps 64, an Allow past a secret's own 8 hosts or
+  16 agents, or either taking the Vault past its 8 hosts (above: every
+  distinct one, the catalog's too). No one is asked to answer what the
+  write would refuse. So a refusal can tell an agent its person's Vault is
+  full, or that it keeps a name: an ask reaches only the asking agent's
+  own person's Vault, and their agents may see everything they have
+  (decision 44), never a value. The person changes or removes a secret with `fragment vault
+  set|list|rm`.
+- **It ends**: saved, declined, or after ten minutes unanswered (or asked
+  again by the same agent for the same name). At most 8 wait on a person,
+  and their Vault keeps at most 64, ended ones an hour.
+  The agent's CLI then reads its computer's view, which arms the egress
+  for the new hosts, and prints the stand-in (`fck_<name>_<tag>`).
+
 ## The Secrets Store
 
 The deployment's config names each secret by its store name. `cargo

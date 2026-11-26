@@ -58,6 +58,20 @@ pub struct Notice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub image: Option<String>,
+    /// A field the person pastes a secret into (a Vault ask's, FIN-466):
+    /// masked, never shown again, kept nowhere but the page's own input;
+    /// an action that takes it (`NoticeAction::field`) sends what it holds.
+    /// A client from before it shows none, so such an action is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub field: Option<NoticeField>,
+}
+
+/// A notice's secret field: what it says while empty.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct NoticeField {
+    pub placeholder: String,
 }
 
 /// How a notice is shown.
@@ -107,17 +121,28 @@ pub struct NoticeAction {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub open: Option<String>,
+    /// A post that sends its notice's field (`Notice::field`): what the
+    /// person typed, as `value` beside `body`'s own fields. Empty, the
+    /// client posts nothing and says so.
+    #[serde(default, skip_serializing_if = "crate::is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub field: bool,
 }
 
 impl NoticeAction {
     /// An action that posts `body` to `route`.
     pub fn post(label: impl Into<String>, route: impl Into<String>, body: Value) -> NoticeAction {
-        NoticeAction { label: label.into(), post: Some(route.into()), body: Some(body), open: None }
+        NoticeAction { label: label.into(), post: Some(route.into()), body: Some(body), open: None, field: false }
+    }
+
+    /// An action that posts `body` with the notice's field as `value`.
+    pub fn post_field(label: impl Into<String>, route: impl Into<String>, body: Value) -> NoticeAction {
+        NoticeAction { field: true, ..NoticeAction::post(label, route, body) }
     }
 
     /// An action that opens `url`.
     pub fn open(label: impl Into<String>, url: impl Into<String>) -> NoticeAction {
-        NoticeAction { label: label.into(), post: None, body: None, open: Some(url.into()) }
+        NoticeAction { label: label.into(), post: None, body: None, open: Some(url.into()), field: false }
     }
 }
 
@@ -139,6 +164,7 @@ mod tests {
             actions: vec![NoticeAction::post("Allow", "/api/computers/computer:aa/key-caps/elevenlabs", serde_json::json!({ "from": 5 })), NoticeAction::open("Get help", "mailto:help@example.com")],
             must_answer: false,
             image: None,
+            field: None,
         };
         let v = serde_json::to_value(&n).unwrap();
         assert_eq!(

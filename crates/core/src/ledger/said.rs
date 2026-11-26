@@ -49,6 +49,7 @@ pub fn spending(micros: i64, until_ms: Option<i64>) -> Option<Notice> {
         actions: vec![],
         must_answer: false,
         image: None,
+        field: None,
     })
 }
 
@@ -72,6 +73,7 @@ pub fn standing(standing: Standing, may_buy: bool) -> Option<Notice> {
         actions: buy.into_iter().collect(),
         must_answer: false,
         image: None,
+        field: None,
     })
 }
 

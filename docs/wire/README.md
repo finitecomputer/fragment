@@ -81,6 +81,7 @@ What the platform tells a person, each in its own words, with what they may do a
 `GET /api/notices`: What the signer is told now, the most pressing first: each owner's notices, in the server's words, with their actions.
 
 - Credentials: NIP-98, the shell's session
+- Query `field` (`string`, optional): `1`: the client draws a notice's `field`, and every word of a notice before its actions (the shell's band). Otherwise a Vault ask's card comes with Open (its own page) in place of its field and its Save or Allow.
 - Answer: [`NoticeList`](#noticelist)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
 
@@ -327,6 +328,40 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
 
+#### `vault.answer`
+
+`POST /api/vault/asks/{ask}`: The person's answer to an ask, from the platform's own page: what they pasted, sealed in their Vault as a new secret for the agent toward the hosts asked; never one that replaces a secret they keep.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`AnswerAsk`](#answerask)
+- Answer: [`SecretAsk`](#secretask)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.ask`
+
+`POST /api/vault/asks`: An agent asks its person for a new secret: a card on their notices, with a masked field, that waits ten minutes.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`AskSecret`](#asksecret)
+- Answer: [`SecretAsk`](#secretask)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.asked`
+
+`GET /api/vault/asks/{ask}`: How the signing agent's own ask stands: waiting, saved, declined or expired.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretAsk`](#secretask)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
+#### `vault.decline`
+
+`POST /api/vault/asks/{ask}/decline`: The person's Decline of an ask; again, it answers as the ask stands.
+
+- Credentials: NIP-98, the shell's session
+- Answer: [`SecretAsk`](#secretask)
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
 #### `vault.list`
 
 `GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
@@ -358,6 +393,16 @@ Each says who writes it: the cell (out: a client reads it), a client
 (in: the cell reads it), or both. An open one's readers read past a
 value they do not know; a closed object refuses a field it does not know.
 
+### `AnswerAsk`
+
+in, closed. `POST /api/vault/asks/{id}`: the person's answer — what they pasted for a new secret, or `allow: true` to share or widen a secret they already keep.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `allow` | `boolean` | optional | True on an Allow card for an existing secret: keeps its sealed value and place, adds the asking agent, and unions any asked hosts. |
+| `held` | `string` | required | Which secret its card showed held under the ask's name (its revision, `"none"` for none), as the card's action carries it: the answer grants what the card said, or nothing (409). |
+| `value` | `string` or `null` | optional | What the person pasted (required for a new secret; refused with `allow`). |
+
 ### `Archived`
 
 out. Its answer: the fragment, and whether it is archived now.
@@ -366,6 +411,22 @@ out. Its answer: the fragment, and whether it is archived now.
 | --- | --- | --- | --- |
 | `archived` | `boolean` | required |  |
 | `name` | `string` | required |  |
+
+### `AskSecret`
+
+in, closed. `POST /api/vault/asks`: an agent asks its person for a secret. The person answers in a card the platform draws (a notice, `GET /api/notices`, also reached directly at `SecretAsk.url`), never in a chat's records, so no agent, model or app ever reads what they paste.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `hosts` | `array` of `string` | optional | The hosts it would go to (exact DNS names, at most 8); none, kept and sent nowhere until its person says where. |
+| `name` | `string` | required | The secret's name in its person's Vault (1 to 32 of `a-z0-9-`). |
+| `why` | `string` | required | Why, in the agent's words, shown on the card: 1 to 200 characters. |
+
+### `AskState`
+
+out. Where an ask stands.
+
+Values: `waiting`, `saved`, `declined`, `expired`.
 
 ### `Author`
 
@@ -832,6 +893,7 @@ out. One thing a person is told, in the server's words, with what they may do ab
 | --- | --- | --- | --- |
 | `actions` | `array` of [`NoticeAction`](#noticeaction) | required | What the person may do about it; the first is the main one. |
 | `detail` | `string` or `null` | optional | The platform's own words, small, for whoever helps (why a start failed, as it said it). |
+| `field` | [`NoticeField`](#noticefield) or `null` | optional | A field the person pastes a secret into (a Vault ask's, FIN-466): masked, never shown again, kept nowhere but the page's own input; an action that takes it (`NoticeAction::field`) sends what it holds. A client from before it shows none, so such an action is refused. |
 | `id` | `string` | required | Unique among the person's notices, and the same across reads while it tells the same thing: what a client keys its row by. |
 | `image` | `string` or `null` | optional | A picture beside its words (an agent's): a platform path, read with the person's own credential. A client from before it shows none. |
 | `kind` | `string` | required | What it is about (`spending`), for tests and logs. No client reads it to decide what to draw. |
@@ -848,9 +910,18 @@ out. What a person may do about a notice: `post` its `body` to a platform route 
 | field | type | | |
 | --- | --- | --- | --- |
 | `body` | `any` | optional | The JSON `post` sends (none: `{}`). |
+| `field` | `boolean` | optional | A post that sends its notice's field (`Notice::field`): what the person typed, as `value` beside `body`'s own fields. Empty, the client posts nothing and says so. |
 | `label` | `string` | required |  |
 | `open` | `string` or `null` | optional | An `https:` page or a `mailto:` address. |
 | `post` | `string` or `null` | optional | A platform path (`/api/computers/{id}/restart`). |
+
+### `NoticeField`
+
+out. A notice's secret field: what it says while empty.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `placeholder` | `string` | required |  |
 
 ### `NoticeLevel`
 
@@ -1146,6 +1217,18 @@ out. A secret as its person reads it: everything but its value.
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |
 | `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
+
+### `SecretAsk`
+
+out. An ask, as its agent and its person read it: never a value.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `expiresAt` | `integer` | required | When it expires unanswered, in ms since the epoch. |
+| `id` | `string` | required | 32 hex. |
+| `name` | `string` | required |  |
+| `state` | [`AskState`](#askstate) | required |  |
+| `url` | `string` | required | Platform-origin URL the person can open directly (`/vault/ask/{id}`) to enter or approve this secret on the platform's own page. |
 
 ### `SecretKind`
 
