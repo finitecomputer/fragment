@@ -921,6 +921,15 @@ pub struct Saved {
     /// stay with that door): sent once its core is next up, then let go.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried: Vec<String>,
+    /// A message its link read and did not post (refused, or dropped past a
+    /// bound): what was delivered stays before it, so a start reads back
+    /// past the ones it did post. Kept across starts, and let go once a
+    /// start's posts move what was delivered: until then no handover, as a
+    /// door would post those again into a chat of its own, where no
+    /// record's id finds them twice (Codex's fix-checks of c55a7ae64 and
+    /// f3e6a1a8d).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unposted: bool,
 }
 
 /// A link handed over to its door; or its staged identity, never kept here
@@ -1528,6 +1537,8 @@ impl Manager {
                     Some("files are on their way")
                 } else if !s.outstanding.is_empty() || !s.pending.is_empty() {
                     Some("messages are on their way")
+                } else if s.saved.unposted {
+                    Some("a message it did not post waits for its computer's next start to carry it (restart it)")
                 } else {
                     None
                 };
@@ -2758,7 +2769,8 @@ impl Manager {
         let Some(s) = self.slots.get_mut(f) else { return };
         s.outstanding.remove(&item);
         if !ok {
-            s.gap = true;
+            self.unposted(f, true);
+            return;
         }
         if s.gap || item <= 0 {
             return;
@@ -2766,6 +2778,11 @@ impl Manager {
         s.acked = s.acked.max(item);
         let upto = s.outstanding.first().map_or(s.acked, |oldest| s.acked.min(oldest - 1));
         self.apply(f, Input::Delivered(upto));
+        // what was delivered moved past what a life before this one did not
+        // post: carried (`unposted`)
+        if self.slots.get(f).is_some_and(|s| s.saved.unposted && s.saved.link.delivered >= upto) {
+            self.unposted(f, false);
+        }
     }
 
     /// A message forwarded that will not be posted this life (dropped past
@@ -2773,7 +2790,22 @@ impl Manager {
     fn dropped(&mut self, f: &str, item: i64) {
         if let Some(s) = self.slots.get_mut(f) {
             s.outstanding.remove(&item);
+        }
+        self.unposted(f, true);
+    }
+
+    /// A message of this life not posted (`gap`, and `unposted`, kept), or
+    /// what was delivered moved past one a life before did not post.
+    fn unposted(&mut self, f: &str, now: bool) {
+        let Some(s) = self.slots.get_mut(f) else { return };
+        if now {
             s.gap = true;
+        }
+        if s.saved.unposted != now {
+            s.saved.unposted = now;
+            if let Err(e) = store(&s.dir, &s.saved) {
+                crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+            }
         }
     }
 
@@ -4435,7 +4467,7 @@ mod tests {
         assert_eq!((r.status, r.code), (409, Some("not_linked")));
         unmarked("not bound");
         m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
-        for (n, busy) in ["working", "receiving", "outstanding"].into_iter().enumerate() {
+        for (n, busy) in ["working", "receiving", "outstanding", "unposted"].into_iter().enumerate() {
             let s = m.slots.get_mut(f).expect("its slot");
             match busy {
                 "working" => {
@@ -4444,6 +4476,7 @@ mod tests {
                 "receiving" => {
                     s.saved.receiving.insert(9);
                 }
+                "unposted" => s.saved.unposted = true,
                 _ => {
                     s.outstanding.insert(40);
                 }
@@ -4455,6 +4488,7 @@ mod tests {
             s.working.clear();
             s.saved.receiving.clear();
             s.outstanding.clear();
+            s.saved.unposted = false;
         }
         let mut forged = signed("handover", &"02".repeat(16));
         forged.sig = "ab".repeat(64);
@@ -4655,6 +4689,44 @@ mod tests {
         let read = load(&m.slots[f].dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
         assert_eq!(read.link, before, "its own link");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal: a message its link did not post holds its handovers, across a
+    /// restart, until a start's posts move what was delivered past it: a
+    /// door given the link would post the ones after it again, into a chat
+    /// of its own (Codex's fix-checks of c55a7ae64 and f3e6a1a8d). Invalid:
+    /// one refused, then one posted after it, the same life; the same after
+    /// a restart, its catch-up not yet posted. Valid: posted past it.
+    #[tokio::test]
+    async fn a_message_not_posted_holds_handovers_until_a_start_posts_it() {
+        let dir = std::env::temp_dir().join(format!("simplex-unposted-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir, 3);
+        m.slots.get_mut(f).expect("its slot").saved.link.delivered = 40;
+        m.delivered(f, 41, false);
+        m.delivered(f, 42, true);
+        assert!(m.slots[f].saved.unposted && load(&link_dir, &agent()).expect("its file").unposted, "kept on disk");
+        assert_eq!(m.slots[f].saved.link.delivered, 40, "what was delivered stays before 41");
+        let busy = |r: Refused| (r.status, r.code, r.why.contains("restart"));
+        let r = m.handover(f, &signed("handover", &"21".repeat(16))).await.err().expect("busy");
+        assert_eq!(busy(r), (409, Some("busy"), true));
+        // a restart: this life has no gap, and its catch-up runs first
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.gap = false;
+        s.saved.link.apply(Input::Started { rollback: false });
+        m.delivered(f, 43, true);
+        assert!(m.slots[f].saved.unposted, "a live post as the catch-up runs moves nothing");
+        let r = m.handover(f, &signed("handover", &"22".repeat(16))).await.err().expect("still busy");
+        assert_eq!(busy(r), (409, Some("busy"), true));
+        // its catch-up ends and posts 41, then 42
+        m.slots.get_mut(f).expect("its slot").saved.link.scan.running = false;
+        m.delivered(f, 41, true);
+        assert!(!m.slots[f].saved.unposted && !load(&link_dir, &agent()).expect("its file").unposted, "carried: let go, on disk too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
