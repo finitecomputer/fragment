@@ -1381,7 +1381,7 @@ impl ComputerCell {
                 Action::Start { generation } => reported.push(self.start(generation).await),
                 Action::Sleep { generation } => reported.extend(self.hold(generation, true).await),
                 Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
-                Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
+                Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq, until_ms).await),
                 Action::Unhold { generation } => self.unhold(generation, after_held).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
@@ -2281,8 +2281,9 @@ impl ComputerCell {
     /// answered the hold), and keeps it: the newest of the saves kept, the
     /// oldest past `SAVES_KEPT` let go of (`forget`). Any record of it
     /// already taken when a later one fails is let go of too. The test
-    /// lever's failed saves (`fail-saves`) fail here first.
-    async fn save(&self, generation: u64, held: bool, seq: u64) -> Event {
+    /// lever's failed saves (`fail-saves`) fail here first. `sleep_until`:
+    /// when the steps of a sleep it is for end (`snapshot_ms`).
+    async fn save(&self, generation: u64, held: bool, seq: u64, sleep_until: i64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let t0 = js::now_ms();
@@ -2341,13 +2342,17 @@ impl ComputerCell {
         }
         // each record checked against R2's own copy (FIN-784), once all are
         // taken, within what their backups left: a check never takes the
-        // time a later backup needs. One that came out damaged is let go of
-        // (this save's forget pass deletes it) and backed up again while its
-        // guest is held as it was then; else the save fails, tried again
+        // time a later backup needs, nor a sleep's snapshot's most after it
+        // (one that runs out keeps its record unchecked, as before). One
+        // that came out damaged is let go of (this save's forget pass
+        // deletes it) and backed up again while its guest is held as it was
+        // then; else the save fails, tried again
+        let snapshot_after = self.cfg.computer_snapshots && matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { .. }));
+        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
             // bounded: at its last try `after_check` answers no Again
             for tried in 1..=fragment_core::computer::SAVE_TRIES {
-                let next = fragment_core::computer::after_check(self.stored(&records[at], until).await, tried, dir != "/data" || !let_go);
+                let next = fragment_core::computer::after_check(self.stored(&records[at], checks_until).await, tried, dir != "/data" || !let_go);
                 let why = match next {
                     AfterCheck::Keep => break,
                     AfterCheck::Unchecked(why) => {
@@ -2365,8 +2370,10 @@ impl ComputerCell {
                             }
                             Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
                         }
+                        let t = js::now_ms();
                         match self.backup_dir(&g, dir, &left_out, until).await {
                             Ok(record) => {
+                                took[if dir == "/data" { "home" } else { "work" }] = json!({ "bytes": record["size"], "ms": js::now_ms() - t, "tried": tried + 1 });
                                 records[at] = record;
                                 continue;
                             }

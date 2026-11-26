@@ -743,9 +743,13 @@ impl Saves {
     /// (an operator's choice of an older save as it ran) still overtakes
     /// it, so it never becomes the current save ahead of that choice (Codex
     /// on this PR).
+    /// So is one of a start a later start's save was kept after (its
+    /// records checked after its container's last use, FIN-784): a life's
+    /// save never becomes current ahead of a later life's.
     pub fn overtaken(&self, generation: u64, seq: u64) -> bool {
-        let newest = self.every_save().into_iter().find(|s| s.generation == generation);
-        newest.is_some_and(|s| s.seq.is_some_and(|newest| newest > seq))
+        let saves = self.every_save();
+        let newest = saves.iter().find(|s| s.generation == generation);
+        newest.is_some_and(|s| s.seq.is_some_and(|newest| newest > seq)) || saves.iter().any(|s| s.generation > generation)
     }
 
     /// Every record a wipe deletes (docs/api.md, Operators): each kept
@@ -1295,8 +1299,23 @@ mod tests {
         assert!(s.overtaken(2, 2), "its sleep's save was asked after it");
         assert_eq!(s.choose(1, T + 30), Ok(vec![]));
         assert!(s.overtaken(2, 2), "set aside, it is still that start's newest");
-        assert!(!s.overtaken(2, 4) && !s.overtaken(3, 2), "one asked after it, or another start's");
+        assert!(!s.overtaken(2, 4) && !s.overtaken(3, 2), "one asked after it, or a later start's");
         assert_eq!(s.current().map(|c| c.id.as_str()), Some("b1"));
+    }
+
+    /// Goal (FIN-784, Codex): an earlier start's save that lands after a
+    /// later start's save was kept is overtaken: its records were checked
+    /// after its container's last use, as a later life came up and saved,
+    /// and kept ahead it would roll that life's work back. Valid (a later
+    /// start's save overtakes nothing of a later start), invalid (the
+    /// earlier start's, however new its own `seq`).
+    #[test]
+    fn an_earlier_starts_save_landing_after_a_later_starts_is_overtaken() {
+        let mut s = Saves::default();
+        s.saved(1, rec("b1"), 1, T, true);
+        s.saved(2, rec("b2"), 2, T + 20, true);
+        assert!(s.overtaken(1, 9), "an earlier start's, landing after a later start's save was kept");
+        assert!(!s.overtaken(2, 3) && !s.overtaken(3, 1), "its own start's newer one, or a later start's");
     }
 
     #[test]

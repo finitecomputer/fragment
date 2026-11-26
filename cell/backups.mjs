@@ -37,43 +37,44 @@ function against(held, record) {
 // One record's restore. `restore()` answers null once it is in place, or
 // why its bytes came damaged; `stored()` reads what R2 holds of `record`;
 // `again(tried, why)` is told of each asked again. R2's copy is read beside
-// the try after one that came damaged, never before it, so a check never
-// takes the time a try needs, and its verdict is awaited only once that try
-// comes damaged too, or runs out of time (`Overdue`). Answers null once
-// restored, or `{unusable}` when R2's own copy is not its record: the save
-// never will restore. Throws once `RESTORE_TRIES` came in damaged while
-// R2's copy was not found bad (a failed start, which may pass: the save is
-// kept), and whatever `restore` throws.
+// the tries after one that came damaged, and no try ever waits for it: its
+// verdict is used once it is in, and awaited only after the last try, or a
+// try its time cut off (`Overdue`). Answers null once restored, or
+// `{unusable}` when R2's own copy is not its record: the save never will
+// restore. Throws once `RESTORE_TRIES` came in damaged while R2's copy was
+// not found bad (a failed start, which may pass: the save is kept), and
+// whatever `restore` throws.
 export async function restoreChecked({ record, restore, stored, again = () => {} }) {
-  // a read of R2's copy under way: settles to {bad}, {unread} or {}, never rejects
+  // a read of R2's copy under way or done (it never rejects), and its
+  // verdict once in: {bad}, {unread} or {} (not found bad)
   let checking = null;
-  // R2's copy was read and not found bad
-  let whole = false;
+  let verdict = null;
+  const check = () => {
+    verdict = null;
+    checking = badCopy(record, stored).then(
+      (bad) => (verdict = bad === null ? {} : { bad }),
+      (e) => (verdict = { unread: String(e?.message ?? e) }),
+    );
+  };
   for (let tried = 1; ; tried++) {
     let damaged;
     try {
       damaged = await restore();
     } catch (e) {
-      // a try cut off by its time still hears a copy found bad beside it
-      const verdict = e?.name === "Overdue" ? await checking : null;
-      if (verdict?.bad) return { unusable: `${e.message}; ${verdict.bad}` };
+      // a copy found bad is heard whatever else failed: awaited once the
+      // try's time ran out (the read's ends with it), else only if in
+      const v = e?.name === "Overdue" && checking !== null ? await checking : verdict;
+      if (v?.bad) return { unusable: `${e.message}; ${v.bad}` };
       throw e;
     }
     if (damaged === null) return null;
-    if (checking !== null) {
-      const verdict = await checking;
-      checking = null;
-      if (verdict.bad) return { unusable: `${damaged}; ${verdict.bad}` };
-      if (verdict.unread) damaged = `${damaged}; R2's copy unread: ${verdict.unread}`;
-      else whole = true;
-    }
-    if (tried >= RESTORE_TRIES) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy not found bad: ${damaged}`);
-    if (!whole) {
-      checking = badCopy(record, stored).then(
-        (bad) => (bad === null ? {} : { bad }),
-        (e) => ({ unread: String(e?.message ?? e) }),
-      );
-    }
+    const last = tried >= RESTORE_TRIES;
+    const v = last && checking !== null ? await checking : verdict;
+    if (v?.bad) return { unusable: `${damaged}; ${v.bad}` };
+    if (v?.unread) damaged = `${damaged}; R2's copy unread: ${v.unread}`;
+    if (last) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy not found bad: ${damaged}`);
+    // the first that came damaged, or a read that failed: read beside the next try
+    if (checking === null || v?.unread) check();
     again(tried, damaged);
   }
 }

@@ -10,6 +10,7 @@
 /// damaged: each moves its whole archive again, within the save's own
 /// bound (the cell's `BACKUPS_MS`).
 pub const SAVE_TRIES: u32 = 3;
+const _: () = assert!(SAVE_TRIES >= 3, "damage on the way out is tried again twice at least");
 
 /// What a read of R2's copy of a record found.
 #[derive(Debug, PartialEq, Eq)]
@@ -88,7 +89,6 @@ mod tests {
     /// go), the bound (`SAVE_TRIES`), and replay (the same verdict at each try).
     #[test]
     fn a_damaged_copy_is_backed_up_again_a_bounded_number_of_times_while_held() {
-        assert!(SAVE_TRIES >= 3, "damage on the way out is tried again twice at least");
         let damaged = || Checked::Damaged("R2's copy holds …".into());
         assert_eq!(after_check(Checked::Whole, 1, true), AfterCheck::Keep);
         assert_eq!(after_check(Checked::Whole, SAVE_TRIES, false), AfterCheck::Keep);

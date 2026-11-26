@@ -545,7 +545,8 @@ the DO removes them from one started from a snapshot.
   it (its record's SHA-256), but R2 checks a part's length alone. So once
   a save's records are all taken, each is read back from R2 and kept once
   R2's own copy hashes to it (`fragment_core::computer::after_check`): a
-  check never takes the time a later backup needs. One that came out
+  check never takes the time a later backup needs, nor what a sleep's
+  snapshot is given at most after it (`SNAPSHOT_MAX_MS`). One that came out
   damaged is let go of (the save's forget pass deletes it) and backed up
   again while its guest is held as it was when it was taken, three tries
   in all, within the save's own bound; an awake save's home, its hold let
@@ -554,12 +555,13 @@ the DO removes them from one started from a snapshot.
   the record unchecked, as before the check, and logs it: a save that fits
   its bounds is never failed for want of its check. A restore whose bytes
   came damaged (the SDK's `BACKUP_INTEGRITY`) is asked again at once, and
-  R2's copy is read beside that try (`cell/backups.mjs`): when two reads
-  agree it is not its record, and the try beside them came damaged too or
-  ran out of time, the save is unusable, as above; otherwise (a read that
-  failed too) the restore is asked again, three tries in all, within its
-  own bound, and a start whose tries all came damaged fails as one that
-  may pass, its save kept. A restore that works reads nothing more. R2's
+  R2's copy is read beside the tries after it (`cell/backups.mjs`), which
+  never wait for it: when two reads agree it is not its record, the save is
+  unusable, as above, once a try beside them failed too; otherwise (a read
+  that failed too) the restore is asked again, three tries in all, within
+  its own bound, and a start whose tries all came damaged fails as one that
+  may pass, its save kept. A later start's save kept, an earlier start's
+  that lands after it is never kept ahead of it (`Saves::overtaken`). A restore that works reads nothing more. R2's
   copy is read and hashed by the backups' gateway
   (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
   through the container. Damage before the shim's hash (in the
