@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::computer::limits::{DISK_EXIT_WAIT_MS, SLEEP_DEADLINE_MS, STOP_LOOK_MS};
+use crate::computer::limits::{DISK_EXIT_WAIT_MS, STOP_LOOK_MS};
 
 /// A disk's volume, as FPAC sees it: the computer's 20 GB (decision 18's
 /// disk, docs/computers.md "An image's share of the disk"), a whole number
@@ -172,23 +172,39 @@ pub fn fallback(head: Option<&Head>, back: Option<&Head>, found: Unopened, came_
     }
 }
 
-/// Whether a disk's sleep, signalled at `since_ms`, still keeps its
-/// container for its final flush at `now_ms` (FIN-783): until that flush
-/// lands, within the deployment's unsaved bound (`unsaved_max_ms`, the
-/// time a sleep that cannot save stays awake and tries again). Past it,
-/// the container goes and that life ends unsaved, saying so: what its
-/// guest wrote after the drain did not ship.
-pub fn flush_kept(since_ms: i64, now_ms: i64, unsaved_max_ms: i64) -> bool {
-    assert!(unsaved_max_ms >= 0, "a bound is a span of time");
-    now_ms < since_ms.saturating_add(unsaved_max_ms)
+/// The longest a disk's sleep keeps its container for its final flush,
+/// whatever the deployment's unsaved bound says: its guest's wait
+/// (`guest_flush_ms`) and the runtime's idle stop moved for it fit past it
+/// within Cloudflare's own cap on an idle timeout (six hours).
+pub const FLUSH_KEPT_MAX_MS: i64 = 5 * 3_600_000;
+/// Cloudflare's cap on a container's idle timeout (`setInactivityTimeout`).
+pub const IDLE_TIMEOUT_MAX_MS: i64 = 6 * 3_600_000;
+const _: () = assert!(FLUSH_KEPT_MAX_MS + 2 * STOP_LOOK_MS + DISK_EXIT_WAIT_MS <= IDLE_TIMEOUT_MAX_MS, "the guest's wait fits the runtime's idle cap");
+
+/// How long a disk's sleep keeps its container for its final flush, from
+/// its first signal (FIN-783): until that flush lands, within the unsaved
+/// bound its start was given (`unsaved_max_ms`, the time a sleep that
+/// cannot save stays awake and tries again), never under its exit wait
+/// (`DISK_EXIT_WAIT_MS`, a flush's own time) nor past `FLUSH_KEPT_MAX_MS`.
+/// Past it, the container goes and that life ends unsaved, saying so.
+pub fn flush_kept_ms(unsaved_max_ms: i64) -> i64 {
+    unsaved_max_ms.clamp(DISK_EXIT_WAIT_MS, FLUSH_KEPT_MAX_MS)
+}
+
+/// How long a stop waits for its guest's exit now: its exit wait, never
+/// past what it keeps (`kept_ms` from `since_ms`); 0 once that passed.
+pub fn flush_wait_ms(since_ms: i64, now_ms: i64, kept_ms: i64) -> i64 {
+    since_ms.saturating_add(kept_ms).saturating_sub(now_ms).clamp(0, DISK_EXIT_WAIT_MS)
 }
 
 /// How long a disk's guest waits for its final flush, at most
-/// (`FRAGMENT_DISK_FLUSH_MS`): past the platform's own wait (`flush_kept`'s
-/// bound, then a stop looked at again at its deadline and its exit wait),
-/// so the platform's destroy, never the guest, ends one that cannot land.
-pub fn guest_flush_ms(unsaved_max_ms: i64) -> i64 {
-    unsaved_max_ms.saturating_add(SLEEP_DEADLINE_MS + DISK_EXIT_WAIT_MS + STOP_LOOK_MS)
+/// (`FRAGMENT_DISK_FLUSH_MS`): past what the platform keeps (`kept_ms`)
+/// by a look at it and its destroy, so the platform's destroy, never the
+/// guest, ends a flush that cannot land; the runtime's idle stop is moved
+/// as far at its signal.
+pub fn guest_flush_ms(kept_ms: i64) -> i64 {
+    assert!((DISK_EXIT_WAIT_MS..=FLUSH_KEPT_MAX_MS).contains(&kept_ms), "a kept bound is `flush_kept_ms`'s");
+    kept_ms + 2 * STOP_LOOK_MS + DISK_EXIT_WAIT_MS
 }
 
 /// Whether a guest's read of its view is its running life's, and so heard
@@ -462,16 +478,27 @@ mod tests {
 
     #[test]
     fn a_disks_sleep_keeps_its_container_for_its_final_flush_within_the_unsaved_bound() {
-        let bound = 30 * 60_000;
-        assert!(flush_kept(1_000, 1_000, bound), "valid: just signalled");
-        assert!(flush_kept(1_000, 1_000 + DISK_EXIT_WAIT_MS, bound), "past its exit wait, still kept (R2 down: FPAC tries again)");
-        assert!(flush_kept(1_000, 1_000 + bound - 1, bound));
-        assert!(!flush_kept(1_000, 1_000 + bound, bound), "past the bound: it goes, unsaved");
-        assert!(!flush_kept(1_000, 1_000, 0), "a bound of none keeps nothing past the exit wait");
-        assert!(flush_kept(i64::MAX - 1, i64::MAX - 1, bound), "no overflow");
-        // the guest outwaits the platform: its destroy, never the guest, ends it
-        assert!(guest_flush_ms(bound) > bound + SLEEP_DEADLINE_MS + DISK_EXIT_WAIT_MS);
-        assert_eq!(guest_flush_ms(i64::MAX), i64::MAX, "no overflow");
+        // the bound: the unsaved one, never under its exit wait nor past the cap
+        assert_eq!(flush_kept_ms(30 * 60_000), 30 * 60_000, "valid: the deployment's");
+        assert_eq!(flush_kept_ms(45_000), DISK_EXIT_WAIT_MS, "a short bound keeps its exit wait (a flush's own time)");
+        assert_eq!(flush_kept_ms(0), DISK_EXIT_WAIT_MS);
+        assert_eq!(flush_kept_ms(i64::MAX), FLUSH_KEPT_MAX_MS, "past the cap: the cap");
+        // each wait: its exit wait, never past what is kept
+        let kept = 30 * 60_000;
+        assert_eq!(flush_wait_ms(1_000, 1_000, kept), DISK_EXIT_WAIT_MS, "the first, its whole exit wait");
+        assert_eq!(flush_wait_ms(1_000, 1_000 + kept - 10_000, kept), 10_000, "near the end, only what is left");
+        assert_eq!(flush_wait_ms(1_000, 1_000 + kept, kept), 0, "past it: no wait, it goes");
+        assert_eq!(flush_wait_ms(1_000, i64::MAX, kept), 0, "no overflow");
+        assert_eq!(flush_wait_ms(i64::MAX, i64::MAX, kept), 0, "saturates, never overflows");
+        // the guest outwaits the platform's look and destroy, within the idle cap
+        assert!(guest_flush_ms(kept) > kept + STOP_LOOK_MS + DISK_EXIT_WAIT_MS);
+        assert!(guest_flush_ms(flush_kept_ms(i64::MAX)) <= IDLE_TIMEOUT_MAX_MS);
+    }
+
+    #[test]
+    #[should_panic(expected = "a kept bound")]
+    fn a_guests_wait_is_of_a_kept_bound_alone() {
+        guest_flush_ms(1_000);
     }
 
     #[test]

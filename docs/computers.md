@@ -596,15 +596,19 @@ put on disks.
   clean head; the DO waits for the container to exit
   (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A final
   flush that cannot land (its store unreachable: FPAC tries again) keeps
-  the container, signalled once (its runtime's idle stop moved past the
-  flush's bound first, so that safety net doesn't cut it short), its stop
-  looked at again every minute,
-  until the flush lands and it exits, within the unsaved bound from that
-  signal (`fpac::flush_kept`, FIN-783); its boot waits longer still
-  (`FRAGMENT_DISK_FLUSH_MS`), so the platform's destroy, not the guest,
-  ends one that never lands. That one, or any final flush that posted no
-  clean head, ends its life unsaved, saying its last moments' writes may
-  not have shipped. A wake meanwhile starts once the stop has ended. A crash loses at most what its daemon had not shipped, about a
+  the container (FIN-783): signalled once (its runtime's idle stop moved
+  past its guest's wait first, so that safety net doesn't cut it short),
+  each wait for its exit never past what it keeps, its stop looked at
+  every minute, until the flush lands and it exits, or what it keeps
+  passes from that signal: the unsaved bound its start told its guest
+  (`fpac::flush_kept_ms`: never under its exit wait, at most five
+  hours). Its boot waits longer still (`FRAGMENT_DISK_FLUSH_MS`), so the
+  platform's destroy, not the guest, ends one that never lands; a destroy
+  that fails keeps the stop on within that bound. That one, or any final
+  flush that posted no clean head, ends its life unsaved, saying its last
+  moments' writes may not have shipped. A wake meanwhile starts once the
+  stop has ended. A disk's stop is never its owner's time: its awake
+  time is metered to its stop's beginning (docs/ledger.md). A crash loses at most what its daemon had not shipped, about a
   second of synced writes: the next mount replays the life's segments
   past its last checkpoint.
 - **No saves of its own.** A disk is saved only for its owner's export:

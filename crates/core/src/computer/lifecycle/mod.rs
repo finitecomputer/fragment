@@ -771,6 +771,11 @@ impl Lifecycle {
                     // the writes since its last look)
                     self.saved(now_ms, &mut step);
                     self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                    // its stop's time is the platform's: its final flush
+                    // awaited (kept while its storage is unreachable, up to
+                    // `fpac::flush_kept_ms`: FIN-783), never its owner's
+                    let kept = crate::computer::fpac::guest_flush_ms(crate::computer::fpac::flush_kept_ms(rules.unsaved_max_ms));
+                    self.unmetered = Some((now_ms, now_ms.saturating_add(kept)));
                     step.actions.push(Action::Stop { generation, saved: true });
                 } else {
                     // its wait ended with writes still unshipped, or no word
@@ -1052,9 +1057,11 @@ impl Lifecycle {
         }
         assert!(self.restore_fallbacks as usize <= SAVES_KEPT, "each fallback is to an older save");
         // a free window is its unsaved window's (one stored before windows
-        // were free has none: its time is metered as it was)
+        // were free has none: its time is metered as it was), or a disk's
+        // stop's, its final flush awaited (FIN-783)
         if let Some((from, to)) = self.unmetered {
-            assert!(self.unsaved_since_ms.is_some_and(|since| from <= since), "the free window opens with the unsaved one, at the start of the try that failed");
+            let disks_stop = self.disk && matches!(self.saving, Some(Saving::Stop { .. }));
+            assert!(disks_stop || self.unsaved_since_ms.is_some_and(|since| from <= since), "the free window opens with the unsaved one, at the start of the try that failed, or with a disk's stop");
             assert!(from <= to, "a window runs forward");
         }
         // (a lifecycle stored before `failing` was kept may count failures

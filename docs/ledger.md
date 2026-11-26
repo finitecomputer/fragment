@@ -111,8 +111,8 @@ finitecomputer/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
-bills them); a computer's time kept for its failed saves (the platform's:
-docs/computers.md); a computer's saves, an app facet's database and git
+bills them); a computer's time kept for its failed saves, and a disk's
+sleep's stop, its final flush awaited (the platform's: docs/computers.md); a computer's saves, an app facet's database and git
 storage (the debt ledger).
 
 ## Usage

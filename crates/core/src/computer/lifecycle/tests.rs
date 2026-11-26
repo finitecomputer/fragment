@@ -1392,6 +1392,30 @@ fn a_disks_sleep_never_stops_with_writes_unshipped() {
     assert!(matches!(s.note, SaveNote::Says(_)), "it says so: {:?}", s.note);
 }
 
+/// Goal (FIN-783, Codex on #1567): a disk's stop is the platform's time,
+/// never its owner's. Its final flush may be kept for while its storage is
+/// unreachable, up to the unsaved bound: its owner is metered up to the
+/// stop's beginning and not for the stop, however long, nor after.
+/// Method: a drained sleep, its stop's end 20 minutes later; the meters.
+#[test]
+fn a_disks_stop_kept_for_its_final_flush_is_never_its_owners_time() {
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let (_, slept) = run_alarms(&mut l, T + 2 * IDLE_MS);
+    let slept = slept.expect("it sleeps once idle");
+    let stop = slept + 500;
+    let s = l.apply(Event::Held { generation: g, held: true }, stop);
+    assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: true, .. })).count(), 1, "{s:?}");
+    let metered: Vec<(i64, i64)> = |acts: &[Action]| -> Vec<(i64, i64)> { acts.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect() }(&s.actions);
+    let end = stop + 20 * 60_000;
+    let gone = l.apply(Event::Asleep { generation: g }, end);
+    let after: Vec<(i64, i64)> = gone.actions.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect();
+    let all: Vec<(i64, i64)> = metered.into_iter().chain(after).collect();
+    assert!(all.iter().all(|(_, to)| *to <= stop), "nothing metered past its stop's beginning: {all:?}");
+    assert!(matches!(l.phase, Phase::Asleep { .. }), "{:?}", l.phase);
+}
+
 /// Goal (Codex on #1552): an export's ask that comes once the save it waits
 /// for already landed (its look raced that save) takes no second save.
 #[test]
