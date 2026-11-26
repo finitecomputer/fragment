@@ -65,7 +65,7 @@ const walk = (n) => (n && typeof n === "object" ? [n, ...(n.children ?? []).flat
 
 // `vault`: what `GET /api/vault` answers (the secret as it is now); `vaultApi`,
 // in its place, a Vault of the test's own
-function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }], vaultApi = null, onReopen = null) {
+function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { fragment: "bea--k3x9" }], vaultApi = null, onReopen = null, asks = { now: () => 1, current: () => true }) {
   globalThis.MutationObserver ??= class {
     observe() {}
     disconnect() {}
@@ -96,7 +96,7 @@ function setup(vault = { secrets: [] }, agents = [{ fragment: "ada--k3x9" }, { f
       return node;
     },
     computer: () => ({ agents }),
-    asks: { now: () => 1, current: () => true },
+    asks,
     isOpen: () => true,
     reopenSettings: async () => {
       reopened++;
@@ -265,6 +265,53 @@ test("a write refused for a secret removed elsewhere says so in the section, wit
   await replaceForm.onsubmit({ preventDefault() {} });
   assert.equal(drawn.length, 1);
   assert.match(walk(drawn[0]).find((x) => x.dataset?.secretSaid === "github")?.textContent ?? "", /changed since you read it/);
+});
+
+test("a refusal that comes after Settings was left says nothing, and opens nothing, on a later visit", async () => {
+  let visit = 1;
+  const asks = { now: () => visit, current: (v) => v === visit };
+  let answer;
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [github()] };
+    await new Promise((r) => (answer = r));
+    throw new ApiError(409, "github changed since you read it: look at it again");
+  };
+  const { secretsSection, reopened } = setup(null, undefined, vaultApi, null, asks);
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  const toggled = walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  while (!answer) await new Promise((r) => setTimeout(r, 1));
+  // Settings left and opened again before the Vault answered
+  visit = 2;
+  const later = secretsSection({ secrets: [github()] });
+  answer();
+  await toggled;
+  assert.equal(reopened(), 0, "nothing drawn again for a visit that ended");
+  const again = secretsSection({ secrets: [github()] });
+  for (const page of [later, again]) {
+    assert.equal(walk(page).some((x) => x.className.includes("secret-said") && !x.hidden), false);
+    assert.equal(walk(page).some((x) => x.open), false);
+  }
+});
+
+test("Add's failure as the page is drawn again is said in the Add form drawn next", async () => {
+  let fail;
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [] };
+    await new Promise((r) => (fail = r));
+    throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
+  };
+  const { secretsSection } = setup(null, undefined, vaultApi);
+  const first = secretsSection({ secrets: [] });
+  const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
+  walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
+  walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
+  const added = form.onsubmit({ preventDefault() {} });
+  // another write's redraw takes the page away before Add's answer comes
+  for (const x of walk(first)) x.isConnected = false;
+  fail();
+  await added;
+  const next = walk(secretsSection({ secrets: [] })).find((x) => x.dataset?.addSecret === "1");
+  assert.match(walk(next).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
 });
 
 test("two edits at once go one after the other, each onto what the last left", async () => {

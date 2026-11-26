@@ -34,19 +34,27 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   let writing = Promise.resolve();
   // What went wrong for a secret is said in the newest sheet drawn for it
   // (a redraw replaces a sheet while a write queued from the old one is
-  // still on its way). With none showing (the page mid-redraw, or Settings
-  // closed), it waits for the next one drawn, or, the secret gone, for the
-  // section's next drawing.
+  // still on its way), and Add's in the newest Add form (`ADD`). With none
+  // showing (the page mid-redraw), it waits for the next one drawn, or,
+  // the secret gone, for the section's next drawing: only in the Settings
+  // visit its write began in (`visit`), never a later one.
+  const ADD = "";
   const sayers = new Map();
   const pending = new Map();
-  function say(name, text) {
+  function say(name, text, visit) {
     const said = sayers.get(name);
     if (said?.isConnected) {
       said.textContent = text;
       said.hidden = false;
     } else {
-      pending.set(name, text);
+      pending.set(name, { text, visit });
     }
+  }
+  // what waits for `name` in this visit, taken (one from another visit is dropped)
+  function waiting(name) {
+    const p = pending.get(name);
+    pending.delete(name);
+    return p && asks.current(p.visit) ? p.text : null;
   }
 
   function secretsSection(vault) {
@@ -59,12 +67,13 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     s.append(el("p", "muted", "Secrets your agents can send to specific hosts without ever seeing the values."));
     const list = vault.secrets ?? [];
     // what went wrong for a secret no longer kept: no sheet will say it
-    for (const [name, text] of pending) {
-      if (list.some((sec) => sec.name === name)) continue;
+    for (const name of [...pending.keys()]) {
+      if (name === ADD || list.some((sec) => sec.name === name)) continue;
+      const text = waiting(name);
+      if (!text) continue;
       const said = el("p", "form-error secret-said", text);
       said.dataset.secretSaid = name;
       s.append(said);
-      pending.delete(name);
     }
     const agents = computer()?.agents ?? [];
     if (list.length) {
@@ -136,9 +145,9 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     // it now is, which the next one builds on.
     let shown = sec;
     const said = el("p", "form-error secret-said");
-    said.hidden = !pending.has(sec.name);
-    said.textContent = pending.get(sec.name) ?? "";
-    pending.delete(sec.name);
+    const before = waiting(sec.name);
+    said.hidden = !before;
+    said.textContent = before ?? "";
     sayers.set(sec.name, said);
     const path = `/api/vault/${encodeURIComponent(sec.name)}`;
     function written(write) {
@@ -149,12 +158,14 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       writing = run.catch(() => {});
       return run;
     }
-    async function failed(e, fallback) {
+    async function failed(e, fallback, visit) {
       const text = e?.message || fallback;
-      if (e?.status !== 409) return say(sec.name, text);
-      // stale: drawn again from what the Vault holds, which says why
-      pending.set(sec.name, text);
-      openSheet = { secret: sec.name, visit: asks.now("settings") };
+      if (e?.status !== 409) return say(sec.name, text, visit);
+      // stale: drawn again from what the Vault holds, which says why, in
+      // the visit its write began in alone
+      if (!asks.current(visit)) return;
+      pending.set(sec.name, { text, visit });
+      openSheet = { secret: sec.name, visit };
       await reopenSettings();
     }
 
@@ -185,6 +196,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         renderRemove(false);
       };
       yes.onclick = async () => {
+        const visit = asks.now("settings");
         yes.disabled = true;
         cancel.disabled = true;
         said.hidden = true;
@@ -196,7 +208,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         } catch (e) {
           yes.disabled = false;
           cancel.disabled = false;
-          await failed(e, "Could not remove secret");
+          await failed(e, "Could not remove secret", visit);
         }
       };
       actions.append(yes, cancel);
@@ -243,7 +255,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
             await reopenSettings();
           } catch (e) {
             flip.disabled = false;
-            await failed(e, "That was not changed");
+            await failed(e, "That was not changed", visit);
           }
         };
         row.append(face, flip);
@@ -278,7 +290,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         await reopenSettings();
       } catch (err) {
         hostsSave.disabled = false;
-        await failed(err, "Could not update hosts");
+        await failed(err, "Could not update hosts", visit);
       }
     };
     hostsBlock.append(hostsForm, el("p", "muted provider-detail", "Exact public DNS names, comma-separated (up to 8). Leave empty to park."));
@@ -319,7 +331,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         replaceSave.disabled = false;
         // refused as stale, it is pasted again onto what the sheet then shows
         if (err?.status === 409) valueInput.value = "";
-        await failed(err, "Could not replace value");
+        await failed(err, "Could not replace value", visit);
       }
     };
     replaceBlock.append(replaceForm);
@@ -467,6 +479,7 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         said.hidden = false;
         return;
       }
+      const visit = asks.now("settings");
       save.disabled = true;
       try {
         await api("PUT", `/api/vault/${encodeURIComponent(name)}`, {
@@ -481,9 +494,8 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
         dialog.close();
         await reopenSettings();
       } catch (err) {
-        said.textContent = err.message || "Could not save secret";
-        said.hidden = false;
         save.disabled = false;
+        say(ADD, err.message || "Could not save secret", visit);
       }
     };
 
@@ -497,6 +509,19 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       dialog.showModal();
       nameInput.focus();
     };
+    // a failure that came as the page was drawn again: this form says it, open
+    sayers.set(ADD, said);
+    const before = waiting(ADD);
+    if (before) {
+      said.textContent = before;
+      said.hidden = false;
+      queueMicrotask(() => {
+        if (dialog.isConnected && !dialog.open && isOpen()) {
+          dialog.showModal();
+          nameInput.focus();
+        }
+      });
+    }
     return { button, dialog };
   }
 
