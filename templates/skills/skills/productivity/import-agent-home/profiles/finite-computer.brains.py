@@ -133,9 +133,22 @@ def files_in(root):
             yield os.path.relpath(os.path.join(top, name), root).replace(os.sep, "/")
 
 
+def attachment_of(wiki, resource):
+    # The one name an attachment has in the brain, from its note's
+    # `resource:`: `raw/assets/<file>` as it is, and a file of the old
+    # computer (`/data/<path>`, `file:///data/<path>`) where the profile's
+    # rewrite puts it, `raw/assets/<path>`, whether or not it is there.
+    # None for anything else (a web address).
+    for old_place in ("file:///data/", "/data/"):
+        if resource.startswith(old_place):
+            resource = "raw/assets/" + resource[len(old_place):]
+    asset = wiki + "/" + resource
+    return asset if resource.startswith("raw/assets/") and clean(asset) else None
+
+
 def assets(root, path):
-    # The `resource: raw/assets/<file>` a note's frontmatter names, by its
-    # path in the brain (under the note's wiki, its top folder).
+    # The attachments a note's frontmatter names, by their paths in the
+    # brain (under the note's wiki, its top folder).
     full = at(root, path)
     try:
         with open(full, errors="replace") as f:
@@ -155,8 +168,8 @@ def assets(root, path):
             value = line[len("resource:"):].strip()
             read = re.fullmatch(r"""'([^']*)'(?:\s+#.*)?|"([^"\\]*)"(?:\s+#.*)?|([^'"\s].*?)(?:\s+#.*)?""", value)
             name = next((g for g in read.groups() if g is not None), "") if read else ""
-            asset = path.split("/", 1)[0] + "/" + name
-            if name.startswith("raw/assets/") and clean(asset):
+            asset = attachment_of(path.split("/", 1)[0], name)
+            if asset is not None:
                 found.append(asset)
     return found
 
@@ -382,8 +395,10 @@ def asset_plan(named):
         there, here = sha(copy_dir, asset), sha(work, asset)
         if not carried(asset) or blocked(copy_dir, asset) or blocked(work, asset):
             return None  # one sync never carries, or a link or a folder there
-        if there is None and here is None or None not in (there, here) and there != here:
-            return None  # in neither, or different here
+        if there is None:
+            continue  # nothing to bring: here already, or one the old home never held
+        if here is not None and there != here:
+            return None  # different here
         if here is None:
             (out if kept_out(asset) else plan).append(asset)
     return plan, out

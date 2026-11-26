@@ -408,6 +408,8 @@ fn paths_and_assets_stay_in_the_brain() {
             ("Notes/diff.md", "diff", 1, diff.as_str()),
             ("Notes/link.md", "link", 1, link.as_str()),
             ("Notes/body.md", "body", 1, "---\ntitle: body\n---\nresource: raw/assets/none.png"),
+            // a file the old home never held: the import leaves its old place
+            ("Notes/gone.md", "gone", 1, "---\nresource: /data/never-held.png\n---\ngone"),
             ("Notes/dir.md", "dir", 1, "dir1"),
             ("Notes/file/x.md", "x", 1, "x1"),
             ("Notes/../../escape.md", "esc", 1, "esc1"),
@@ -426,7 +428,7 @@ fn paths_and_assets_stay_in_the_brain() {
     assert_eq!(
         d.catch_up("t20"),
         answer(json!({
-            "added": 1, "updated": 1, "assets": 1,
+            "added": 2, "updated": 1, "assets": 1,
             "both": ["Notes/diff.md", "Notes/dir.md", "Notes/file/x.md", "Notes/link.md", "Notes/scan.md"],
             "refused": ["Notes/../../escape.md", long, "Notes/sym.md", "Notes/x.conflict-1.md"],
             "extra": ["Notes/raw/assets/diff.png", "Notes/raw/assets/link.png", "Notes/raw/assets/scan.conflict-1.png"],
@@ -634,6 +636,16 @@ fn a_withheld_attachment_stays_out() {
     assert_eq!(e.make(&[])["withheld"], json!(["Notes/raw/assets/payroll.pdf"]), "no note names it, and a folder is out");
     assert!(e.read("brain/Notes/raw/assets/payroll.pdf").is_none());
 
+    // a stale note of a folder the old agent lost, only in the work folder
+    // (laid from an older copy), names what a shared note names too
+    let g = Dir::new("withheld-stale");
+    let x = "---\nresource: raw/assets/x.png\n---\nx";
+    g.copy("founder", &Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Old", "no", false)], pages: vec![("Notes/x.md", "x", 1, x)] }, &[]);
+    g.put("founder/Notes/raw/assets/x.png", "x");
+    g.lay();
+    g.put("brain/Notes/Old/n.md", "---\nresource: raw/assets/x.png\n---\nfrom before");
+    assert_eq!(g.start(&[]).unwrap()["withheld"], json!(["Notes/raw/assets/x.png"]), "named by a note it doesn't bring in, wherever that note is");
+
     // a brain made from its stage, as its own is: the stage's note names its
     // old place, the work folder's names its asset, and that goes up
     let f = Dir::new("withheld-own");
@@ -649,7 +661,8 @@ fn a_withheld_attachment_stays_out() {
 /// Goal (FIN-774): an attachment is withheld for good the moment any copy
 /// shows a note of a folder the brain doesn't bring in naming it, whether
 /// or not the file is there and whether or not that note comes. Method:
-/// the founder's left-out note names a file it doesn't hold; teammate A,
+/// the founder's left-out note names a file it doesn't hold, by its old
+/// place (`/data/…`, as the import leaves one it can't bring); teammate A,
 /// who reads that folder, shows another; teammate B, who can't read it,
 /// brings shared notes naming both. Invalid: what published both at B's
 /// import, as neither had been recorded.
@@ -657,7 +670,8 @@ fn a_withheld_attachment_stays_out() {
 fn an_attachment_is_withheld_on_sight() {
     let d = Dir::new("on-sight");
     let private = |asset: &str| format!("---\nresource: raw/assets/{asset}\n---\nprivate");
-    let (missing, secret) = (private("missing.pdf"), private("secret.pdf"));
+    // the founder's home never held it, so its note keeps the old place
+    let (missing, secret) = ("---\nresource: /data/missing.pdf\n---\nprivate".to_string(), private("secret.pdf"));
     let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Private", "np", true)], pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/Private/p.md", "p", 1, &missing)] };
     assert_eq!(d.found(&at10, &[], &["Notes/Private"])["withheld"], json!(["Notes/raw/assets/missing.pdf"]), "the founder's, though the file isn't there");
 

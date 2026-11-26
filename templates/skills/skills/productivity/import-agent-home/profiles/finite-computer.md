@@ -101,11 +101,13 @@ Each top-level folder becomes one of the brain's wikis (`raw/`, `wiki/`,
 computer: `/data/<path>` (or `file:///data/<path>`) is the home's
 `<path>`. Copy it out (`fragment home extract <source> <path> --to
 "$HOME/home-import/home" --layout <L>`), move it to
-`"$HOME/home-import/work/brains/<id>/<wiki>/raw/assets/<a clean name>"`,
-and rewrite the note's frontmatter as `brain-finite` says (`resource:
-raw/assets/<file>`, and `finite_asset` with its `content_type`, `size`
-and `content_hash: sha256:<hex>`). Leave a note whose resource is a web
-address, or a file the home doesn't hold, as it is.
+`"$HOME/home-import/work/brains/<id>/<wiki>/raw/assets/<path>"`, keeping
+its `<path>` (each import names an asset so, and a teammate's finds it by
+that name), and rewrite the note's frontmatter as `brain-finite` says
+(`resource: raw/assets/<path>`, and `finite_asset` with its
+`content_type`, `size` and `content_hash: sha256:<hex>`). Leave a note
+whose resource is a web address, or a file the home doesn't hold, as it
+is.
 
 **Record it.** Write down which version of each page the brain now holds,
 in its `imported-from-finite.json`, so a teammate who moves later brings
