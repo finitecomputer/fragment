@@ -2865,8 +2865,10 @@ impl ComputerCell {
         let g = JsValue::from_f64(generation as f64);
         let t0 = js::now_ms();
         let mut exited = false;
+        // its first signal's time, a stop kept for its flush already begun
+        let mut signalled = self.flushing_since(generation);
         if self.container_running().await {
-            let since = match self.flushing_since(generation) {
+            let since = match signalled {
                 Some(since) => since,
                 None => {
                     // the lever's outage of its route, from this signal
@@ -2883,6 +2885,7 @@ impl ComputerCell {
                         console_error!("{}", json!({ "computer": id, "disk": "flushing unkept", "generation": generation, "error": e.message }));
                     }
                     let _ = self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await;
+                    signalled = Some(now);
                     now
                 }
             };
@@ -2892,6 +2895,9 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "disk": "flushing", "generation": generation, "ms": js::now_ms() - since }));
                 return None;
             }
+        } else if signalled.is_some() {
+            // a stop kept for its flush, its container gone on its own since
+            exited = true;
         }
         let _ = self.delete_meta(MetaKey::DiskFlushing);
         let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
@@ -2901,7 +2907,8 @@ impl ComputerCell {
         };
         // its final flush posts a clean head of its own life
         let clean = self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
-        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - t0, exited, clean };
+        // its stop's time from its first signal, a stop kept for its flush too
+        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - signalled.unwrap_or(t0), exited, clean };
         console_log!("{}", start_line::sleep_line(id, &facts));
         let kept = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
         if let Err(e) = kept {
