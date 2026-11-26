@@ -683,7 +683,7 @@ impl Handle {
 
     /// Of the messages past a handover's cursor, those its chat holds; busy
     /// while one's file is here alone (its post not made: a save carries
-    /// databases, never files), until its computer's restart carries it.
+    /// databases, never files), which its core carries as it runs again.
     async fn ahead(&self, h: &Handing) -> Result<Vec<(i64, String)>, Refused> {
         let unasked = |why: String| Refused::new(503, format!("its chat could not say which of its messages it holds ({why}): ask again"));
         let chat = h.chat.clone().ok_or_else(|| unasked("its link names no chat".into()))?;
@@ -693,7 +693,7 @@ impl Handle {
             return Err(unasked(format!("more than {PAST_MAX} messages past its cursor: its computer's restart moves it on")));
         }
         if let Some((item, ..)) = past.iter().find(|(.., here)| *here) {
-            return Err(Refused::new(409, format!("a message's file (item {item}) is on this computer alone, not yet in its chat: restart its computer to carry it, then move it")).coded("busy"));
+            return Err(Refused::new(409, format!("a message's file (item {item}) is on this computer alone, not yet in its chat: its core carries it as it runs again, so ask again in a moment")).coded("busy"));
         }
         let past = past.into_iter().map(|(item, id, _)| (item, id)).collect();
         let api = &self.api;

@@ -970,8 +970,8 @@ async fn a_computers_link_moves_into_a_door_and_back() {
 
     // a voice message whose every post is refused, its file received here:
     // its move waits, refused as busy and saying why (a save carries no
-    // files), its core running on; its computer's restart carries it, its
-    // file with it (Codex's last round on #1541)
+    // files), and its core, running again, carries it, its file with it
+    // (Codex's last round on #1541)
     voice_file(&lab.db_dir("person").join("files").join("kept.m4a"), 2, false);
     fake.with(|w| w.fail_channel = Some(("chat".into(), fragment_bridge::limits::POST_TRIES_MAX, false)));
     let body = json!([{ "msgContent": { "type": "voice", "text": "", "duration": 2 }, "filePath": "/data/files/kept.m4a" }]);
@@ -987,7 +987,7 @@ async fn a_computers_link_moves_into_a_door_and_back() {
         if code == 409 && said.contains("on this computer alone") {
             break said;
         }
-        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "busy while its file is here alone: {code} {said}");
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "busy while its file is here alone: {code} {}", said.chars().take(200).collect::<String>());
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
     let t0 = Instant::now();
@@ -995,12 +995,9 @@ async fn a_computers_link_moves_into_a_door_and_back() {
         assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again: {said}");
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
-    assert_eq!(relayed_on(&fake, &chat).len(), 1, "not in its chat yet");
-    drop(c);
-    let c = Computer::start(&lab, &fake, &data);
     let t0 = Instant::now();
     while relayed_on(&fake, &chat).len() != 2 {
-        assert!(t0.elapsed() < Duration::from_secs(120), "its restart carries it: {:?}", relayed_on(&fake, &chat));
+        assert!(t0.elapsed() < Duration::from_secs(120), "its core, running again, carries it: {:?}", relayed_on(&fake, &chat));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     let carried = relayed_on(&fake, &chat)[1].clone();
@@ -1016,9 +1013,10 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     fake.with(|w| w.lose_relayed = None);
     assert_eq!(relayed_on(&fake, &chat).len(), 3, "taken once");
 
-    // its chat unasked (its `held` answering 503): nothing handed over,
-    // and its core runs again, its link at one end (Codex's rounds on #1541)
-    fake.with(|w| w.fail_held = 1);
+    // its chat unasked (its `held` answering 503 each time it is asked
+    // again): nothing handed over, and its core runs again, its link at one
+    // end (Codex's rounds on #1541)
+    fake.with(|w| w.fail_held = u32::MAX);
     let unasked = lab.dir.join("unasked.sxd");
     let t0 = Instant::now();
     loop {
@@ -1026,9 +1024,10 @@ async fn a_computers_link_moves_into_a_door_and_back() {
         if code == 503 {
             break;
         }
-        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code} {}", String::from_utf8_lossy(&body));
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code}");
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+    fake.with(|w| w.fail_held = 0);
     let t0 = Instant::now();
     while c.cores() != 1 {
         assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again");
