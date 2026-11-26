@@ -646,7 +646,7 @@ impl VaultCell {
             }
             held.extend(s.hosts);
         }
-        rules::room(hosts, &others, &held, &self.cfg.providers).map_err(|e| CellError::invalid(e.to_string()))
+        rules::room(hosts, &others, &held).map_err(|e| CellError::invalid(e.to_string()))
     }
 
     /// Every secret held, by name, as `SecretList`'s JSON: the texts kept,
