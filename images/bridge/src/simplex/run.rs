@@ -267,35 +267,21 @@ pub struct Handing {
 /// it the handover waits for its computer's restart to move it on.
 const PAST_MAX: usize = 16 * crate::limits::HELD_IDS_MAX;
 
-/// Asks of one chunk of a handover's question, at most, a backoff apart
-/// (`net::Backoff`).
-const HELD_ASKS: u32 = 3;
-
 /// Of `past` (each by its item and its sender's id), those its chat holds,
 /// by their post ids (`records::relayed_id`), asked `ask` in chunks of at
 /// most `HELD_IDS_MAX`: the chat's own word, never the bridge's copy, so a
 /// door given this link never relays one of them again (Codex's rounds on
-/// #1541). A chunk answered "ask again" (409: a post of one under way
-/// there) or failed on its way is asked again, at most `HELD_ASKS` times;
-/// any other failure, or an answer of what it was not asked, is no answer.
+/// #1541). Any ask that fails, or answers what it was not asked, is no
+/// answer.
 async fn held_of<F, A>(agent: &str, past: Vec<(i64, String)>, mut ask: F) -> Result<Vec<(i64, String)>, String>
 where
     F: FnMut(Vec<String>) -> A,
-    A: std::future::Future<Output = Result<Vec<String>, ApiError>>,
+    A: std::future::Future<Output = Result<Vec<String>, String>>,
 {
     let mut held = vec![];
     for chunk in past.chunks(crate::limits::HELD_IDS_MAX) {
         let ids: Vec<String> = chunk.iter().map(|(_, shared)| records::relayed_id(agent, shared)).collect();
-        let (mut backoff, mut asks) = (crate::net::Backoff::default(), 1);
-        let said = loop {
-            match ask(ids.clone()).await {
-                Err(e) if (e.retryable() || e.status() == Some(409)) && asks < HELD_ASKS => {
-                    asks += 1;
-                    tokio::time::sleep(Duration::from_millis(backoff.next_ms())).await;
-                }
-                r => break r.map_err(|e| e.to_string())?,
-            }
-        };
+        let said = ask(ids.clone()).await?;
         if said.iter().any(|id| !ids.contains(id)) {
             return Err("its chat answered of a post it was not asked of".into());
         }
@@ -700,7 +686,7 @@ impl Handle {
         held_of(&h.agent, past, |ids| {
             let chat = chat.clone();
             let agent = h.agent.clone();
-            async move { api.held(&agent, &chat, records::CHAT, &ids).await }
+            async move { api.held(&agent, &chat, records::CHAT, &ids).await.map_err(|e| e.to_string()) }
         })
         .await
         .map_err(unasked)
@@ -4751,10 +4737,8 @@ mod tests {
     /// rounds on #1541). Valid: 42 posted, its answer lost so the bridge
     /// recorded nothing, and 43: its chat holds both, so its door relays
     /// neither; 41, never posted, it relays once. 600 asked in chunks of
-    /// `HELD_IDS_MAX`, none cut. "Ask again" (a post under way there) is
-    /// asked again, at most `HELD_ASKS` times. Invalid: an ask that fails,
-    /// an answer of a post not asked of, or "ask again" past its bound: no
-    /// answer, so no handover.
+    /// `HELD_IDS_MAX`, none cut. Invalid: an ask that fails, or an answer
+    /// of a post not asked of: no answer, so no handover.
     #[tokio::test]
     async fn a_handover_asks_its_chat_what_it_holds() {
         let agent = "juniper--k3x9";
@@ -4763,7 +4747,6 @@ mod tests {
             let held: Vec<String> = ids.into_iter().filter(|id| posted.contains(id)).collect();
             async move { Ok(held) }
         };
-        let refused = |status: u16| ApiError::Refused { status, error: String::new(), message: String::new() };
         let past = vec![(41, "s41".to_string()), (42, "s42".into()), (43, "s43".into())];
         assert_eq!(held_of(agent, past.clone(), chat).await.expect("answered"), vec![(42, "s42".to_string()), (43, "s43".into())]);
         let many: Vec<(i64, String)> = (1..=600).map(|i| (i, format!("s{i}"))).collect();
@@ -4775,25 +4758,8 @@ mod tests {
         .await
         .expect("answered");
         assert_eq!((all.len(), asks), (600, vec![256, 256, 88]), "in chunks, none cut");
-        assert!(held_of(agent, past.clone(), |_| async move { Err(refused(403)) }).await.is_err(), "an ask that fails");
-        assert!(held_of(agent, past.clone(), |_| async { Ok(vec!["sx:not-asked".to_string()]) }).await.is_err(), "an answer of a post not asked of");
-        // "ask again" while a post of one is under way there, then its answer
-        // once it lands; asked again past `HELD_ASKS`, no answer
-        let mut asks = 0;
-        let later = held_of(agent, past.clone(), |ids| {
-            asks += 1;
-            let again = asks < HELD_ASKS;
-            async move { if again { Err(refused(409)) } else { Ok(ids) } }
-        })
-        .await;
-        assert_eq!((later.expect("answered once it landed").len(), asks), (3, HELD_ASKS));
-        let mut asks = 0;
-        let never = held_of(agent, past, |_| {
-            asks += 1;
-            async move { Err(refused(409)) }
-        })
-        .await;
-        assert!(never.is_err() && asks == HELD_ASKS, "asked {asks} times, then no answer");
+        assert!(held_of(agent, past.clone(), |_| async { Err("refused".to_string()) }).await.is_err(), "an ask that fails");
+        assert!(held_of(agent, past, |_| async { Ok(vec!["sx:not-asked".to_string()]) }).await.is_err(), "an answer of a post not asked of");
     }
 
     /// Goal (D4): the way back. Invalid: a link never handed over

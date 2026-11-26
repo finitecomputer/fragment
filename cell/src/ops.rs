@@ -517,15 +517,6 @@ impl FragmentCell {
             let (on, waiting) = self.test_hold_card.get();
             return Ok(json!({ "on": on, "waiting": waiting }));
         }
-        if body["op"] == "hold-post" {
-            // a post waits while on past its door check, before its append
-            // (channels.rs `post`); `waiting`, whether one waits now
-            if let Some(on) = body["on"].as_bool() {
-                self.test_hold_post.set((on, self.test_hold_post.get().1));
-            }
-            let (on, waiting) = self.test_hold_post.get();
-            return Ok(json!({ "on": on, "waiting": waiting }));
-        }
         if body["op"] == "hold-launch" {
             // a launch's batch, made, waits while on before it is written
             // (jobs.rs `launch_queued`), across a delete and the name made

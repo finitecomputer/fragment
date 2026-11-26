@@ -203,27 +203,6 @@ pub(crate) struct Held<'a> {
     guard: Option<OwnedMutexGuard<()>>,
 }
 
-/// A post in flight (`FragmentCell::posting`), let go however it ends.
-struct Posting<'a>(&'a FragmentCell, String);
-
-impl<'a> Posting<'a> {
-    fn new(cell: &'a FragmentCell, key: String) -> Posting<'a> {
-        *cell.posting.borrow_mut().entry(key.clone()).or_default() += 1;
-        Posting(cell, key)
-    }
-}
-
-impl Drop for Posting<'_> {
-    fn drop(&mut self) {
-        let mut posting = self.0.posting.borrow_mut();
-        let n = posting.get_mut(&self.1).expect("a post in flight is counted");
-        *n -= 1;
-        if *n == 0 {
-            posting.remove(&self.1);
-        }
-    }
-}
-
 impl Drop for Held<'_> {
     fn drop(&mut self) {
         drop(self.guard.take());
@@ -631,13 +610,7 @@ impl FragmentCell {
         if size > limits::RECORD_BODY_MAX_BYTES {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
-        let key = post_key(principal, caller.signed.as_ref().and_then(|s| s.other_asker()), id);
-        // in flight from its door check to its append: `held` says ask again
-        let posting = Posting::new(self, key.clone());
         self.door_checked(caller, &facts.name, channel, id, body).await?;
-        if self.cfg.test_hooks {
-            self.held_post().await;
-        }
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -645,6 +618,7 @@ impl FragmentCell {
         laps.lap("writable");
         // after the last await: the life it is appended to is the one read
         self.relayed_into_owners(caller, body)?;
+        let key = post_key(principal, caller.signed.as_ref().and_then(|s| s.other_asker()), id);
         // its poster wrote it: a person (an anonymous visitor too), an
         // agent, or a door it relays for (`door_checked` passed it)
         let author = match (door::relays(body), caller.kind()) {
@@ -658,7 +632,6 @@ impl FragmentCell {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
         };
-        drop(posting);
         laps.lap("append");
         // A retry finishes what the first try left undone for as long as a
         // mutation's effects are tried again; later, the runs it started may
@@ -941,9 +914,6 @@ impl FragmentCell {
         }
         // each id keyed as a post of this caller's is (`post_key`)
         let (who, other) = (self.caller_id(caller)?, caller.signed.as_ref().and_then(|s| s.other_asker()));
-        if ask.ids.iter().any(|id| self.posting.borrow().contains_key(&post_key(who, other, id))) {
-            return Err(CellError::new(ErrorCode::Conflict, "a post of one of these ids is under way here: ask again").retry_after(1_000));
-        }
         let mut held = vec![];
         for id in ask.ids {
             if !self.rows("SELECT 1 FROM records WHERE channel = ? AND op = ? LIMIT 1", vec![channel.into(), post_key(who, other, &id).into()])?.is_empty() {

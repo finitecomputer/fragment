@@ -1013,10 +1013,9 @@ async fn a_computers_link_moves_into_a_door_and_back() {
     fake.with(|w| w.lose_relayed = None);
     assert_eq!(relayed_on(&fake, &chat).len(), 3, "taken once");
 
-    // its chat unasked (its `held` answering 503 each time it is asked
-    // again): nothing handed over, and its core runs again, its link at one
-    // end (Codex's rounds on #1541)
-    fake.with(|w| w.fail_held = u32::MAX);
+    // its chat unasked (its `held` answering 503): nothing handed over,
+    // and its core runs again, its link at one end (Codex's rounds on #1541)
+    fake.with(|w| w.fail_held = 1);
     let unasked = lab.dir.join("unasked.sxd");
     let t0 = Instant::now();
     loop {
@@ -1024,10 +1023,9 @@ async fn a_computers_link_moves_into_a_door_and_back() {
         if code == 503 {
             break;
         }
-        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code}");
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code} {}", String::from_utf8_lossy(&body));
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    fake.with(|w| w.fail_held = 0);
     let t0 = Instant::now();
     while c.cores() != 1 {
         assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again");

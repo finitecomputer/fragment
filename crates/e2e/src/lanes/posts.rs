@@ -158,27 +158,6 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
         at.status == 200 && at.body["held"] == json!([]) && past.status == 413 && past.code() == Some(ErrorCode::TooLarge) && past.body.get("held").is_none(),
         json!([at.status, past.body]),
     );
-    // a post of one under way (past its door check, before its append:
-    // `hold-post`): asked then, the channel says ask again, never that it
-    // isn't held; once it lands, held
-    let hold = |on: Option<bool>| super::ledger::lever(api, &name, "hold-post", on.map_or(json!({}), |on| json!({ "on": on }))).map(|r| r.body).unwrap_or(Value::Null);
-    hold(Some(true));
-    let (landed, during, waited) = std::thread::scope(|scope| {
-        let landed = scope.spawn(|| post(api, &editor, &name, "notes", "n9", json!({ "text": "under way" })));
-        let t0 = std::time::Instant::now();
-        while hold(None)["waiting"] != true && t0.elapsed() < Duration::from_secs(20) {
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        let (waited, during) = (hold(None)["waiting"] == true, held(&editor, "notes", json!(["n9"])));
-        hold(Some(false));
-        (landed.join().expect("the post's thread"), during, waited)
-    });
-    let (landed, during, after) = (landed?, during?, held(&editor, "notes", json!(["n9"]))?);
-    s.ok(
-        "a post of one under way (past its door check, before its append): asked then, its channel says ask again (409, Retry-After), never that it isn't held; once it lands, held",
-        waited && during.status == 409 && during.code() == Some(ErrorCode::Conflict) && !during.header("retry-after").is_empty() && landed.status == 200 && after.body["held"] == json!(["n9"]),
-        json!([during.status, during.body, landed.status, after.body]),
-    );
     let (bad, stranger_asks) = (held(&editor, "notes", json!(["n 1"]))?, held(&stranger, "notes", json!(["n1"]))?);
     s.ok(
         "an id no post could have is 400, and a stranger to a channel it can't read is refused",

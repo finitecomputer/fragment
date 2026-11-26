@@ -133,12 +133,12 @@ A fragment's channels: its records, read, posted and drafted.
 
 #### `channels.held`
 
-`POST /api/f/{name}/channels/{channel}/held`: Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's. A post of one still under way: 409, ask again.
+`POST /api/f/{name}/channels/{channel}/held`: Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.
 
 - Credentials: NIP-98, the shell's session
 - Body: [`PostsHeldAsk`](#postsheldask)
 - Answer: [`PostsHeld`](#postsheld)
-- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
 
 #### `channels.newest`
 

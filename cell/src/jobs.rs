@@ -791,19 +791,6 @@ impl FragmentCell {
         self.test_hold_card.set((self.test_hold_card.get().0, false));
     }
 
-    /// Test fleets: waits while `hold-post` is on, at most
-    /// `TEST_HOLD_MAX_MS`, a post past its door check, before its append.
-    pub(crate) async fn held_post(&self) {
-        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
-            if !self.test_hold_post.get().0 {
-                break;
-            }
-            self.test_hold_post.set((true, true));
-            Delay::from(Duration::from_millis(TEST_HOLD_POLL_MS)).await;
-        }
-        self.test_hold_post.set((self.test_hold_post.get().0, false));
-    }
-
     /// Test fleets: waits while `hold-launch` is on, at most
     /// `TEST_HOLD_MAX_MS`, a batch made and not yet written (`waiting`).
     async fn held_launch(&self) {

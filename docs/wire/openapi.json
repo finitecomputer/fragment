@@ -3973,19 +3973,6 @@
               "not_found"
             ]
           },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            },
-            "description": "`conflict`",
-            "x-fragment-codes": [
-              "conflict"
-            ]
-          },
           "413": {
             "content": {
               "application/json": {
@@ -4034,7 +4021,7 @@
             "session": []
           }
         ],
-        "summary": "Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's. A post of one still under way: 409, ask again.",
+        "summary": "Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.",
         "tags": [
           "channels"
         ]

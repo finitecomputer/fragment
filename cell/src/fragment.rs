@@ -152,16 +152,6 @@ pub struct FragmentCell {
     /// waits where it chooses its card's shot (`on_alarm`), and whether one
     /// is waiting now. In memory, as `test_hold_install`.
     pub(crate) test_hold_card: Cell<(bool, bool)>,
-    /// A test fleet's `hold-post` lever (ops.rs): whether a post waits past
-    /// its door check, before its append (channels.rs `post`), and whether
-    /// one is waiting now. In memory, as `test_hold_install`.
-    pub(crate) test_hold_post: Cell<(bool, bool)>,
-    /// The posts from their door check to their append, by their key
-    /// (`post_key`), counted (two tries of one id at once): asked of one,
-    /// `held_api` says ask again, never "not held". In memory, rightly: a
-    /// request in flight dies with its object, so after a restart this and
-    /// what is in flight agree.
-    pub(crate) posting: RefCell<BTreeMap<String, u32>>,
     /// A launch is under way (`launch_queued`): one at a time, without an
     /// await before its `createBatch`; another finding one leaves its runs
     /// queued for the alarm's next pass.
@@ -206,8 +196,6 @@ impl DurableObject for FragmentCell {
             test_hold_install: Cell::new((false, false)),
             test_hold_launch: Cell::new((false, false)),
             test_hold_card: Cell::new((false, false)),
-            test_hold_post: Cell::new((false, false)),
-            posting: RefCell::default(),
             launching: Cell::new(false),
             dw_noted: RefCell::new(None),
             schema,
