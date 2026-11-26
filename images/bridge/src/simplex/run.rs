@@ -1981,7 +1981,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], unposted: false });
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
@@ -4246,7 +4246,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], unposted: false };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -4262,7 +4262,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![], unposted: false };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
@@ -4336,7 +4336,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], unposted: false },
             name: None,
             named_at: None,
             naming: false,
@@ -5055,7 +5055,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], unposted: false };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -5217,7 +5217,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], unposted: false },
             name: None,
             named_at: None,
             naming: false,
