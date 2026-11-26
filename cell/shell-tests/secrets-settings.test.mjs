@@ -161,7 +161,8 @@ test("an edit is onto the secret as its sheet shows it: a change since is refuse
     sent.push({ method, path, body });
     throw new ApiError(409, "github changed since you read it: look at it again");
   };
-  const { secretsSection, reopened } = setup(null, undefined, vaultApi);
+  const drawn = [];
+  const { secretsSection, reopened } = setup(null, undefined, vaultApi, (ui) => drawn.push(ui.secretsSection({ secrets: [now] })));
   const card = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.secret === "github");
   await walk(card).find((n) => n.dataset?.agent === "bea--k3x9").onclick();
   // hosts and agents as the sheet showed them, onto the revision it showed
@@ -177,10 +178,11 @@ test("an edit is onto the secret as its sheet shows it: a change since is refuse
   walk(hostsForm).find((n) => n.tag === "input").value = "api.github.com";
   await hostsForm.onsubmit({ preventDefault() {} });
   assert.deepEqual(sent[2].body, { hosts: ["api.github.com"], place: {}, agents: ["ada--k3x9"], held: "rev1" });
-  // each refusal draws the page again from the Vault, and says why
+  // each refusal draws the page again from the Vault, whose sheet says why
   assert.equal(reopened(), 3);
-  const said = walk(card).find((n) => n.className.includes("secret-said") && !n.hidden);
-  assert.match(said.textContent, /changed since you read it/);
+  const newest = walk(drawn[2]).find((n) => n.dataset?.secret === "github");
+  assert.deepEqual(walk(newest).find((n) => n.className === "provider-sub")?.textContent, "api.github.com, uploads.github.com", "the sheet shows what the Vault holds now");
+  assert.match(walk(newest).find((n) => n.className.includes("secret-said") && !n.hidden)?.textContent ?? "", /changed since you read it/);
 });
 
 test("remove names the revision its sheet showed, and a change since is refused", async () => {
@@ -190,13 +192,15 @@ test("remove names the revision its sheet showed, and a change since is refused"
     sent.push({ method, path });
     throw new ApiError(409, "github changed since you read it: look at it again");
   };
-  const { secretsSection, reopened } = setup(null, undefined, vaultApi);
+  const drawn = [];
+  const { secretsSection, reopened } = setup(null, undefined, vaultApi, (ui) => drawn.push(ui.secretsSection({ secrets: [github()] })));
   const card = walk(secretsSection({ secrets: [github()] })).find((n) => n.dataset?.secret === "github");
   walk(card).find((n) => n.dataset?.action === "remove-secret").onclick();
   await walk(card).find((n) => n.dataset?.action === "confirm-remove-secret").onclick();
   assert.deepEqual(sent, [{ method: "DELETE", path: "/api/vault/github?held=rev1" }]);
   assert.equal(reopened(), 1);
-  assert.match(walk(card).find((n) => n.className.includes("secret-said") && !n.hidden).textContent, /changed since/);
+  const newest = walk(drawn[0]).find((n) => n.dataset?.secret === "github");
+  assert.match(walk(newest).find((n) => n.className.includes("secret-said") && !n.hidden)?.textContent ?? "", /changed since/);
 });
 
 test("a write queued behind one that redrew the page says what went wrong in the sheet drawn since", async () => {
@@ -218,6 +222,49 @@ test("a write queued behind one that redrew the page says what went wrong in the
   assert.equal(drawn.length, 1, "the toggle landed and drew the page again");
   const newest = walk(drawn[0]).find((x) => x.dataset?.secret === "github");
   assert.match(walk(newest).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+});
+
+test("a failure while the page is drawn again waits for the sheet drawn next", async () => {
+  let held = github();
+  let n = 1;
+  const vaultApi = async (method, _path, body) => {
+    if (method === "GET") return { secrets: [structuredClone(held)] };
+    await new Promise((r) => setTimeout(r, 5));
+    if (body.hosts.length > 8) throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
+    held = { ...held, agents: body.agents, revision: `rev${++n}` };
+    return structuredClone(held);
+  };
+  const drawn = [];
+  let first;
+  // the toggle's redraw takes the old page away at once, and draws the new one only later ("Loading…")
+  const { secretsSection } = setup(null, undefined, vaultApi, async (ui) => {
+    for (const x of walk(first)) x.isConnected = false;
+    await new Promise((r) => setTimeout(r, 30));
+    drawn.push(ui.secretsSection({ secrets: [structuredClone(held)] }));
+  });
+  first = secretsSection({ secrets: [github()] });
+  const card = walk(first).find((x) => x.dataset?.secret === "github");
+  const hostsForm = walk(card).find((x) => x.className.includes("secret-hosts-form"));
+  walk(hostsForm).find((x) => x.tag === "input").value = Array.from({ length: 9 }, (_, i) => `h${i}.example.com`).join(", ");
+  await Promise.all([walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick(), hostsForm.onsubmit({ preventDefault() {} })]);
+  const newest = walk(drawn[0]).find((x) => x.dataset?.secret === "github");
+  assert.match(walk(newest).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+});
+
+test("a write refused for a secret removed elsewhere says so in the section, with no sheet to say it", async () => {
+  const vaultApi = async (method) => {
+    if (method === "GET") return { secrets: [] };
+    throw new ApiError(409, "github changed since you read it: look at it again");
+  };
+  const drawn = [];
+  const { secretsSection } = setup(null, undefined, vaultApi, (ui) => drawn.push(ui.secretsSection({ secrets: [] })));
+  const card = walk(secretsSection({ secrets: [github()] })).find((x) => x.dataset?.secret === "github");
+  for (const x of walk(card)) x.isConnected = false;
+  const replaceForm = walk(card).find((x) => x.className.includes("secret-replace-form"));
+  walk(replaceForm).find((x) => x.tag === "input").value = "ghp_new";
+  await replaceForm.onsubmit({ preventDefault() {} });
+  assert.equal(drawn.length, 1);
+  assert.match(walk(drawn[0]).find((x) => x.dataset?.secretSaid === "github")?.textContent ?? "", /changed since you read it/);
 });
 
 test("two edits at once go one after the other, each onto what the last left", async () => {

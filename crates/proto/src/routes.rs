@@ -613,7 +613,7 @@ pub const ROUTES: &[Route] = &[
         params: &[SECRET],
         request: Some(Body::Json(ty::<PutSecret>())),
         answer: Answer::Json(ty::<Secret>()),
-        errors: &[Unauthenticated, Forbidden, InvalidRequest],
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, Conflict],
     },
     Route {
         operation: "vault.remove",

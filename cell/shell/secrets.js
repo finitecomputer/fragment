@@ -32,10 +32,22 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
   // This page's writes go one at a time, so each names the revision the
   // one before it left (`written`, below).
   let writing = Promise.resolve();
-  // Where a secret's sheet says what went wrong: the newest one drawn for
-  // it, since a redraw replaces a sheet while a write queued from the old
-  // one is still on its way.
+  // What went wrong for a secret is said in the newest sheet drawn for it
+  // (a redraw replaces a sheet while a write queued from the old one is
+  // still on its way). With none showing (the page mid-redraw, or Settings
+  // closed), it waits for the next one drawn, or, the secret gone, for the
+  // section's next drawing.
   const sayers = new Map();
+  const pending = new Map();
+  function say(name, text) {
+    const said = sayers.get(name);
+    if (said?.isConnected) {
+      said.textContent = text;
+      said.hidden = false;
+    } else {
+      pending.set(name, text);
+    }
+  }
 
   function secretsSection(vault) {
     const s = section("Secrets");
@@ -46,6 +58,14 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     }
     s.append(el("p", "muted", "Secrets your agents can send to specific hosts without ever seeing the values."));
     const list = vault.secrets ?? [];
+    // what went wrong for a secret no longer kept: no sheet will say it
+    for (const [name, text] of pending) {
+      if (list.some((sec) => sec.name === name)) continue;
+      const said = el("p", "form-error secret-said", text);
+      said.dataset.secretSaid = name;
+      s.append(said);
+      pending.delete(name);
+    }
     const agents = computer()?.agents ?? [];
     if (list.length) {
       const grid = el("div", "provider-grid");
@@ -116,11 +136,10 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
     // it now is, which the next one builds on.
     let shown = sec;
     const said = el("p", "form-error secret-said");
-    said.hidden = true;
-    sayers.set(sec.name, (text) => {
-      said.textContent = text;
-      said.hidden = false;
-    });
+    said.hidden = !pending.has(sec.name);
+    said.textContent = pending.get(sec.name) ?? "";
+    pending.delete(sec.name);
+    sayers.set(sec.name, said);
     const path = `/api/vault/${encodeURIComponent(sec.name)}`;
     function written(write) {
       const run = writing.then(async () => {
@@ -131,11 +150,12 @@ export function createSecrets({ api, el, section, named, computer, asks, isOpen,
       return run;
     }
     async function failed(e, fallback) {
-      if (e?.status === 409) {
-        openSheet = { secret: sec.name, visit: asks.now("settings") };
-        await reopenSettings();
-      }
-      sayers.get(sec.name)?.(e?.message || fallback);
+      const text = e?.message || fallback;
+      if (e?.status !== 409) return say(sec.name, text);
+      // stale: drawn again from what the Vault holds, which says why
+      pending.set(sec.name, text);
+      openSheet = { secret: sec.name, visit: asks.now("settings") };
+      await reopenSettings();
     }
 
     // Status + two-step remove

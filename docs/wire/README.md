@@ -377,7 +377,7 @@ A person's secrets, which their agents use without holding: set and listed by th
 - Credentials: NIP-98, the shell's session
 - Body: [`PutSecret`](#putsecret)
 - Answer: [`Secret`](#secret)
-- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 #### `vault.remove`
 

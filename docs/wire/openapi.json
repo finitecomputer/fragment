@@ -8188,6 +8188,19 @@
               "forbidden"
             ]
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
           "500": {
             "content": {
               "application/json": {
