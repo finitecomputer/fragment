@@ -225,17 +225,19 @@ export async function inboxSignature(secret, body) {
   return `sha256=${hexOf(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))}`;
 }
 
-// A transfer as the e2e's levers damage one on its way (`damage`, as
-// FIN-775's were between a container and its Worker): one byte flipped,
-// its length kept.
+// A transfer as the e2e's levers damage one on its way (the door's and
+// the port's `damage`, a computer's `damage-restores`, as FIN-775's were
+// between a container and its Worker): one byte of its first chunk
+// flipped, its length kept. The chunk, a view or a buffer, is copied,
+// never written in place.
 export function flipped(body) {
   let done = false;
   return body.pipeThrough(
     new TransformStream({
       transform(chunk, c) {
-        if (!done && chunk.byteLength > 64) {
-          chunk = chunk.slice();
-          chunk[64] ^= 1;
+        if (!done && chunk.byteLength > 0) {
+          chunk = new Uint8Array(chunk).slice();
+          chunk[chunk.byteLength >> 1] ^= 0xff;
           done = true;
         }
         c.enqueue(chunk);

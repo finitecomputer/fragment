@@ -82,7 +82,7 @@ pub(crate) async fn simplex_move(env: &Env, cfg: &Config, url: &Url, by: &str, p
         "plan" => m.plan().await,
         "go" => m.go().await,
         "back" => m.back().await,
-        act => Err(CellError::invalid(format!("act {act:?}: plan, go or back"))),
+        _ => Err(CellError::invalid("act: plan, go or back")),
     }
 }
 
@@ -109,10 +109,13 @@ fn text<'v>(v: &'v Value, k: &str) -> &'v str {
 impl Move<'_> {
     /// Its record and its computer's word on its link (`computer/simplex-moves`).
     async fn read(&self) -> CellResult<Value> {
-        crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "read", "agent": self.agent })).await.map_err(|e| match e.code {
-            ErrorCode::NotFound => CellError::new(ErrorCode::NotFound, format!("{} is not on {}'s computer: {}", self.agent, self.person.id, e.message)),
-            _ => e,
-        })
+        crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "read", "agent": self.agent })).await
+    }
+
+    /// One of its person's fragments archived (`on`) or not, as Settings does.
+    async fn archived(&self, fragment: &str, on: bool) -> CellResult<()> {
+        crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: fragment.into(), own: crate::principal::calls::Own::Archived, on }).await?;
+        Ok(())
     }
 
     /// Its record moved on from step `from` ("" for none), refused when
@@ -153,17 +156,17 @@ impl Move<'_> {
 
     /// Why a move that has not begun may not: its computer asleep (an
     /// always-on one wakes by itself), or its link not one its computer
-    /// holds bound.
-    fn blocked(&self, read: &Value) -> Option<String> {
+    /// holds bound (its plan shows the link as its computer says it).
+    fn blocked(&self, read: &Value) -> Option<&'static str> {
         if !read["record"].is_null() {
             return None;
         }
         if read["awake"] != true {
-            return Some("its computer is asleep: ask again once it wakes (an always-on one wakes by itself)".into());
+            return Some("its computer is asleep: ask again once it wakes");
         }
         let said = &read["link"]["said"];
         let movable = said["phase"] == "linked" || (said["phase"] == "off" && said["staged"] == true);
-        (read["link"]["status"] != 200 || !movable).then(|| format!("no SimpleX link or staged chat to move: {said}"))
+        (read["link"]["status"] != 200 || !movable).then_some("no SimpleX link or staged chat to move")
     }
 
     async fn go(&self) -> CellResult<Value> {
@@ -181,7 +184,7 @@ impl Move<'_> {
         }
         let mut rec = read["record"].clone();
         if text(&rec, "step") == "making" {
-            return Err(CellError::new(ErrorCode::Conflict, "a `go` is making its connector: ask again (one that stopped: `back`)"));
+            return Err(CellError::new(ErrorCode::Conflict, "a `go` is making its connector: ask again, or `back`"));
         }
         // one failure handler (Rule B): from its handover until its door is
         // connected, any failure but another `go`'s moving it on goes back,
@@ -210,7 +213,7 @@ impl Move<'_> {
             let connector = text(&rec, "connector").to_string();
             self.as_person(&connector, Method::Post, "/api/ops/check", Some(&json!({ "id": "simplex-move-check", "input": {} }))).await?;
             if let Some(chat) = rec["chat"].as_str() {
-                crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: true }).await?;
+                self.archived(chat, true).await?;
             }
             rec = self.set("connecting", None, json!({ "step": "done" })).await?;
             self.note(format!("{}'s SimpleX moved into {connector}; {} archived", self.agent, rec["chat"].as_str().unwrap_or("no old chat"))).await?;
@@ -318,7 +321,7 @@ impl Move<'_> {
             }
         };
         crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
-        self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
+        self.note(format!("{}'s SimpleX handed over to {} ({sha}, {length} bytes, staged {staged})", self.agent, text(rec, "connector"))).await?;
         // a staged chat waits for its person's word once bound, never
         // connected for them
         self.set("made", None, json!({ "step": "imported", "staged": staged })).await
@@ -360,7 +363,7 @@ impl Move<'_> {
         // keeps the link, never stopped for nothing (Codex's round on
         // 8cacd32d1; the hosted check on 8c0ad40ec)
         if rec["moved"] == true && (read["awake"] != true || read["alwaysOn"] != true) {
-            return Err(CellError::new(ErrorCode::Conflict, "its computer must be awake and always on: turn always-on on, then `--back` again (its door keeps the link)"));
+            return Err(CellError::new(ErrorCode::Conflict, "its computer must be awake and always on: turn always-on on, then `--back` (its door keeps the link)"));
         }
         // its door stops, saving last, and hands its newest save back, with
         // its SHA-256; a copy its computer finds damaged on its way (seen
@@ -388,7 +391,7 @@ impl Move<'_> {
                 // with it (its person unlinked it): no way back, its
                 // computer's old copy never run again
                 204 if matches!(text(&rec, "step"), "making" | "made") => (None, false, String::new()),
-                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} was unlinked, so ended: no way back; {}'s copy on its computer stays stopped", self.agent))),
+                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} was unlinked: no way back; its computer's copy stays stopped"))),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
             };
             match self.hand("back", save, behind, &sha).await {
@@ -401,18 +404,18 @@ impl Move<'_> {
         // `back` asked again after this failed, its computer's mark let go
         // already (Codex's round on 6e6b1e955)
         if let Some(chat) = rec["chat"].as_str() {
-            crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: false }).await?;
+            self.archived(chat, false).await?;
         }
         // its connector kept, its chat's history with it: unbound (its door
         // ends) once it has taken what its door delivered, and archived
         if let Some(connector) = rec["connector"].as_str() {
             if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
-                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has delivered messages not yet published (an intake run not done): ask again, or replay them")));
+                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published (an intake run not done): ask again")));
             }
             match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
                 Err(_) => {}
-                Ok(_) => crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: connector.into(), own: crate::principal::calls::Own::Archived, on: true }).await?,
+                Ok(_) => self.archived(connector, true).await?,
             }
         }
         self.forget().await?;
