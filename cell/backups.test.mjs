@@ -15,7 +15,7 @@
 // computer::checks, and the e2e's computer-damage.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, readAgain, restoreChecked, verdictOf } from "./backups.mjs";
+import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, STORED_TRIES, readAgain, restoreChecked, verdictOf } from "./backups.mjs";
 
 const SHA = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -106,14 +106,24 @@ test("a read of R2's copy damaged on its own way condemns nothing: the restore i
   }
 });
 
-test("a check of R2's copy that fails condemns nothing, and is made again beside the next try", async () => {
+test("a read of R2's copy that fails is made again at once, a bounded number of times, the first mismatch kept", async () => {
   const fails = new Error("R2 internal error, please try again (10001)");
-  const { seen, run } = restores([DAMAGED, DAMAGED, null], [fails, whole]);
+  // bad, then a read that fails once, then bad again: unusable beside the second try, no time lost
+  const once = restores([DAMAGED], [bad, fails, bad]);
+  assert.match((await once.run()).unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
+  assert.deepEqual([once.seen.restores, once.seen.reads], [2, 3]);
+  assert.ok(STORED_TRIES >= 3);
+});
+
+test("a check of R2's copy that keeps failing condemns nothing, and is made again beside the next try", async () => {
+  const fails = new Error("R2 internal error, please try again (10001)");
+  const unread = Array.from({ length: STORED_TRIES }, () => fails);
+  const { seen, run } = restores([DAMAGED, DAMAGED, null], [...unread, whole]);
   assert.equal(await run(), null);
-  assert.equal(seen.reads, 2);
+  assert.equal(seen.reads, STORED_TRIES + 1);
   assert.match(seen.again[1][1], /^BACKUP_INTEGRITY: .*; R2's copy unread: R2 internal error/);
   // unread beside the second try, read bad beside the third: unusable then
-  const later = restores([DAMAGED], [fails, bad]);
+  const later = restores([DAMAGED], [...unread, bad]);
   assert.match((await later.run()).unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
   assert.equal(later.seen.restores, 3);
 });

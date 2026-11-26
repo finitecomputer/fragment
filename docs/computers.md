@@ -549,7 +549,8 @@ the DO removes them from one started from a snapshot.
   `DirectoryBackupGateway.stored`, a call of its own, never through the
   container), which never wait for it. When two reads agree that copy is
   not its record, the save is unusable, as above, once a try beside them
-  failed too; otherwise (a read that failed too) the restore is asked
+  failed too (a read that fails is made again at once, three in all);
+  otherwise (a read that failed each time) the restore is asked
   again, three tries in all, within its own bound, and a start whose tries
   all came damaged fails as one that may pass, its save kept. A start
   after a failed one reads R2's copy of each of its records from the start

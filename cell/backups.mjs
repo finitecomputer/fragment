@@ -89,12 +89,27 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
   }
 }
 
+// Reads of R2's copy in all while one fails (R2 refused it, say), each
+// within the restore's own deadline: one that failed is made again at
+// once, never left until the next try, which may leave no time for it.
+export const STORED_TRIES = 3;
+
+async function readOf(stored) {
+  for (let tried = 1; ; tried++) {
+    try {
+      return await stored();
+    } catch (e) {
+      if (tried >= STORED_TRIES) throw e;
+    }
+  }
+}
+
 // Why R2's copy of `record` is not it, or null unless two reads agree on
 // what it holds instead: a read damaged on its own way never condemns it.
 async function badCopy(record, stored) {
-  const first = await stored();
+  const first = await readOf(stored);
   if (holds(first, record)) return null;
-  const second = await stored();
+  const second = await readOf(stored);
   const same = first === null ? second === null : second !== null && second.size === first.size && second.sha256 === first.sha256;
   return same ? against(first, record) : null;
 }
