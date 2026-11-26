@@ -146,8 +146,10 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     let unread = |st: &Value| st["saves"].as_array().into_iter().flatten().filter(|x| x["unreadable"] != 0).count();
     lever(api, door, "damage", json!({ "on": "restore", "n": 1 }))?;
     lever(api, door, "kill", json!({}))?;
-    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
-    s.ok("a restore's save damaged on its way to its runner is asked for again: never taken as one that will not restore", unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0, &st);
+    let before = generation(&st);
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(before + 1)(x) && newest(x).0 == generation(x))?;
+    // its start, then a life for the damaged restore and one for the restore asked again
+    s.ok("a restore's save damaged on its way to its runner is asked for again: never taken as one that will not restore", unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0 && generation(&st) >= before + 3, json!({ "before": before, "state": st }));
     lever(api, door, "damage", json!({ "on": "save", "n": 1 }))?;
     lever(api, door, "kill", json!({}))?;
     let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;

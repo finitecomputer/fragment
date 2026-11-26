@@ -217,7 +217,12 @@ impl FakeDoor {
         let sized = header("content-length").is_some();
         let mark: Option<u64> = header("x-door-mark").and_then(|m| m.parse().ok());
         let content_type = header("content-type");
+        let named = header("x-door-sha256");
         let body = req.into_body().collect().await.unwrap().to_bytes();
+        // every body its runner sends names its SHA-256, as the cell's door asks
+        if !body.is_empty() {
+            assert_eq!(named.as_deref(), Some(sha256_hex(&body).as_str()), "{method} {path}: a runner's body names its SHA-256");
+        }
         self.with(|s| s.heads.push((method.clone(), path.clone(), sized, generation)));
         let answer = |status: u16, headers: &[(&str, String)], body: Bytes| {
             let mut r = Response::builder().status(status);
@@ -239,7 +244,7 @@ impl FakeDoor {
                     None => answer(204, &[("x-door-life", life.to_string())], Bytes::new()),
                     Some(k) => {
                         let behind = if k.mark < s.marks { "1" } else { "0" };
-                        let headers = [("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into()), ("x-door-life", life.to_string()), ("x-door-save", format!("{}-{}", k.life, k.seq))];
+                        let headers = [("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into()), ("x-door-life", life.to_string()), ("x-door-save", format!("{}-{}", k.life, k.seq)), ("x-door-sha256", sha256_hex(&k.bytes))];
                         answer(200, &headers, k.bytes)
                     }
                 }
@@ -327,8 +332,10 @@ impl Start {
         if let Some(m) = mark {
             c.args(["-H", &format!("x-door-mark: {m}")]);
         }
+        // a body named by its SHA-256, as its door names every one
         if let Some(b) = body {
-            c.args(["-H", "content-type: application/json", "--data-binary", &b.to_string()]);
+            let text = b.to_string();
+            c.args(["-H", "content-type: application/json", "-H", &format!("x-door-sha256: {}", sha256_hex(text.as_bytes())), "--data-binary", &text]);
         }
         let out = c.arg(format!("{}{path}", self.api)).output().await.expect("curl runs");
         let text = String::from_utf8_lossy(&out.stdout).to_string();

@@ -905,7 +905,7 @@ export class SimplexDoor extends DurableObject {
       if (got === undefined) return refusal(409, "superseded", `life ${life} was superseded as it restored`);
       d = this.#door();
       if (got) {
-        this.#log("door.restoring", { save: saveId(s), mark: s.mark, marks: d.marks, life });
+        this.#log("door.restoring", { save: saveId(s), mark: s.mark, marks: d.marks, life, bytes: s.bytes, sha: got.sha });
         return new Response(this.#flip("restore", got.obj.body), { status: 200, headers: { "x-door-mark": String(d.marks), "x-door-behind": behind(s, d.marks) ? "1" : "0", "x-door-save": saveId(s), "x-door-life": String(life), [FILE_SHA_HEADER]: got.sha, "content-type": "application/octet-stream" } });
       }
       // its file gone: never given again; the one before it, if any
@@ -939,6 +939,7 @@ export class SimplexDoor extends DurableObject {
     const n = this.#damage.get(on) ?? 0;
     if (!n || !body) return body;
     this.#damage.set(on, n - 1);
+    this.#log("door.damaged_by_lever", { on });
     return flipped(body);
   }
 
@@ -967,7 +968,10 @@ export class SimplexDoor extends DurableObject {
       // a copy damaged on its way is refused before any row names it (its
       // runner saves again): every save a restore or a way back gives is
       // the bytes its runner made
-      const put = await store(this.env.BLOBS, key, this.#flip("save", request.body), length, sha, "damaged");
+      const put = await store(this.env.BLOBS, key, this.#flip("save", request.body), length, sha, "damaged").catch((e) => {
+        this.#log("door.save_refused", { save: `${generation}-${seq}`, bytes: length, why: e.message.slice(0, 300) });
+        throw e;
+      });
       // the door ended during its upload: its file, which that end's
       // deletion may have missed, goes too, and nothing names it
       if (this.#ends !== ends) {
@@ -1108,12 +1112,16 @@ export class SimplexDoor extends DurableObject {
         return json({ unread: Math.min(n, readable.length) });
       }
       // a save its next start cannot read: the newest readable one's file
-      // replaced by bytes that are no save, then a crash
+      // replaced by bytes that are no save, whole as hashed (as a save its
+      // runner made wrong is: one its bucket kept damaged would be asked
+      // for again), then a crash
       case "corrupt": {
         const r = restoreOf(this.#saves(), d.saved);
         const s = r.kind === "save" ? r.save : null;
         if (!s) throw Object.assign(new Error("no save to corrupt"), { status: 409 });
-        await this.env.BLOBS.put(saveKey(d.door, s.generation, s.seq), "not a save");
+        const bytes = new TextEncoder().encode("not a save");
+        await this.env.BLOBS.put(saveKey(d.door, s.generation, s.seq), bytes);
+        this.ctx.storage.sql.exec("UPDATE saves SET sha = ?, bytes = ? WHERE generation = ? AND seq = ?", await sha256Hex(bytes), bytes.length, s.generation, s.seq);
         if (this.ctx.container?.running) await this.ctx.container.destroy();
         return json({ corrupted: `${s.generation}-${s.seq}` });
       }

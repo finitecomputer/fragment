@@ -341,11 +341,13 @@ async fn main() {
 
     let (to, mut rx) = mpsc::channel::<Msg>(MSGS_MAX);
     // its door's calls first, so it sees the runner come up (each answered
-    // 503 until the link is up); held for the runner's life
+    // 503 until the link is up, at once while its save restores and its
+    // core starts: never left waiting); held for the runner's life
     let (_stop_tx, stop_rx) = watch::channel(false);
     let listener = tokio::net::TcpListener::bind(env("DOOR_HTTP", "0.0.0.0:8080")).await.expect("the runner's port");
-    let asks = to.clone();
-    tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), req), stop_rx));
+    let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (asks, open) = (to.clone(), looping.clone());
+    tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), open.clone(), req), stop_rx));
 
     let (mut kept, door_mark, behind, life) = restore(&door, &dir).await;
     // kept at its owner's word: its link bound to their contact, as their
@@ -394,6 +396,7 @@ async fn main() {
         let _ = term.send(Msg::Stop("sigterm")).await;
     });
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    looping.store(true, std::sync::atomic::Ordering::Release);
     // bounded by the runner's life: it ends by `exit`
     loop {
         tokio::select! {
@@ -1474,8 +1477,13 @@ impl Runner {
     }
 }
 
-/// The door's calls, to the loop.
-async fn handle(to: mpsc::Sender<Msg>, req: Request<Incoming>) -> Response<Body> {
+/// The door's calls, to the loop: refused at once (503) before it runs,
+/// as it is up no sooner (a restore asked again, as a copy damaged on its
+/// way is, may take a while).
+async fn handle(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic::AtomicBool>, req: Request<Incoming>) -> Response<Body> {
+    if !looping.load(std::sync::atomic::Ordering::Acquire) {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "the door is starting or stopping");
+    }
     let mark = req.headers().get(door::MARK_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     let asked = match (req.method().as_str(), req.uri().path(), mark) {
         ("GET", "/state", _) => Asked::State,
@@ -1799,7 +1807,8 @@ mod tests {
         let url = format!("http://{}/reply", listener.local_addr().unwrap());
         let (to, mut asks) = mpsc::channel::<Msg>(4);
         let (_stop, stop_rx) = watch::channel(false);
-        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), req), stop_rx));
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), looping.clone(), req), stop_rx));
         // whatever reaches the runner is answered as taken, and kept
         let taken = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let kept = taken.clone();
@@ -1824,6 +1833,33 @@ mod tests {
         let sent = send(whole, Some(&sha)).await.unwrap();
         assert_eq!((damaged.status(), unnamed.status(), sent.status()), (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::UNPROCESSABLE_ENTITY, StatusCode::OK));
         assert_eq!(*taken.lock().unwrap(), ["hello"], "only the whole reply reaches the runner");
+    }
+
+    /// Goal: its door's calls are answered at once while its save restores
+    /// (asked again, as a copy damaged on its way is) and its core starts:
+    /// 503, never left waiting (its door's state read hung 60 s on one in
+    /// the e2e), then taken once its loop runs. Method: the runner's own
+    /// server, its loop not yet running, then running.
+    #[tokio::test]
+    async fn its_doors_calls_are_answered_at_once_before_it_runs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/state", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open = looping.clone();
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), open.clone(), req), stop_rx));
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let ask = || client.request(Request::get(&url).body(http_body_util::Full::new(Bytes::new())).unwrap());
+        let early = tokio::time::timeout(Duration::from_secs(2), ask()).await.expect("answered at once, never left waiting").unwrap();
+        assert_eq!(early.status(), StatusCode::SERVICE_UNAVAILABLE);
+        looping.store(true, std::sync::atomic::Ordering::Release);
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::State, tx)) = asks.recv().await {
+                let _ = tx.send(answer(StatusCode::OK, "{}"));
+            }
+        });
+        assert_eq!(ask().await.unwrap().status(), StatusCode::OK, "taken once its loop runs");
     }
 
     #[test]
