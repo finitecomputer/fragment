@@ -134,7 +134,10 @@ function container() {
     fetch: async (url, init) => {
       c.asked.push({ method: init.method, path: new URL(url).pathname, mark: Number(init.headers["x-door-mark"]), body: init.body ? JSON.parse(init.body) : null, sha: init.headers["x-door-sha256"] });
       const next = c.answers.shift() ?? [202, { done: false }];
-      const [status, body, named = hex(JSON.stringify(body))] = typeof next === "function" ? await next() : next;
+      const answered = typeof next === "function" ? await next() : next;
+      // one given whole (a body cut as it is read)
+      if (answered instanceof Response) return answered;
+      const [status, body, named = hex(JSON.stringify(body))] = answered;
       return new Response(JSON.stringify(body), { status, headers: named === null ? {} : { "x-door-sha256": named } });
     },
   });
@@ -492,6 +495,18 @@ test("a state read its door's end overtakes as it waits for its runner answers e
   });
   const r = await d.lever("state");
   assert.equal(r.status, 410, await r.clone().text());
+  // its runner's answer cut as its body is read, its container destroyed
+  // by the end: as ended too
+  const { d: e } = await saved();
+  const cut_body = new ReadableStream({
+    async pull(c) {
+      assert.equal((await e.end()).status, 200);
+      c.error(new Error("its container destroyed as it answered"));
+    },
+  });
+  e.c.answers.push(async () => new Response(cut_body, { status: 200, headers: { "x-door-sha256": "0".repeat(64) } }));
+  const cut = await e.lever("state");
+  assert.equal(cut.status, 410, await cut.clone().text());
 });
 
 test("its end ends it: no last save, every file under its prefix gone, its storage whole gone, its watch let go; asked again, the same", async () => {

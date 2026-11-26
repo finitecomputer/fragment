@@ -548,8 +548,12 @@ export class SimplexDoor extends DurableObject {
   async #state() {
     let runner = null;
     if (this.ctx.container?.running) {
-      const r = await this.#runner("GET", "/state");
-      runner = r.ok ? await r.json().catch(() => null) : null;
+      // its answer cut as its end destroyed its container: as ended, below
+      const r = await this.#runner("GET", "/state").catch((e) => {
+        if (this.#ended || this.#over) return null;
+        throw e;
+      });
+      runner = r?.ok ? await r.json().catch(() => null) : null;
     }
     // ended as it waited (its connector's delete ends it), or before (the
     // move's `/door/state` comes ahead of that refusal): its tables gone
