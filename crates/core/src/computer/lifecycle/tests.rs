@@ -1407,11 +1407,10 @@ fn a_disks_stop_kept_for_its_final_flush_is_never_its_owners_time() {
     let stop = slept + 500;
     let s = l.apply(Event::Held { generation: g, held: true }, stop);
     assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: true, .. })).count(), 1, "{s:?}");
-    let metered: Vec<(i64, i64)> = |acts: &[Action]| -> Vec<(i64, i64)> { acts.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect() }(&s.actions);
+    let meters = |acts: &[Action]| -> Vec<(i64, i64)> { acts.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect() };
     let end = stop + 20 * 60_000;
     let gone = l.apply(Event::Asleep { generation: g }, end);
-    let after: Vec<(i64, i64)> = gone.actions.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect();
-    let all: Vec<(i64, i64)> = metered.into_iter().chain(after).collect();
+    let all: Vec<(i64, i64)> = meters(&s.actions).into_iter().chain(meters(&gone.actions)).collect();
     assert!(all.iter().all(|(_, to)| *to <= stop), "nothing metered past its stop's beginning: {all:?}");
     assert!(matches!(l.phase, Phase::Asleep { .. }), "{:?}", l.phase);
 }
