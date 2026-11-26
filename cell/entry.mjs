@@ -666,12 +666,15 @@ class ContainerHost {
   }
 
   // Start `generation`'s reads of R2's copy of each of `records`, begun
-  // with its first restore, each within `ms` (a start's after a failed
-  // one, computer.rs `try_start`): a record's restore uses its verdict, so
-  // a copy damaged in R2 is found even when the restores before it leave
-  // no time to read it after. Answers at once.
+  // with its first restore, all within `ms` of now, the start's own bound
+  // for its restores (a start's after a failed one, computer.rs
+  // `try_start`): a record's restore uses its verdict, so a copy damaged in
+  // R2 is found even when the restores before it leave no time to read it
+  // after. Answers at once.
   checkAhead(generation, records, ms) {
-    const verdicts = new Map(records.map((record) => [record.id, verdictOf(record, () => this.#stored(record, ms))]));
+    const until = Date.now() + ms;
+    const left = () => Math.max(1, until - Date.now());
+    const verdicts = new Map(records.map((record) => [record.id, verdictOf(record, () => this.#stored(record, left()))]));
     this.#ahead = { generation, verdicts };
   }
 
