@@ -94,7 +94,8 @@ test("a copy found bad is heard whatever else a try failed by: its time, or a tr
   assert.match((await pending.run()).unusable, /^BACKUP_TRANSFER: gateway connection failed; R2's copy holds 100 bytes/);
   // a copy not found bad: the failure as it came
   await assert.rejects(restores([DAMAGED, transfer], [{ late: whole }]).run(), /BACKUP_TRANSFER/);
-  await assert.rejects(restores([DAMAGED, overdue], [whole]).run(), /no answer within 1 ms/);
+  // its time ran out after damage, its copy whole: unconfirmed (a start after a failed one sets it aside)
+  assert.match((await restores([DAMAGED, overdue], [whole]).run()).unconfirmed, /no answer within 1 ms, after its bytes came damaged; R2's copy whole/);
 });
 
 test("a read of R2's copy damaged on its own way condemns nothing: the restore is asked again", async () => {
@@ -161,14 +162,16 @@ test("a restore that runs out of tries or time, damaged, its copy proven neither
   // its time ran out after damage, its read still not in
   const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
   const late = restores([DAMAGED, overdue], [fails]);
-  assert.match((await late.run()).unconfirmed, /^the restore of \/data: no answer within 1 ms; R2's copy unread/);
-  // its time ran out before any damage: a plain failure, as master's
+  assert.match((await late.run()).unconfirmed, /^the restore of \/data: no answer within 1 ms, after its bytes came damaged; R2's copy unread/);
+  // its time ran out before any damage: a plain failure, as master's, even
+  // with its copy's read under way and unread (a start after a failed one)
   await assert.rejects(restores([overdue], [whole]).run(), /no answer within 1 ms/);
+  await assert.rejects(restores([overdue], [fails], true).run(), /no answer within 1 ms/);
 });
 
-test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {
+test("a restore that keeps coming in damaged is asked a bounded number of times and is unconfirmed, its save never unusable", async () => {
   const { seen, run } = restores([DAMAGED], [whole]);
-  await assert.rejects(run(), new RegExp(`the restore of /data came in damaged ${RESTORE_TRIES} times, R2's copy whole: BACKUP_INTEGRITY`));
+  assert.match((await run()).unconfirmed, new RegExp(`the restore of /data came in damaged ${RESTORE_TRIES} times, R2's copy whole: BACKUP_INTEGRITY`));
   assert.ok(RESTORE_TRIES >= 3, "damage in transit is asked again at least twice");
   assert.equal(seen.restores, RESTORE_TRIES);
   assert.equal(seen.reads, 1, "R2's copy is read once a start once found whole, not once a try");

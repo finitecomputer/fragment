@@ -468,9 +468,9 @@ enum Unstarted {
     /// The save's restore found no room on its disk
     /// (`fragment_core::computer::restore_found_no_room`).
     NoRoom(String),
-    /// A start after a failed one: the save's restore came in damaged, and
-    /// R2's copy could be proven neither whole nor bad in its time
-    /// (backups.mjs `restoreChecked`'s `{unconfirmed}`).
+    /// A start after a failed one: the save's restore kept coming in
+    /// damaged, R2's copy not proven bad (backups.mjs `restoreChecked`'s
+    /// `{unconfirmed}`).
     Unconfirmed(String),
     /// It came up, and its guest never read its view within its wait: a
     /// container Cloudflare restored from a snapshot dead (#362), answered
@@ -1825,8 +1825,8 @@ impl ComputerCell {
                 // It is set aside, kept and exportable, and the save before
                 // it is next, at once and no strike; with none older, a
                 // strike as any failed start, its save kept current. A save
-                // whose restore came damaged, its copy in R2 proven neither
-                // whole nor bad, is so too (FIN-784), never found unusable
+                // whose restore kept coming damaged, its copy in R2 not
+                // proven bad, is so too (FIN-784), never found unusable
                 let (too_big, why) = match unstarted {
                     Unstarted::NoRoom(why) => (true, why),
                     Unstarted::Unconfirmed(why) => (false, why),
@@ -1840,7 +1840,7 @@ impl ComputerCell {
                 for record in set.ok().flatten().unwrap_or_default() {
                     console_error!("{}", json!({ "computer": self.meta(MetaKey::Id).ok().flatten(), "unforgotten": record["id"] }));
                 }
-                let _ = self.destroy(generation, if too_big { "its save did not fit its disk" } else { "its save's restore came damaged, its copy unproven" }).await;
+                let _ = self.destroy(generation, if too_big { "its save did not fit its disk" } else { "its save's restore kept coming damaged" }).await;
                 Event::RestoreFailed { generation, why, older }
             }
             Err(Unstarted::Failed(e)) if from == RestoreSource::Snapshot => {

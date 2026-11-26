@@ -690,8 +690,8 @@ impl Saves {
     }
 
     /// The save `id`'s restore came in damaged at each try a start after a
-    /// failed one gave it, and R2's own copy could be read neither whole nor
-    /// bad in its time (FIN-784): set aside as one too big for its disk is
+    /// failed one gave it, R2's own copy not proven bad (FIN-784): set aside
+    /// as one too big for its disk is
     /// (`too_big`), never found unusable, so its next start restores the one
     /// before it at once, no strike, and an operator may still choose it.
     /// None, nothing changed, with no older save left (or `id` not current).
@@ -1269,8 +1269,8 @@ mod tests {
         s.let_go(rec("a"));
     }
 
-    /// Goal (FIN-784): a save whose restore came damaged and whose copy in
-    /// R2 could be proven neither whole nor bad is set aside, as one too big
+    /// Goal (FIN-784): a save whose restore kept coming damaged, its copy in
+    /// R2 not proven bad, is set aside, as one too big
     /// is, but not as too big and never unusable: kept, its next start
     /// restores the one before. Valid (an older save left), invalid (none
     /// left, or not the current save: nothing changed).

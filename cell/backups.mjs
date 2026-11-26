@@ -50,13 +50,13 @@ export function verdictOf(record, stored) {
 // verdict is used once it is in, and awaited only once no try is left (the
 // last came damaged, or one failed otherwise). Answers null once restored, or
 // `{unusable}` when R2's own copy is not its record: the save never will
-// restore; or `{unconfirmed}` when its tries ran out (or its time, after
-// damage) with R2's copy read neither whole nor bad (a CPU or time limit on
-// a very large one, or R2 failing it): the cell fails a first start so, and
-// sets the save aside at a start after a failed one, never condemning it.
-// Throws once `RESTORE_TRIES` came in damaged while R2's copy was whole (a
-// failed start, which may pass: the save is kept), and whatever `restore`
-// throws.
+// restore; or `{unconfirmed}` when its tries ran out damaged (or its time,
+// after this record came damaged) with R2's copy not proven bad (whole,
+// the damage the transfer's; or read neither whole nor bad: a CPU or time
+// limit on a very large one, or R2 failing it): the cell fails a first
+// start so, one that may pass, and at a start after a failed one sets the
+// save aside, never condemning it, so no computer is stuck on it. Throws
+// whatever `restore` throws but damage.
 export async function restoreChecked({ record, restore, stored, again = () => {}, ahead = null }) {
   // a read of R2's copy under way or done (it never rejects), and its
   // verdict once in: {bad}, {unread} or {} (whole)
@@ -67,6 +67,8 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
     checking = under.then((v) => (verdict = v));
   };
   if (ahead !== null) check(ahead);
+  // whether this record came in damaged at a try of this start
+  let came = false;
   for (let tried = 1; ; tried++) {
     let damaged;
     try {
@@ -75,28 +77,30 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
       // a try that failed otherwise ends the start: a read under way is
       // awaited (within the start's own bound, as the try was), and a copy
       // found bad heard, so the start goes back at once, no strike; one cut
-      // off by its time after damage, its copy not found whole, unconfirmed
+      // off by its time after this record came damaged, unconfirmed (a
+      // timeout alone is no damage)
       const v = checking !== null ? await checking : verdict;
       if (v?.bad) return { unusable: `${e?.message ?? e}; ${v.bad}` };
-      if (checking !== null && e?.name === "Overdue" && !whole(v)) return { unconfirmed: `${e.message}; R2's copy ${v?.unread ? `unread: ${v.unread}` : "unread in its time"}` };
+      if (came && e?.name === "Overdue") return { unconfirmed: `${e.message}, after its bytes came damaged; R2's copy ${copyIs(v)}` };
       throw e;
     }
     if (damaged === null) return null;
+    came = true;
     const last = tried >= RESTORE_TRIES;
     const v = last && checking !== null ? await checking : verdict;
     if (v?.bad) return { unusable: `${damaged}; ${v.bad}` };
     if (v?.unread) damaged = `${damaged}; R2's copy unread: ${v.unread}`;
-    if (last && !whole(v)) return { unconfirmed: `the restore of ${record.dir} came in damaged ${tried} times, R2's copy unread: ${damaged}` };
-    if (last) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy whole: ${damaged}`);
+    if (last) return { unconfirmed: `the restore of ${record.dir} came in damaged ${tried} times, R2's copy ${copyIs(v)}: ${damaged}` };
     // the first that came damaged, or a read that failed: read beside the next try
     if (checking === null || v?.unread) check();
     again(tried, damaged);
   }
 }
 
-// Whether a verdict found R2's copy whole.
-function whole(v) {
-  return v !== null && v !== undefined && !v.bad && !v.unread;
+// What a verdict found R2's copy to be, in words.
+function copyIs(v) {
+  if (v === null || v === undefined) return "unread in its time";
+  return v.unread ? `unread: ${v.unread}` : "whole";
 }
 
 // Reads of R2's copy in all while one fails (R2 refused it, say), each

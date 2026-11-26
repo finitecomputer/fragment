@@ -107,8 +107,8 @@ pub enum Failed {
     Unusable,
     /// Its save's restore found no room on its disk (`Saves::too_big`).
     NoRoom,
-    /// Its save's restore came in damaged, and R2's copy could be proven
-    /// neither whole nor bad in its time (`Saves::unconfirmed`).
+    /// Its save's restore kept coming in damaged, R2's copy not proven bad
+    /// (`Saves::unconfirmed`).
     Unconfirmed,
     /// Its container stopped before it came up.
     Exit,
