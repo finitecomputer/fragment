@@ -176,7 +176,7 @@ pub fn until_of(text: &str) -> Option<i64> {
 /// its ask go as another claims it: cell/src/asks.rs).
 pub fn heard_by<'a>(body: &str, from_agent: bool, agents: &[&'a str]) -> Vec<&'a str> {
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
-    let to: Vec<&str> = v.get("to").and_then(|t| t.as_array()).map(|t| t.iter().filter_map(|a| a.as_str()).collect()).unwrap_or_default();
+    let to = to_of(&v);
     if !to.is_empty() {
         return agents.iter().copied().filter(|a| to.contains(a)).collect();
     }
@@ -188,6 +188,16 @@ pub fn heard_by<'a>(body: &str, from_agent: bool, agents: &[&'a str]) -> Vec<&'a
         return agents.to_vec();
     }
     agents.first().copied().into_iter().collect()
+}
+
+/// Whom a record's body names in its `to` (none: no one in particular).
+pub fn named(body: &str) -> Vec<String> {
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    to_of(&v).into_iter().map(str::to_string).collect()
+}
+
+fn to_of(v: &serde_json::Value) -> Vec<&str> {
+    v.get("to").and_then(|t| t.as_array()).map(|t| t.iter().filter_map(|a| a.as_str()).collect()).unwrap_or_default()
 }
 
 /// Whether `text` @-mentions anyone, as a bridge reads a mention: an `@`
@@ -417,6 +427,8 @@ mod tests {
         assert_eq!(heard_by(r#"{"text":"over to you"}"#, true, &agents), Vec::<&str>::new(), "an agent's words are to whom `to` names alone");
         assert_eq!(heard_by(r#"{"text":"over","to":["npub1maple"]}"#, true, &agents), vec!["npub1maple"]);
         assert_eq!(heard_by(r#""hi""#, false, &[]), Vec::<&str>::new(), "no agents, no one");
+        assert_eq!(named(r#"{"text":"hi","to":["npub1maple"]}"#), vec!["npub1maple".to_string()]);
+        assert!(named(r#"{"text":"@maple hi"}"#).is_empty(), "a mention names no one in `to`");
     }
 
     /// Goal (FIN-720): a mandate's own day is read back from its text, as

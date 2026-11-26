@@ -85,9 +85,10 @@ struct Sign {
     fragment: Option<String>,
 }
 
-/// The `life` of a turn its place told (`turns_in`): the rows the egress
-/// reads. A row a bridge told before (named by its bridge's life) is no
-/// one's word now: read by none, and gone at the next place's word.
+/// The `life` of a turn its place told (`turns_in`). A row a bridge told
+/// before this release (named by its bridge's life) is read too, so a turn
+/// running across the deploy stays held, until its bridge ends it or a new
+/// bridge life takes over (`turns`): no new one is taken.
 const PLACE_OPENED: &str = "";
 
 /// An open turn as its row holds it (`turns`, Fragment step 15).
@@ -213,12 +214,13 @@ impl FragmentCell {
         Ok(Grants { lend: self.lent_now().await?, ..grants })
     }
 
-    /// Its open turns' rows, as its places told them (`turns_in`), and not
-    /// yet past `limits::TURN_HELD_MS`.
+    /// Its open turns' rows, as its places told them (`turns_in`), and a
+    /// bridge before them (`PLACE_OPENED`), not yet past
+    /// `limits::TURN_HELD_MS`.
     fn turn_rows(&self, now: i64) -> CellResult<Vec<TurnRow>> {
         self.typed(
-            "SELECT place, asker, mandate FROM turns WHERE life = ? AND at >= ? AND until > ? ORDER BY turn LIMIT ?",
-            vec![PLACE_OPENED.into(), SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
+            "SELECT place, asker, mandate FROM turns WHERE at >= ? AND until > ? ORDER BY turn LIMIT ?",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
         )
     }
 
@@ -244,8 +246,8 @@ impl FragmentCell {
             return Ok(());
         }
         let now = js::now_ms();
-        self.exec("DELETE FROM turns WHERE at < ? OR until <= ? OR life != ?", vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), PLACE_OPENED.into()])?;
-        self.exec("DELETE FROM turns WHERE place = ?", vec![t.place.as_str().into()])?;
+        self.exec("DELETE FROM turns WHERE at < ? OR until <= ?", vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now)])?;
+        self.exec("DELETE FROM turns WHERE place = ? AND life = ?", vec![t.place.as_str().into(), PLACE_OPENED.into()])?;
         let others = self.count_of("SELECT COUNT(*) AS n FROM turns", vec![])?;
         let mut turns = t.turns;
         if others + turns.len() as u64 > limits::TURNS_HELD_MAX as u64 {
@@ -255,7 +257,8 @@ impl FragmentCell {
         }
         for p in turns {
             self.exec(
-                "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (turn) DO NOTHING",
+                "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, life = excluded.life, at = excluded.at",
                 vec![p.turn.as_str().into(), t.place.as_str().into(), p.asker.as_str().into(), p.mandate.map_or(SqlStorageValue::Null, Into::into), SqlStorageValue::Integer(p.until), PLACE_OPENED.into(), SqlStorageValue::Integer(now)],
             )?;
         }
@@ -265,12 +268,19 @@ impl FragmentCell {
         )
     }
 
-    /// `computer/turns`, as a bridge from before tells its turns: taken,
-    /// and nothing changes. Whose ask a turn is is its place's to say
-    /// (`turn_opened`), never its computer's (FIN-720); the route goes once
-    /// no computer runs a bridge that calls it (FIN-615 PR 8).
-    fn turns(&self) -> Value {
-        json!({ "ok": true })
+    /// `computer/turns`, as a bridge tells its turns: whose ask a turn is
+    /// is its place's to say (`turns_in`), never its computer's (FIN-720),
+    /// so nothing it opens is taken. Its end of a turn it told before this
+    /// release, or a new life's taking of them, lets those go
+    /// (`PLACE_OPENED`), and no place's. The route goes once no computer
+    /// runs a bridge that calls it (FIN-615 PR 8).
+    fn turns(&self, body: &Value) -> CellResult<Value> {
+        match body["op"].as_str() {
+            Some("close") => self.exec("DELETE FROM turns WHERE turn = ? AND life != ?", vec![body["turn"].as_str().unwrap_or("").into(), PLACE_OPENED.into()])?,
+            Some("take") => self.exec("DELETE FROM turns WHERE life != ?", vec![PLACE_OPENED.into()])?,
+            _ => {}
+        }
+        Ok(json!({ "ok": true }))
     }
 
     /// The request its computer's egress signs for this agent (FIN-720):
@@ -284,9 +294,13 @@ impl FragmentCell {
     /// URL and the mandate it carries.
     fn asked(&self, method: &str, at: &str, fragment: Option<&str>) -> CellResult<(String, Option<String>)> {
         let url = url::Url::parse(at).map_err(|e| CellError::invalid(format!("url: {e}")))?;
+        // a fragment's site is signed at its own origin: its path as the
+        // guest asked for it, `/f/<fragment>/…`, is what the rules read
+        let site = fragment.filter(|_| !url.path().starts_with("/api/"));
+        let path = site.map_or_else(|| url.path().to_string(), |f| format!("/f/{f}{}", url.path()));
         let owner = self.must(MetaKey::Owner)?;
         let for_owner = url.query_pairs().any(|(k, v)| k == "for" && npub::display(&v) == npub::display(&owner));
-        if !for_owner && mandate::presence(method, url.path(), &self.name()?) {
+        if !for_owner && mandate::presence(method, &path, &self.name()?) {
             return Ok((at.to_string(), None));
         }
         let now = js::now_ms();
@@ -297,11 +311,25 @@ impl FragmentCell {
         // platform's route takes `for` and no mandate (the registry's
         // `invitee_by`), so its owner's own ask keeps `for` there, and no
         // one else's goes (a fragment's own route of that name is its app's)
-        let path = url.path();
         if for_owner && fragment.is_none() && (path == "/api/invites" || path.starts_with("/api/invites/")) {
             return match proof {
                 Proof::Bare | Proof::Owner(_) => Ok((at.to_string(), None)),
                 Proof::Asker { .. } | Proof::Itself(_) => Err(CellError::new(ErrorCode::Forbidden, "an agent answers its owner's invites for its owner alone, never on someone else's ask")),
+            };
+        }
+        // a fragment's site (`/f/…`) takes no one's word but its signer's
+        // (`for` and a mandate are not honored there, lib.rs): on someone
+        // else's ask it is reached only as the agent itself, in their
+        // turns' places
+        if site.is_some() {
+            return match proof {
+                Proof::Bare | Proof::Owner(_) => Ok((at.to_string(), None)),
+                Proof::Itself(places) if fragment.is_some_and(|f| places.contains(&f)) => Ok((at.to_string(), None)),
+                Proof::Asker { at: places, .. } if fragment.is_some_and(|f| places.iter().any(|(p, _)| *p == f)) => Ok((at.to_string(), None)),
+                Proof::Asker { .. } | Proof::Itself(_) => Err(CellError::new(
+                    ErrorCode::Forbidden,
+                    "on someone else's ask, an agent reaches a fragment's site only in the chats they asked it in: call its API (/api/f/…) to act as them",
+                )),
             };
         }
         match proof {
@@ -407,7 +435,7 @@ impl FragmentCell {
             "turns" => {
                 let body: Value = crate::json_body(body)?;
                 self.assigned_to(body["computer"].as_str().unwrap_or(""))?;
-                Ok(self.turns())
+                self.turns(&body)
             }
             // an agent's door (fragment_core::door): its owner's ticket, and
             // the guest's redeeming of a link's (a relayed record's check is

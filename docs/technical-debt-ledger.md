@@ -740,11 +740,14 @@ unfinished design, not debt.
 ## A computer's turns route is answered and ignored
 
 - **Shortcut:** `/api/computer/turns` and the bridge's `driver::Turns`
-  that calls it stay, answered `{ok: true}` and changing nothing, while
-  computers run images whose bridge tells its turns.
-- **Risk:** none to whose ask a call is: a call a turn, and code nothing
-  reads. **Delete when:** every computer runs an image whose bridge no
-  longer calls it (FIN-615 PR 8, with bare `for=`).
+  that calls it stay while computers run images whose bridge tells its
+  turns: what it opens is not taken, and its end of a turn it told
+  before place-opened turns still ends that turn, so a turn running
+  across that deploy stays held (cell/src/runs_on.rs `turns`).
+- **Risk:** a computer can end early only the turns it told before that
+  release, as it could then; a call a turn, and code nothing else reads.
+  **Delete when:** every computer runs an image whose bridge no longer
+  calls it (FIN-615 PR 8, with bare `for=`).
 
 ## A paid call's charge is best effort
 

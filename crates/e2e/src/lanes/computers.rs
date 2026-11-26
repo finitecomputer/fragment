@@ -84,7 +84,7 @@ const ASKER_CHECKS: &[&str] = &[
     "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
     "its computer's word on its turns is no longer taken (the place opens them): told on the old route that their turn ended, its call for its owner on their ask still goes as them",
     "nor that their turn is its owner's: its call for its owner on their ask still goes as them",
-    "on their ask, its call as itself is held to them too: refused in its owner's app where they are no member, though the agent is; its owner's same ask goes, as the agent",
+    "on their ask, its call as itself is held to them too: refused in its owner's app where they are no member, though the agent is, by its API and by its site; its owner's same asks go, as the agent",
     "fail closed, never lost: while the agent's fragment refuses the chat's word, their ask is not handed to the agent (the chat's events say so); once it takes it, it is answered, as theirs",
 ];
 
@@ -245,10 +245,14 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let itself = |id: &str| format!("fetch http://api.fragment.internal/api/f/{private}/ops/whoami with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
     let bens = asked_by_ben(s, 13, &itself("itself-ben"))?;
     let owners = asked_by(s, w.owner, "owner-itself", &itself("itself-owner"))?;
+    // its site's operation, which takes its signer's word alone
+    let on_site = |id: &str| format!("fetch http://api.fragment.internal/f/{private}/__op/whoami with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    let bens_site = asked_by_ben(s, 15, &on_site("site-ben"))?;
+    let owners_site = asked_by(s, w.owner, "owner-site", &on_site("site-owner"))?;
     s.ok(
         ASKER_CHECKS[10],
-        !bens.starts_with("fetched 200") && bens.starts_with("fetched 4") && whose(&owners) == json!({ "principal": w.identity, "role": "editor" }),
-        json!({ "ben": bens, "owner": owners }),
+        bens.starts_with("fetched 4") && whose(&owners) == json!({ "principal": w.identity, "role": "editor" }) && bens_site.starts_with("fetched 4") && owners_site.starts_with("fetched 200"),
+        json!({ "ben": bens, "owner": owners, "ben on its site": bens_site, "owner on its site": owners_site }),
     );
 
     // the agent's fragment refuses the chat's word on its turns a while

@@ -619,11 +619,6 @@ impl FragmentCell {
             return Err(CellError::too_large("a record's body", size, limits::RECORD_BODY_MAX_BYTES));
         }
         self.door_checked(caller, &facts.name, channel, id, body).await?;
-        // an agent's claim of someone else's ask is taken once its agent
-        // fragment holds it (asks.rs)
-        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
-            self.claim_noted(&agent.id, channel, body).await?;
-        }
         // where the post waited, step by step: one line a post
         let mut laps = js::Laps::start();
         // a post is a write: past its owner's overdraft the fragment takes none
@@ -646,6 +641,13 @@ impl FragmentCell {
             None => (self.posted(&key, channel, body)?, false),
         };
         laps.lap("append");
+        // an agent's claim of a record here, taken, opens its ask again, and
+        // is answered once its agent fragment holds it (asks.rs): until then
+        // 502, and its retry finds the claim and asks again
+        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
+            self.claim_noted(&agent.id, channel, body).await?;
+            laps.lap("claim");
+        }
         // A retry finishes what the first try left undone for as long as a
         // mutation's effects are tried again; later, the runs it started may
         // be forgotten, and it would start them twice.

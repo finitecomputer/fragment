@@ -224,8 +224,9 @@ told again from the alarm. Its owner's own asks narrow nothing (decision
 64) and wait for nothing. A hand-off (one of its owner's agents' words in
 a turn of its own) carries on that turn's ask there; another agent's
 words are its own, unproven. An agent removed has its asks there closed.
-A computer's own word on its turns (`/api/computer/turns`) is answered
-and changes nothing.
+A computer's own word on its turns (`/api/computer/turns`) opens nothing;
+a turn it told before the release that brought this one still holds, until
+its bridge ends it or a new bridge life starts.
 
 **Every call that is not its presence is held** to those turns. The
 egress signs the agent's presence in its chats as it came
@@ -241,7 +242,10 @@ each proven, their newest mandate in place of `for` (refused, 400, where
 `for` is not honored); more than one other person's, or one unproven,
 the agent as itself in those turns' places alone, and 403 anywhere else.
 The invites waiting on its owner's email take `for` and no mandate:
-there its owner's own ask keeps `for`, and anyone else's is 403. Since
+there its owner's own ask keeps `for`, and anyone else's is 403. A
+fragment's site (`/f/…`) takes neither `for` nor a mandate (one is 400
+there): on someone else's ask the agent reaches one only in their turns'
+places, as itself, and 403 anywhere else. Since
 decision 64 an agent's own memberships mirror its owner's, so acting as
 itself elsewhere would reach what is its owner's for someone it cannot
 name. A mandate names whose ask a turn is, whatever its bridge says (a

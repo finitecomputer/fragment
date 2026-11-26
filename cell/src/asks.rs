@@ -15,7 +15,7 @@
 //!   (a page after its cursor, a subscribe's catch-up). Each is handed
 //!   once; a read back hands nothing. Words its computer has not been
 //!   given yet (it sleeps) hold it to nothing.
-//! - **A claim** (`claim_noted`, before its append): the agent's
+//! - **A claim** (`claim_noted`, once its append is taken): the agent's
 //!   `turn.start` on `work` for a record here opens that record's ask
 //!   again, as the record says whose it is, and names the turn; the other
 //!   agents' asks of it that they never claimed close.
@@ -75,15 +75,20 @@ struct Told {
     attempts: i64,
 }
 
-/// An open ask, as told (`asks`).
+/// An asker's open asks of an agent, as told (`asks`): its newest, and
+/// until when the last of them holds.
 #[derive(Deserialize)]
 struct Open {
-    channel: String,
-    seq: i64,
     asker: String,
+    seq: i64,
+    until: i64,
+}
+
+/// One ask's proof and time.
+#[derive(Deserialize)]
+struct Proved {
     proven: i64,
     at: i64,
-    until: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -172,6 +177,12 @@ impl FragmentCell {
             if asker == agent {
                 continue;
             }
+            // one its words did not name (`to`) that another agent claimed
+            // already was not for it: its own claim opens it all the same
+            let claimed = || self.rows("SELECT 1 AS x FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NOT NULL LIMIT 1", vec![CHAT.into(), SqlStorageValue::Integer(r.seq), agent.as_str().into()]);
+            if !mandate::named(r.body.get()).contains(&agent) && !claimed()?.is_empty() {
+                continue;
+            }
             self.exec(
                 "INSERT INTO asks (agent, channel, seq, asker, proven, at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
                 vec![agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(r.seq), asker.as_str().into(), SqlStorageValue::Integer(i64::from(proven)), SqlStorageValue::Integer(r.at)],
@@ -204,10 +215,12 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Before a post's append (channels.rs `post`): an agent's claim of a
-    /// record here (its `turn.start` on `work`) opens that record's ask
-    /// again, whoever's the record says it is, naming the turn; its claim
-    /// of someone else's is taken only once its agent fragment holds it.
+    /// After a post's append (channels.rs `post`): an agent's claim of a
+    /// record here (its `turn.start` on `work`), taken (a claim refused,
+    /// another life's under that id, opens nothing), opens that record's
+    /// ask again, whoever's the record says it is, naming the turn; its
+    /// claim of someone else's is answered only once its agent fragment
+    /// holds it.
     pub(crate) async fn claim_noted(&self, agent: &str, channel: &str, body: &Value) -> CellResult<()> {
         if channel != WORK || body["kind"] != "turn.start" {
             return Ok(());
@@ -217,6 +230,10 @@ impl FragmentCell {
         let agent = npub::display(agent);
         let members = self.agent_members()?;
         let Some(m) = members.iter().find(|m| npub::display(&m.principal) == agent) else { return Ok(()) };
+        let said: Vec<Said> = self.typed("SELECT principal, author, asker, at, body FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?;
+        // one gone (trimmed): nothing to open
+        let Some(s) = said.into_iter().next() else { return Ok(()) };
+        let named = mandate::named(&s.body);
         let rows: Vec<Claimed> = self.typed("SELECT asker, turn, until FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(seq)])?;
         let (asker, changed) = match rows.into_iter().next() {
             Some(c) if c.turn.as_deref() == Some(turn) && c.until.is_none() => (c.asker, false),
@@ -228,9 +245,10 @@ impl FragmentCell {
                 (c.asker, true)
             }
             None => {
-                let said: Vec<Said> = self.typed("SELECT principal, author, asker, at, body FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?;
-                // one gone (trimmed), said before it joined, or no one's (app code's): nothing to open
-                let Some(s) = said.into_iter().next().filter(|s| s.at >= m.added_at) else { return Ok(()) };
+                // said before it joined, or no one's (app code's): nothing to open
+                if s.at < m.added_at {
+                    return Ok(());
+                }
                 let author = s.author.as_deref().and_then(Author::parse);
                 let Some(asked) = mandate::asked_of(&npub::display(&s.principal), author, s.asker.as_deref(), &s.body) else { return Ok(()) };
                 let (asker, proven) = self.ask_of(&asked, m, &members)?;
@@ -247,18 +265,22 @@ impl FragmentCell {
         if changed {
             self.asks_changed(&agent, !is_owner(m, &asker))?;
         }
-        // the other agents it was handed to and never claimed let it go
-        // (words that mention anyone go to every agent: `heard_by`); one
-        // that claims it after opens it again
+        // the other agents it was handed to, never claimed and not named in
+        // its `to`, let it go (words that mention anyone go to every agent:
+        // `heard_by`); one that claims it after opens it again
         #[derive(Deserialize)]
         struct Let {
             agent: String,
         }
-        let let_go: Vec<Let> = self.typed(
-            "UPDATE asks SET until = MAX(?, at + ?) WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL RETURNING agent",
-            vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(limits::TURN_HOLD_MS), CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
+        let open: Vec<Let> = self.typed(
+            "SELECT agent FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL",
+            vec![CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
         )?;
-        for other in let_go {
+        for other in open.into_iter().filter(|o| !named.contains(&o.agent)) {
+            self.exec(
+                "UPDATE asks SET until = MAX(?, at + ?) WHERE channel = ? AND seq = ? AND agent = ?",
+                vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(limits::TURN_HOLD_MS), CHAT.into(), SqlStorageValue::Integer(seq), other.agent.as_str().into()],
+            )?;
             self.asks_changed(&other.agent, false)?;
         }
         self.asks_settled(&agent).await
@@ -415,25 +437,33 @@ impl FragmentCell {
         let (place, place_key, now) = (self.name()?, self.must(MetaKey::Npub)?, js::now_ms());
         // the version and its asks read in one step, after the awaits above
         let version = self.told_of(&t.agent)?.map_or(t.version, |t| t.version);
+        // one an asker, every asker (past the most an agent fragment holds,
+        // one more, which it holds as no one's)
         let open: Vec<Open> = self.typed(
-            "SELECT channel, seq, asker, proven, at, until FROM asks WHERE agent = ? AND (until IS NULL OR until > ?) AND at >= ? ORDER BY seq DESC LIMIT ?",
-            vec![t.agent.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(4 * limits::TURNS_HELD_MAX)],
+            "SELECT asker, MAX(seq) AS seq, MAX(COALESCE(until, at + ?)) AS until FROM asks WHERE agent = ? AND channel = ? AND (until IS NULL OR until > ?) AND at >= ? GROUP BY asker ORDER BY seq DESC LIMIT ?",
+            vec![
+                SqlStorageValue::Integer(limits::TURN_HELD_MS),
+                t.agent.as_str().into(),
+                CHAT.into(),
+                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(now - limits::TURN_HELD_MS),
+                SqlStorageValue::Integer(limits::TURNS_HELD_MAX + 1),
+            ],
         )?;
-        let keys = if open.iter().any(|o| o.proven == 1) { crate::keys::mandate_keys(&self.env).await? } else { vec![] };
-        let mut turns: Vec<PlaceTurn> = vec![];
+        let mut proved: Vec<Proved> = vec![];
         for o in &open {
-            let until = o.until.unwrap_or(o.at + limits::TURN_HELD_MS);
-            if let Some(p) = turns.iter_mut().find(|p| p.asker == o.asker) {
-                p.until = p.until.max(until);
-                continue;
-            }
-            // past its most, one more: the agent fragment holds that many as no one's
-            if turns.len() > limits::TURNS_HELD_MAX as usize {
-                break;
-            }
-            let mandate = (o.proven == 1).then(|| Mandate::of_record(&o.asker, &t.agent, &place_key, &o.channel, o.seq, o.at)).flatten().map(|m| m.text(&keys[0]));
-            turns.push(PlaceTurn { turn: mandate::turn_id(&fragment, &place, &o.channel, o.seq), asker: o.asker.clone(), mandate, until });
+            let p: Vec<Proved> = self.typed("SELECT proven, at FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![t.agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(o.seq)])?;
+            proved.push(p.into_iter().next().ok_or_else(|| CellError::host("an ask read twice in one step is there both times"))?);
         }
+        let keys = if proved.iter().any(|p| p.proven == 1) { crate::keys::mandate_keys(&self.env).await? } else { vec![] };
+        let turns: Vec<PlaceTurn> = open
+            .iter()
+            .zip(&proved)
+            .map(|(o, p)| {
+                let mandate = (p.proven == 1).then(|| Mandate::of_record(&o.asker, &t.agent, &place_key, CHAT, o.seq, p.at)).flatten().map(|m| m.text(&keys[0]));
+                PlaceTurn { turn: mandate::turn_id(&fragment, &place, CHAT, o.seq), asker: o.asker.clone(), mandate, until: o.until }
+            })
+            .collect();
         crate::fragment::call(&self.env, &fragment, &TurnsIn { agent: t.agent.clone(), place, version, turns }).await?;
         Ok(version)
     }

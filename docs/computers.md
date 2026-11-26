@@ -1027,10 +1027,12 @@ sleep answers within 14 minutes.
     left out), what its mount did, which the start's line takes from its
     first read.
   - `PUT` and `DELETE /api/computer/turns`, as the agent its header
-    names, from a bridge that tells its turns: answered and changing
+    names, from a bridge that tells its turns: answered, and opening
     nothing. Whose ask a turn is is its place's word (docs/api.md, "A
-    place opens its agents' turns"); the route goes once no computer runs
-    an image that calls it (the debt ledger).
+    place opens its agents' turns"); a turn told before that release
+    still holds until its bridge ends it (`DELETE` with its turn) or a
+    new life takes them (`DELETE` with none). The route goes once no
+    computer runs an image that calls it (the debt ledger).
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.
