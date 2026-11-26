@@ -543,15 +543,18 @@ the DO removes them from one started from a snapshot.
   come the right length with the wrong contents on their way into or out
   of a container (FIN-775). The SDK's shim hashes each archive as it makes
   it (its record's SHA-256), but R2 checks a part's length alone. So a
-  record is kept only once R2's own copy hashes to it: one that came out
+  record is kept once R2's own copy hashes to it: one that came out
   damaged is deleted and backed up again, three tries in all, within the
   save's own bound (a failure after them fails the save, tried again as
-  any). A restore whose bytes came damaged (the SDK's `BACKUP_INTEGRITY`)
-  reads R2's copy: when two reads agree it is not its record, the save is
-  unusable, as above; otherwise the restore is asked again, three tries in
-  all, within its own bound, and a start whose tries all came damaged
-  fails as one that may pass, its save kept. A restore that works reads
-  nothing more. R2's copy is read and hashed by the backups' gateway
+  any). A check that cannot be made (R2 failed its read, or the save's
+  time ran out) keeps the record unchecked, as before the check, and logs
+  it: a save that fits its bounds is never failed for want of its check.
+  A restore whose bytes came damaged (the SDK's `BACKUP_INTEGRITY`) reads
+  R2's copy: when two reads agree it is not its record, the save is
+  unusable, as above; otherwise (a read that failed too) the restore is
+  asked again, three tries in all, within its own bound, and a start whose
+  tries all came damaged fails as one that may pass, its save kept. A
+  restore that works reads nothing more. R2's copy is read and hashed by the backups' gateway
   (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
   through the container. Damage before the shim's hash (in the
   container's own reading of its files) is out of reach.

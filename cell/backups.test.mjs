@@ -69,17 +69,18 @@ test("a backup that keeps coming out damaged is tried a bounded number of times,
   assert.equal(seen.again.length, SAVE_TRIES - 1);
 });
 
-test("a backup whose copy cannot be read is deleted, never left without a record, and its save fails", async () => {
-  const forgot = [];
-  const unread = backupChecked({
+test("a backup whose copy cannot be read (storage failed the read, or the save's time ran out) is kept unchecked, as before", async () => {
+  const seen = { forgot: [], unchecked: [] };
+  const unread = await backupChecked({
     backup: async () => record(1),
     stored: async () => {
       throw new Error("the check of record id-1: no answer within 10 ms");
     },
-    forget: async (r) => void forgot.push(r.id),
+    forget: async (r) => void seen.forgot.push(r.id),
+    unchecked: (r, why) => seen.unchecked.push([r.id, why]),
   });
-  await assert.rejects(unread, /no answer within/);
-  assert.deepEqual(forgot, ["id-1"]);
+  assert.deepEqual(unread, record(1), "a save that fits today's bounds is never failed for want of its check");
+  assert.deepEqual(seen, { forgot: [], unchecked: [["id-1", "the check of record id-1: no answer within 10 ms"]] });
 });
 
 test("a backup that fails is not tried again here, nor its copy read: its save fails as before", async () => {
@@ -144,6 +145,29 @@ test("a read of R2's copy damaged on its own way condemns nothing: the restore i
     assert.equal(await run(), null, JSON.stringify(copies));
     assert.deepEqual([seen.restores, seen.reads], [2, 2]);
   }
+});
+
+test("a check of R2's copy that fails condemns nothing: the restore is asked again, and the copy read again after", async () => {
+  // its read throws (storage failed it, or the start's time ran out), then the next try restores
+  const flaky = () => {
+    let reads = 0;
+    return async () => {
+      if (reads++ === 0) throw new Error("R2 internal error, please try again (10001)");
+      return { size: 100, sha256: OTHER };
+    };
+  };
+  let tries = 0;
+  const again = [];
+  const r = record(1);
+  const restored = await restoreChecked({ record: r, restore: async () => (tries++ === 0 ? DAMAGED : null), stored: flaky(), again: (t, why) => again.push([t, why]) });
+  assert.equal(restored, null);
+  assert.equal(tries, 2);
+  assert.match(again[0][1], /^BACKUP_INTEGRITY: .*; R2's copy unread: R2 internal error/);
+  // unread at the first try, read at the second, bad on two reads that agree: unusable then
+  tries = 0;
+  const bad = await restoreChecked({ record: r, restore: async () => (tries++, DAMAGED), stored: flaky() });
+  assert.match(bad.unusable, /R2's copy holds 100 bytes of SHA-256 b{64}/);
+  assert.equal(tries, 2);
 });
 
 test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {

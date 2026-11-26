@@ -9,12 +9,16 @@
 // in, and the shim checks its size and SHA-256 before it swaps anything in.
 // Bytes on either way can come the right length with the wrong contents
 // (FIN-775). So (FIN-784):
-// - a backup is kept only once R2's own copy hashes to its record: one
-//   damaged on its way out is deleted and backed up again;
+// - a backup is kept once R2's own copy hashes to its record: one damaged
+//   on its way out is deleted and backed up again. A check that cannot be
+//   made (storage failed its read, or the save's time ran out) keeps the
+//   record unchecked, as before it: a save that fits its bounds is never
+//   failed for want of its check, so no computer sleeps unsaved for it;
 // - a restore whose bytes came damaged (the SDK's BACKUP_INTEGRITY, a
-//   corrupt archive to a wrong SHA-256) is asked again once R2's own copy
-//   is found to hash to its record; a save is unusable only when R2's copy
-//   does not, on two reads that agree on what it holds instead.
+//   corrupt archive to a wrong SHA-256) is asked again unless R2's own copy
+//   is found not to hash to its record, on two reads that agree on what it
+//   holds instead: only then is a save unusable. A check that cannot be
+//   made condemns nothing.
 // Damage before the shim's hash (in the container's own reading of its
 // files) is out of their reach.
 
@@ -38,18 +42,21 @@ function against(held, record) {
 
 // One directory's backup, kept once R2's copy is its record's. `backup()`
 // makes a fresh archive and answers its record; `stored(record)` reads
-// what R2 holds of it; `forget(record)` deletes a copy that is not it, or
-// that could not be read (no copy is left without a record); `again(tried,
-// why)` is told of each backed up again. Throws once `SAVE_TRIES` came out
-// damaged (the save fails, and its lifecycle tries it again), and whatever
-// those throw.
-export async function backupChecked({ backup, stored, forget, again = () => {} }) {
+// what R2 holds of it; `forget(record)` deletes a copy that is not it;
+// `again(tried, why)` is told of each backed up again, `unchecked(record,
+// why)` of one kept unread. Throws once `SAVE_TRIES` came out damaged (the
+// save fails, and its lifecycle tries it again), and whatever `backup`
+// throws.
+export async function backupChecked({ backup, stored, forget, again = () => {}, unchecked = () => {} }) {
   for (let tried = 1; ; tried++) {
     const record = await backup();
-    const held = await stored(record).catch(async (e) => {
-      await forget(record);
-      throw e;
-    });
+    let held;
+    try {
+      held = await stored(record);
+    } catch (e) {
+      unchecked(record, String(e?.message ?? e));
+      return record;
+    }
     if (holds(held, record)) return record;
     const why = against(held, record);
     await forget(record);
@@ -62,18 +69,24 @@ export async function backupChecked({ backup, stored, forget, again = () => {} }
 // why its bytes came damaged; `stored()` reads what R2 holds of `record`;
 // `again(tried, why)` is told of each asked again. Answers null once
 // restored, or `{unusable}` when R2's own copy is not its record: the save
-// never will restore. Throws once `RESTORE_TRIES` came in damaged while
-// R2's copy was not found bad (a failed start, which may pass: the save is
-// kept), and whatever those throw.
+// never will restore. R2's copy is read after the first try that came
+// damaged, and again after the next while no read was made. Throws once
+// `RESTORE_TRIES` came in damaged while R2's copy was not found bad (a
+// failed start, which may pass: the save is kept), and whatever `restore`
+// throws.
 export async function restoreChecked({ record, restore, stored, again = () => {} }) {
   let read = false;
   for (let tried = 1; ; tried++) {
-    const damaged = await restore();
+    let damaged = await restore();
     if (damaged === null) return null;
     if (!read) {
-      const bad = await badCopy(record, stored);
-      if (bad !== null) return { unusable: `${damaged}; ${bad}` };
-      read = true;
+      try {
+        const bad = await badCopy(record, stored);
+        if (bad !== null) return { unusable: `${damaged}; ${bad}` };
+        read = true;
+      } catch (e) {
+        damaged = `${damaged}; R2's copy unread: ${e?.message ?? e}`;
+      }
     }
     if (tried >= RESTORE_TRIES) throw new Error(`the restore of ${record.dir} came in damaged ${tried} times, R2's copy not found bad: ${damaged}`);
     again(tried, damaged);
