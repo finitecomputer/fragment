@@ -33,12 +33,17 @@ pub struct Grants {
     /// one at; none named, the default (`connection_accounts::chosen`).
     #[serde(default)]
     pub accounts: BTreeMap<String, String>,
+    /// While someone else's ask is open (FIN-720: `mandate::Proof`), what
+    /// of these its place lends: an answer's alone, never kept. `None`:
+    /// all of them, its owner's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lend: Option<fragment_proto::Lend>,
 }
 
 impl Grants {
     /// None at all: what an agent whose fragment did not answer may use.
     pub fn none() -> Grants {
-        Grants { connections: Some(vec![]), accounts: BTreeMap::new() }
+        Grants { connections: Some(vec![]), accounts: BTreeMap::new(), lend: None }
     }
 
     /// Whether it may use `provider`.
@@ -70,6 +75,7 @@ impl Grants {
 
     pub fn stored(&self) -> String {
         assert!(self.valid(), "only valid grants are kept");
+        assert!(self.lend.is_none(), "a lend narrows an answer, and is never kept");
         serde_json::to_string(self).expect("grants serialize")
     }
 }
@@ -152,7 +158,7 @@ pub fn answered(held: Option<&Grants>, taken: Option<&Row>, change: Option<Chang
         (Some(held), _) => held.clone(),
         (None, Some(row)) => {
             let connections = serde_json::from_slice(row.connections.as_bytes()).map_err(|e| format!("its computer's connections {:?}: {e}", row.connections))?;
-            Grants { connections, accounts: row.accounts.clone() }
+            Grants { connections, accounts: row.accounts.clone(), lend: None }
         }
         (None, _) => Grants::default(),
     };
@@ -232,7 +238,7 @@ mod tests {
 
     #[test]
     fn a_later_row_is_ignored() {
-        let held = Grants { connections: list(&["github"]), accounts: BTreeMap::from([("google".into(), "data_1".into())]) };
+        let held = Grants { connections: list(&["github"]), accounts: BTreeMap::from([("google".into(), "data_1".into())]), lend: None };
         for later in [row("null", &[]), row(r#"["github","slack"]"#, &[("google", "data_2")]), row("[]", &[])] {
             assert_eq!(answered(Some(&held), Some(&later), None), Ok(held.clone()), "{later:?} changes nothing");
         }

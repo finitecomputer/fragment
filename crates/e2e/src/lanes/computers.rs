@@ -64,6 +64,165 @@ const WAKE: Duration = Duration::from_secs(90);
 /// owner's sleeps.
 pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
+/// The app `asker_checks` asks: it tells whom it was told (`whoami`), and
+/// has an op for editors and up (`backstage`).
+const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
+
+/// Whose ask a turn is (FIN-720; docs/api.md, "An agent's computer proves
+/// who asked"): the checks `asker_checks` makes, as a run without the stub
+/// or the fakes skips them.
+const ASKER_CHECKS: &[&str] = &[
+    "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the app is told them, at their own role; its owner's same ask is its owner's",
+    "held to their role: what only editors may do (they a viewer) is refused, though its owner's same ask goes",
+    "each asks it to post under one id: each post is their own record, keyed by whom it posts for, as a call's id is",
+    "each asks it to run a job (Calories' summary of their day): the job is told whose ask it runs, as an op is, reads their own entries, and answers them, its owner's own ask too",
+    "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
+    "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
+    "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
+    "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
+];
+
+/// Ben, a person in its owner's chat, asks the agent there for things
+/// (each a `fetch` through its guest's egress, `for` its owner as its
+/// terminal signs one), and its owner the same: each call goes as whose ask
+/// it is, held to their role, using what its owner lends that chat.
+/// Answers how many of the agent's turns in the chat they took.
+fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Duration) -> Result<usize> {
+    let turns = std::cell::Cell::new(0);
+    let owner_id = api.identity(w.owner)?;
+    let ben = api.person()?;
+    let ben_id = api.identity(&ben)?;
+    let r = api.share(chat, &ben_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Ben in the chat: {r}");
+    // its owner's app, Ben a viewer there: `whoami` tells who the app is
+    // told, at what role; `backstage` is for editors and up
+    let board = s.named(api, w.owner, "board")?;
+    let c = s.create(api, w.owner, &board)?;
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    // and a channel its viewers post to
+    let mut manifest: Value = serde_json::from_slice(WHOAMI_JSON)?;
+    manifest["channels"]["said"] = json!({ "read": "viewer", "post": "viewer" });
+    super::app::ship(s, &c, WHOAMI_APP, &serde_json::to_vec(&manifest)?);
+    let r = api.share(&board, &ben_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Ben on the board: {r}");
+    let op = |name: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{board}/ops/{name}?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    // each ask's own id, apart from the lane's numbered `m<n>` ones
+    let asked_by = |s: &Suite, who: &crate::Keys, id: &str, text: &str| -> Result<String> {
+        turns.set(turns.get() + 1);
+        let r = api.signed(who, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("asker-{id}"), "body": { "text": text } })))?;
+        anyhow::ensure!(r.status == 200, "{id} asks: {r}");
+        let turn = turn_of(w.agent, chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+        s.eventually(wake, || reply().is_some());
+        Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let asked_by_ben = |s: &Suite, n: u32, text: &str| asked_by(s, &ben, &format!("ben{n}"), text);
+    // who the app was told, and at what role (`whoami`'s answer)
+    let whose = |said: &str| -> Value {
+        let body = said.strip_prefix("fetched 200: ").unwrap_or("");
+        serde_json::from_str::<Value>(body).map(|v| v["result"].clone()).unwrap_or(Value::Null)
+    };
+
+    let bens = asked_by_ben(s, 1, &op("whoami", "who-ben"))?;
+    let owners = asked_by(s, w.owner, "owner1", &op("whoami", "who-owner"))?;
+    s.ok(
+        ASKER_CHECKS[0],
+        whose(&bens) == json!({ "principal": ben_id, "role": "viewer" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
+        json!({ "ben": bens, "owner": owners }),
+    );
+    let bens = asked_by_ben(s, 2, &op("backstage", "back-ben"))?;
+    let owners = asked_by(s, w.owner, "owner2", &op("backstage", "back-owner"))?;
+    s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && whose(&owners) == json!({ "role": "editor" }), json!({ "ben": bens, "owner": owners }));
+    let post = |text: &str| format!("fetch http://api.fragment.internal/api/f/{board}/channels/said?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"said\",\"body\":{{\"text\":\"{text}\"}}}}", w.agent);
+    let owners = asked_by(s, w.owner, "owner-post", &post("its owner's"))?;
+    let bens = asked_by_ben(s, 9, &post("theirs"))?;
+    let said = records(api, w.owner, &board, "said");
+    let texts: Vec<&str> = said.iter().filter_map(|r| r["body"]["text"].as_str()).collect();
+    s.ok(ASKER_CHECKS[2], owners.starts_with("fetched 200") && bens.starts_with("fetched 200") && texts == ["its owner's", "theirs"], json!({ "owner": owners, "ben": bens, "said": said }));
+    // its owner's Calories, Ben a viewer there: his summary is his
+    let calories = s.named(api, w.owner, "asker-calories")?;
+    let r = api.create_with(w.owner, json!({ "name": calories, "template": "calories" }))?;
+    anyhow::ensure!(r.status == 200, "the calories app: {r}");
+    s.owned(&r.body, w.owner);
+    let r = api.share(&calories, &ben_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Ben on calories: {r}");
+    // each one's day: Ana's porridge, Ben's toast (she logs both: an editor's)
+    for (id, who, food) in [("ana-1", owner_id.as_str(), "porridge"), ("ben-1", ben_id.as_str(), "toast")] {
+        let r = api.op(w.owner, &calories, "log_food", id, json!({ "who": who, "food": food, "calories": 300 }))?;
+        anyhow::ensure!(r.status == 200, "{food} logged: {r}");
+    }
+    let summary = |id: &str| format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    let reply_for = |who: &str| records(api, w.owner, &calories, "replies").into_iter().find(|r| r["body"]["for"] == who && r["body"]["text"].is_string());
+    let bens = asked_by_ben(s, 10, &summary("sum-ben"))?;
+    s.eventually(wake, || reply_for(&ben_id).is_some());
+    let owners = asked_by(s, w.owner, "owner-sum", &summary("sum-owner"))?;
+    s.eventually(wake, || reply_for(&owner_id).is_some());
+    let text = |who: &str| reply_for(who).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let (ben_said, owner_said) = (text(&ben_id), text(&owner_id));
+    s.ok(
+        ASKER_CHECKS[3],
+        bens.starts_with("fetched 200") && owners.starts_with("fetched 200") && ben_said.contains("toast") && !ben_said.contains("porridge") && owner_said.contains("porridge") && !owner_said.contains("toast"),
+        json!({ "ben": bens, "owner": owners, "replies": records(api, w.owner, &calories, "replies") }),
+    );
+
+    let schedules = format!("/api/f/{chat}/schedules");
+    let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": op("whoami", "who-schedule") } })))?;
+    cron_now(api, chat)?;
+    let fire = || records(api, w.owner, chat, "chat").into_iter().find(|r| r["author"] == "platform" && r["asker"] == ben_id.as_str());
+    s.eventually(wake, || fire().is_some());
+    let turn = turn_of(w.agent, chat, "chat", fire().and_then(|r| r["seq"].as_i64()).unwrap_or(0));
+    turns.set(turns.get() + 1);
+    let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+    s.eventually(wake, || reply().is_some());
+    let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let removed = api.signed(&ben, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
+    s.ok(
+        ASKER_CHECKS[4],
+        made.status == 200 && fire().is_some() && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }) && removed.status == 200,
+        json!({ "made": made.status, "fire": fire(), "said": said, "removed": removed.status }),
+    );
+
+    let paid = format!("fetch http://api.perplexity.ai/search with {}", placeholder(s, w.id, w.agent, "perplexity"));
+    let account = format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION));
+    let spent = asked_by_ben(s, 3, &paid)?;
+    let seen = s.upstream.seen().len();
+    let unlent = asked_by_ben(s, 4, &account)?;
+    let unreached = s.upstream.seen().len() == seen;
+    s.ok(
+        ASKER_CHECKS[5],
+        spent.starts_with("fetched 200") && unlent.starts_with("fetched 403") && unlent.contains("hasn't lent it their accounts and keys") && unreached,
+        json!({ "paid": spent, "account": unlent }),
+    );
+    let lend = |spend: bool, accounts: bool| api.signed(w.owner, "PUT", &format!("/api/f/{chat}/members/{}/lend", w.identity), Some(&json!({ "spend": spend, "accounts": accounts })));
+    let switched = lend(false, true)?;
+    let seen = s.upstream.seen().len();
+    let unpaid = asked_by_ben(s, 5, &paid)?;
+    let unreached = s.upstream.seen().len() == seen;
+    let lent = asked_by_ben(s, 6, &account)?;
+    let back = lend(true, false)?;
+    let again = asked_by_ben(s, 7, &account)?;
+    s.ok(
+        ASKER_CHECKS[6],
+        switched.status == 200
+            && unpaid.starts_with("fetched 403")
+            && unpaid.contains("hasn't lent it their credit")
+            && unreached
+            && lent.starts_with("fetched 200")
+            && back.status == 200
+            && again.starts_with("fetched 403"),
+        json!({ "switched": switched.status, "paid": unpaid, "account": lent, "back": back.status, "again": again }),
+    );
+    let invites = format!("fetch http://api.fragment.internal/api/invites?for={owner_id} with {} in x-fragment-agent", w.agent);
+    let owners = asked_by(s, w.owner, "owner3", &invites)?;
+    let bens = asked_by_ben(s, 8, &invites)?;
+    s.ok(ASKER_CHECKS[7], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
+    let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
+    anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
+    Ok(turns.get())
+}
+
 pub(super) fn agent_replies(recs: &[Value], agent: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["principal"] == agent && r["body"]["turn"].is_string() && r["body"]["text"].is_string()).cloned().collect()
 }
@@ -2722,7 +2881,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(ASKER_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2765,6 +2924,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
         replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
+        replies_so_far += asker_checks(s, api, &swapping, &chat_name, wake)?;
     }
     // its uses from before the move, owed to its owner's ledger (M16)
     uses_checks(s, api, &owner, &id, &agent_name, &month)?;

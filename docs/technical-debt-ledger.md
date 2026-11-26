@@ -726,6 +726,23 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
+## An agent's computer tells its own turns
+
+- **Shortcut:** whose ask an agent's call is (FIN-720; docs/api.md, "An
+  agent's computer proves who asked") rests on the turns its bridge tells
+  the agent's fragment (`/api/computer/turns`), and on the agent signing
+  `for` its owner, as its CLI does. The bridge and the runtime share one
+  computer, where the agent has passwordless sudo and no secret is kept
+  from it (decisions 13, 43, 44).
+- **Risk:** an injected agent, on someone else's ask, closes or clears
+  their turns, or signs as itself with no `for`, and so acts with its
+  owner's reach or its own (which mirrors its owner's, decision 64). An
+  agent that follows its tools never does. **Delete when:** whose ask a
+  call is comes from what the computer can't forge (the places' own
+  records, or turns kept outside the agent's root, as the SimpleX entry
+  above needs too), with tests where the agent clears its turns and signs
+  as itself.
+
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model

@@ -500,6 +500,104 @@ async fn stop_interrupts_hermes() {
     bridge.stop().await;
 }
 
+/// Goal (FIN-720): a turn the bridge lets go (gone quiet past its bound)
+/// is interrupted at Hermes before it is forgotten, so it works on no
+/// more as no one's ask once its proof is gone; the turn ends as quiet.
+#[tokio::test]
+async fn a_let_go_turn_is_interrupted_at_hermes() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-let-go");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let quiet = fragment_bridge::engine::Settings { turn_idle_ms: 800, ..support::settings() };
+    let bridge = support::start(support::config(&fake.url(), &dir, quiet), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    hermes.with(|s| s.turn_ms = 20_000);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
+    fake.until(WAIT, "the quiet turn let go", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["error"] == "the agent stopped answering")).await;
+    let interrupted = async {
+        while hermes.with(|s| s.interrupted) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(WAIT), interrupted).await.expect("Hermes heard the interrupt");
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): a let-go turn's interrupt survives Hermes' socket
+/// dropping: lost then, it is sent again at Hermes' next dial.
+#[tokio::test]
+async fn a_let_go_turns_interrupt_is_sent_again_at_the_next_dial() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-let-go-redial");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let quiet = fragment_bridge::engine::Settings { turn_idle_ms: 800, ..support::settings() };
+    let bridge = support::start(support::config(&fake.url(), &dir, quiet), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    hermes.with(|s| s.turn_ms = 20_000);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "slow please" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    fake.until(WAIT, "its first draft", |w| w.drafts.iter().any(|d| d.2 == turn)).await;
+    // away: its socket closes, so the let-go turn's interrupt is lost
+    hermes.with(|s| s.away = true);
+    fake.until(WAIT, "the quiet turn let go", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["error"] == "the agent stopped answering")).await;
+    assert_eq!(hermes.with(|s| s.interrupts_heard), 0, "Hermes was away");
+    hermes.with(|s| s.away = false);
+    let interrupted = async {
+        while hermes.with(|s| s.interrupts_heard) == 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    tokio::time::timeout(Duration::from_millis(WAIT), interrupted).await.expect("Hermes heard the interrupt once it dialed again");
+    bridge.stop().await;
+}
+
+/// Goal (FIN-720): a turn let go before Hermes took it is never handed
+/// again. Its start was on Hermes' socket when the socket dropped; let go
+/// while Hermes was away, its proof is closed, and at the next dial Hermes
+/// would hear it for the first time and run it as no one's ask (beside
+/// another's open turn). It is dropped there, its chat interrupted, and
+/// the next message runs.
+#[tokio::test]
+async fn a_let_go_turn_hermes_never_took_is_not_handed_again() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let dir = support::dir("relay-let-go-untaken");
+    let port = bound_port();
+    let listen = port.local_addr().unwrap();
+    let quiet = fragment_bridge::engine::Settings { turn_idle_ms: 800, ..support::settings() };
+    let bridge = support::start(support::config(&fake.url(), &dir, quiet), relay(&port, &dir));
+    let hermes = Hermes::spawn(listen, "computer-test", SECRET);
+    let chat = fake.chat("talk", &["juniper"]);
+    fake.until(WAIT, "the bridge to follow", |w| w.live_sockets() >= 2).await;
+    support::until(WAIT, "Hermes dialed", || hermes.with(|s| s.dials >= 1)).await;
+    // handed to a Hermes that drops it unacked, then its socket closes
+    hermes.with(|s| s.deaf = true);
+    let said = fake.say(&chat, &person("paul"), json!({ "text": "never taken" }));
+    let turn = records::turn_id("juniper--k3x9", &chat, "chat", said["seq"].as_u64().unwrap());
+    support::until(WAIT, "its start on Hermes' socket", || hermes.with(|s| s.dropped >= 1)).await;
+    hermes.with(|s| s.away = true);
+    fake.until(WAIT, "the quiet turn let go", |w| !work_of(w, &chat, &turn, "turn.end").is_empty()).await;
+    let heard = hermes.with(|s| s.interrupts_heard);
+    hermes.with(|s| {
+        s.deaf = false;
+        s.away = false;
+    });
+    support::until(WAIT, "its interrupt at the next dial", || hermes.with(|s| s.dials >= 2 && s.interrupts_heard > heard)).await;
+    hermes.with(|s| assert_eq!(s.heard.iter().filter(|e| e["text"] == "never taken").count(), 0, "the let-go turn was never handed again"));
+    fake.say(&chat, &person("paul"), json!({ "text": "and now?" }));
+    fake.until(WAIT, "the next message answered", |w| replies(w, &chat).len() == 1).await;
+    hermes.with(|s| {
+        assert_eq!(s.heard.iter().filter(|e| e["text"] == "never taken").count(), 0, "nor after");
+        assert_eq!(s.heard.iter().filter(|e| e["text"] == "and now?").count(), 1);
+    });
+    bridge.stop().await;
+}
+
 /// Goal: Stop while a turn waits on an approval closes its card as
 /// stopped and interrupts Hermes, which ends the turn with no reply.
 #[tokio::test]

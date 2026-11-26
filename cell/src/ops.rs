@@ -59,6 +59,29 @@ fn platform() -> &'static Platform {
     })
 }
 
+/// What keys a caller's id: ids are the caller's, so one caller can
+/// neither replay nor block another's id. The caller is its principal, and
+/// the asker an agent acts for when that is not its owner (`other`), another
+/// entity: a mutation's ledger row and a post's record are keyed alike.
+pub(crate) fn callers_id(principal: &str, other: Option<&str>, id: &str) -> String {
+    match other {
+        None => format!("{principal}/{id}"),
+        Some(asker) => format!("{principal}~{}/{id}", npub::display(asker)),
+    }
+}
+
+/// Whom an app is told calls it (`call.principal`, `job.principal`), and
+/// the agent that calls for them (`call.agent`, `job.agent`): the asker an
+/// agent calls for, and that agent; else the caller, and none (decision
+/// R17, FIN-720). One rule for an op and a job; its signer stays the
+/// ledger's and the replay's.
+pub(crate) fn told(principal: &str, asker: Option<&str>) -> (String, Option<String>) {
+    match asker {
+        Some(asker) => (npub::display(asker), Some(npub::display(principal))),
+        None => (npub::display(principal), None),
+    }
+}
+
 /// One admitted call: who runs which operation, and how deep in a chain of
 /// triggered runs it is.
 pub(crate) struct Invocation<'a> {
@@ -68,6 +91,11 @@ pub(crate) struct Invocation<'a> {
     /// `call.principal`, so what it does for someone is theirs, while the
     /// ledger and the records name the agent (`call.agent`).
     pub asker: Option<&'a str>,
+    /// That asker when it is someone else than the agent's owner (a
+    /// mandate's: FIN-720), another entity than the agent's own: its own
+    /// replays (`ledger_id`, a run's `call_id`), and what its run is
+    /// charged under (`runs.asker`).
+    pub other: Option<&'a str>,
     pub role: Role,
     pub op: &'a str,
     pub decl: OpDecl,
@@ -267,7 +295,8 @@ impl FragmentCell {
             return Err(CellError::invalid("operation id must match ^[A-Za-z0-9._:-]{1,128}$ and not start with job:"));
         }
         let asker = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
-        let inv = Invocation { principal, asker, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
+        let other = caller.signed.as_ref().and_then(|s| s.other_asker());
+        let inv = Invocation { principal, asker, other, role, op, decl, id: body.id, input: body.input, depth: 0, via: Via::Call, trigger: None };
         let result = self.invoke(inv).await?;
         // a job's run, queued, starts after the answer; a query queues nothing
         if writes {
@@ -295,6 +324,8 @@ impl FragmentCell {
                 via: inv.via,
                 trigger: inv.trigger,
                 principal: inv.principal,
+                asker: inv.other,
+                acting_for: inv.asker,
                 role: inv.role,
                 depth: inv.depth,
                 call: Some((&inv.id, &input_sha)),
@@ -306,11 +337,11 @@ impl FragmentCell {
         }
         let facet = self.facet()?;
         self.sweep(&facet).await?;
-        let agent = inv.asker.map(|_| npub::display(inv.principal));
+        let (told, agent) = told(inv.principal, inv.asker);
         match inv.decl.kind {
             OpKind::Query => {
                 // a query publishes nothing, so it is told no channels
-                let meta = json!({ "principal": npub::display(inv.asker.unwrap_or(inv.principal)), "agent": agent, "role": inv.role });
+                let meta = json!({ "principal": told, "agent": agent, "role": inv.role });
                 match facet.query(inv.op, &input_text, &meta).await? {
                     Answer::Ran(q) => bounded(Answered { result: q.result, replayed: false }),
                     Answer::Refused(why) => Err(refused(why, inv.op)),
@@ -318,7 +349,7 @@ impl FragmentCell {
             }
             OpKind::Mutation => {
                 let meta = json!({
-                    "principal": npub::display(inv.asker.unwrap_or(inv.principal)),
+                    "principal": told,
                     "agent": agent,
                     "role": inv.role,
                     "channels": self.declared_channel_names()?,
@@ -332,9 +363,7 @@ impl FragmentCell {
     /// A mutation: recorded as pending, run in the facet (where it and its
     /// ledger row commit together), then settled (channels.rs).
     async fn mutate(&self, facet: &js::Facet, inv: &Invocation<'_>, input_sha: &str, input_text: &str, mut meta: Value) -> CellResult<Answered> {
-        // Ids are the caller's: the ledger keys them by principal, so one
-        // caller can neither replay nor block another's id.
-        let ledger_id = format!("{}/{}", inv.principal, inv.id);
+        let ledger_id = callers_id(inv.principal, inv.other, &inv.id);
         if inv.decl.ephemeral {
             return self.mutate_ephemeral(facet, inv, &ledger_id, input_sha, input_text, meta).await;
         }
@@ -760,6 +789,13 @@ impl FragmentCell {
                 self.set_meta(MetaKey::Visibility, v.as_str())?;
                 self.sharing_changed()?;
                 json!({ "visibility": v })
+            }
+            Some("legacy-schedule") => {
+                // a schedule kept from before askers (Fragment step 15,
+                // 2026-11-25): its asker NULL, as such rows were left
+                let id = body["schedule"].as_i64().ok_or_else(|| CellError::invalid("legacy-schedule names a schedule's id"))?;
+                let n = self.rows("UPDATE record_schedules SET asker = NULL WHERE id = ? RETURNING id", vec![SqlStorageValue::Integer(id)])?.len();
+                json!({ "schedules": n })
             }
             Some("records") => {
                 // posts filled in as a member made them (channels.rs `fill_records`)

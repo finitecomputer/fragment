@@ -1,14 +1,15 @@
-//! Proof of who asked (FIN-615; docs/api.md, "Who asked: mandates"). A
-//! mandate is a place's word that a person's own record there asked one of
-//! its agents: its asker, the agent, the place, the record, and until when.
-//! As a place hands an agent member the records its owner wrote there
-//! (`GET …/channels/<c>`, read as the agent itself), each carries one. The
+//! Proof of who asked (FIN-615, FIN-720; docs/api.md, "Who asked:
+//! mandates"). A mandate is a place's word that a person's own record there
+//! asked one of its agents: its asker, the agent, the place, the record,
+//! and until when. As a
+//! place hands an agent member the records people wrote to it there (`GET
+//! …/channels/<c>`, read as the agent itself), each carries one. The
 //! agent's calls carry it beside their NIP-98 signature
 //! (`x-fragment-mandate`) in place of `for=<its owner>`, and the router
 //! checks it in the signer's own lookup, with no round trip: the call acts
-//! for its owner as `for` does (`permit`, rule 3), now proven. An asker
-//! who is not its owner is another entity, whose actions are theirs to be
-//! keyed, capped and credited by, and gets no mandate yet (FIN-615).
+//! for its asker, held to their own role (`permit`, rule 3). Its owner's
+//! own word lends everything of theirs; anyone else's, only what its owner
+//! lends that place now (`Lend`, read where it is kept at each use).
 //!
 //! Only the platform makes one: its mark is a keyed MAC under a key derived
 //! from the host secret (as `swap::TagKey`'s), never stored, rotating with
@@ -16,6 +17,7 @@
 //! its agent, so no other key may carry it. It holds from its record's
 //! writing for `limits::MANDATE_LIFE_MS`, so old words start nothing new.
 
+pub use fragment_proto::Lend;
 use fragment_proto::{limits, valid_channel_name, Author};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
@@ -154,6 +156,12 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
     Ok(m)
 }
 
+/// The place a mandate's text names (its key), read from a text already
+/// opened (`open`), as an agent fragment keeps one for an open turn.
+pub fn place_of(text: &str) -> Option<&str> {
+    text.strip_prefix(PREFIX)?.split('.').nth(2)
+}
+
 /// Whose own words a record is, as a mandate names them: a person's own
 /// post (its `principal`, an identity: an anonymous visitor asks no one
 /// elsewhere), or a door's relay of its agent's owner (its `body`'s
@@ -161,16 +169,130 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
 /// it took as a door's (a signed relay its door checked, or the one
 /// `relayed` a hosted door's code may write: `effects::check_record`), so
 /// `for` is its word in either shape; an inbox's delivery relays no one.
-/// An agent's, app code's or the platform's records, and one stored before
-/// the author stamp, are no one's.
-pub fn asker_of(principal: &str, author: Option<Author>, body: &str) -> Option<String> {
+/// The platform's record written for someone (`asker`: a schedule's fire,
+/// for its maker, checked again as it fired) is theirs. An agent's, app
+/// code's and the platform's own records, and one stored before the author
+/// stamp, are no one's.
+pub fn asker_of(principal: &str, author: Option<Author>, asker: Option<&str>, body: &str) -> Option<String> {
+    let identity = |s: &str| crate::npub::is_identity(s).then(|| s.to_string());
     match author? {
-        Author::Person => crate::npub::is_identity(principal).then(|| principal.to_string()),
+        Author::Person => identity(principal),
         Author::Door => {
             let body: serde_json::Value = serde_json::from_str(body).ok()?;
-            body.get("relayed")?.get("for")?.as_str().filter(|f| crate::npub::is_identity(f)).map(str::to_string)
+            body.get("relayed")?.get("for")?.as_str().and_then(identity)
         }
-        Author::Agent | Author::Code | Author::Platform | Author::Other => None,
+        Author::Platform => asker.and_then(identity),
+        Author::Agent | Author::Code | Author::Other => None,
+    }
+}
+
+/// Whether a record's words are to `agent`: its body names whom it is `to`
+/// (identities), or names no one, which is everyone there. A `to` of any
+/// other shape is to no one: only the agents a record names hear it as
+/// asked of them.
+pub fn addressed(body: &str, agent: &str) -> bool {
+    // most bodies name no one: no parse for them
+    if !body.contains("\"to\"") {
+        return true;
+    }
+    let Ok(serde_json::Value::Object(o)) = serde_json::from_str::<serde_json::Value>(body) else { return true };
+    match o.get("to") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Array(to)) => to.is_empty() || to.iter().any(|t| t.as_str() == Some(agent)),
+        Some(_) => false,
+    }
+}
+
+/// A mandate an agent's bridge holds for an open turn, as the agent
+/// fragment checked it: its text, and what of it the decisions read: its
+/// day, and its place's own key, where what its owner lends is kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Held<'a> {
+    pub text: &'a str,
+    pub until: i64,
+    pub place: &'a str,
+}
+
+/// Whether a bridge life's word on its agent's turns is heard (cell
+/// runs_on.rs `turn_life`), given the lives heard on the computer the agent
+/// runs on, each with that computer's start (the Computer DO's generation,
+/// which its bridge read as it started), the newest first: by start, then,
+/// within one start, by when first heard. Another computer's starts are
+/// not comparable: none of its lives is among them. The newest's is; a life never heard of a start no
+/// older takes over (its bridge is the computer's one now: every other
+/// life's turns are forgotten); any other is retired, its word not heard:
+/// a late call from a bridge gone, its first among them (a container
+/// before's, which may come after its successor's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Heard {
+    Speaks,
+    TakesOver,
+    Retired,
+}
+
+pub fn heard(lives_newest_first: &[(&str, u64)], life: &str, start: u64) -> Heard {
+    match lives_newest_first.iter().position(|(l, _)| *l == life) {
+        Some(0) => Heard::Speaks,
+        Some(_) => Heard::Retired,
+        None if lives_newest_first.first().is_some_and(|(_, newest)| *newest > start) => Heard::Retired,
+        None => Heard::TakesOver,
+    }
+}
+
+/// One of an agent's open turns, as its bridge told its agent fragment: in
+/// `place` (a fragment's name), started by `asker`'s words, proven by
+/// their mandate when it carried one still unexpired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Turn<'a> {
+    pub place: &'a str,
+    pub asker: &'a str,
+    pub mandate: Option<Held<'a>>,
+}
+
+/// Whose ask an agent's call for its owner (`for=<its owner>`) carries
+/// while `turns` are open. Hermes runs one gateway for every chat, so a
+/// call can't say which turn it is (FIN-615: the narrowest, Paul
+/// 2026-11-21 "yes"). Anyone's turn beside its owner's is the narrower.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Proof<'a> {
+    /// No turn proven, none but its owner's: the bare `for=` as before
+    /// (an image that tells no turns, or work no one's words started),
+    /// until `for=` goes (FIN-615 PR 8).
+    Bare,
+    /// Its owner's own words: their newest mandate.
+    Owner(Held<'a>),
+    /// One other person's words, proven: their newest mandate, theirs to
+    /// act for inside what its owner lends each place their turns are in
+    /// (`at`: each fragment, by its name and its key), read there at each
+    /// use, the narrowest of them.
+    Asker { held: Held<'a>, at: Vec<(&'a str, &'a str)> },
+    /// No single proven asker (two other people's turns, or one with no
+    /// proof): the agent acts as itself, in those turns' places alone,
+    /// and lends no one anything of its owner's.
+    Itself(Vec<&'a str>),
+}
+
+/// `owner`'s agent's proof while `turns` are open (`Proof`).
+pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
+    let newest = |of: &mut dyn Iterator<Item = &Turn<'a>>| of.filter_map(|t| t.mandate).max_by_key(|m| m.until);
+    let others: Vec<&Turn<'a>> = turns.iter().filter(|t| t.asker != owner).collect();
+    if others.is_empty() {
+        return newest(&mut turns.iter()).map_or(Proof::Bare, Proof::Owner);
+    }
+    let one = others.iter().all(|t| t.asker == others[0].asker);
+    match newest(&mut others.iter().copied()) {
+        Some(held) if one && others.iter().all(|t| t.mandate.is_some()) => {
+            let mut at: Vec<(&'a str, &'a str)> = others.iter().filter_map(|t| Some((t.place, t.mandate?.place))).collect();
+            at.sort_unstable();
+            at.dedup();
+            Proof::Asker { held, at }
+        }
+        _ => {
+            let mut places: Vec<&'a str> = others.iter().map(|t| t.place).collect();
+            places.sort_unstable();
+            places.dedup();
+            Proof::Itself(places)
+        }
     }
 }
 
@@ -263,14 +385,76 @@ mod tests {
         let (ben, ana) = ids();
         let juniper = crate::npub::encode(&"c".repeat(64));
         let relayed = serde_json::json!({ "text": "hi", "to": [juniper], "relayed": { "via": "simplex", "for": ana, "agent": "juniper--k3x9", "at": 1, "sig": "ab".repeat(64) } }).to_string();
-        assert_eq!(asker_of(&ben, Some(Author::Person), "{}"), Some(ben.clone()));
-        assert_eq!(asker_of(&juniper, Some(Author::Door), &relayed), Some(ana.clone()), "a door's signed relay: its owner");
+        assert_eq!(asker_of(&ben, Some(Author::Person), None, "{}"), Some(ben.clone()));
+        assert_eq!(asker_of(&juniper, Some(Author::Door), None, &relayed), Some(ana.clone()), "a door's signed relay: its owner");
         let hosted = serde_json::json!({ "text": "hi from telegram", "to": [juniper], "relayed": { "via": "telegram", "for": ana, "agent": "juniper--k3x9" } }).to_string();
-        assert_eq!(asker_of("npub1telegramapp", Some(Author::Door), &hosted), Some(ana.clone()), "a hosted door's relay, as its code writes it: its owner");
-        assert_eq!(asker_of("inbox", Some(Author::Door), r#"{"source":"external","payload":{}}"#), None, "an inbox delivery relays no one");
-        assert_eq!(asker_of("anon:0123456789abcdef0123456789abcdef", Some(Author::Person), "{}"), None);
+        assert_eq!(asker_of("npub1telegramapp", Some(Author::Door), None, &hosted), Some(ana.clone()), "a hosted door's relay, as its code writes it: its owner");
+        assert_eq!(asker_of("inbox", Some(Author::Door), None, r#"{"source":"external","payload":{}}"#), None, "an inbox delivery relays no one");
+        assert_eq!(asker_of("anon:0123456789abcdef0123456789abcdef", Some(Author::Person), None, "{}"), None);
+        assert_eq!(asker_of("npub1ownkey", Some(Author::Platform), Some(&ana), "{}"), Some(ana.clone()), "a schedule's fire: its maker's");
+        assert_eq!(asker_of("npub1ownkey", Some(Author::Platform), Some("not an identity"), "{}"), None);
         for author in [None, Some(Author::Agent), Some(Author::Code), Some(Author::Platform), Some(Author::Other)] {
-            assert_eq!(asker_of(&ben, author, &relayed), None, "{author:?}");
+            assert_eq!(asker_of(&ben, author, None, &relayed), None, "{author:?}");
         }
+        assert_eq!(asker_of(&ben, Some(Author::Agent), Some(&ana), "{}"), None, "only the platform writes for someone");
+    }
+
+    /// Goal: a record's words are to the agents it names, or to everyone
+    /// when it names no one; a `to` of another shape is to no one.
+    #[test]
+    fn a_record_is_to_whom_it_names() {
+        let (juniper, fred) = ids();
+        let to = |v: serde_json::Value| serde_json::json!({ "text": "hi", "to": v }).to_string();
+        assert!(addressed(r#"{"text":"hi"}"#, &juniper), "no one named: everyone");
+        assert!(addressed(r#""a bare string""#, &juniper));
+        assert!(addressed(&to(serde_json::json!([])), &juniper) && addressed(&to(serde_json::Value::Null), &juniper));
+        assert!(addressed(&to(serde_json::json!([juniper])), &juniper) && !addressed(&to(serde_json::json!([juniper])), &fred));
+        assert!(!addressed(&to(serde_json::json!("everyone")), &juniper) && !addressed(&to(serde_json::json!({ "x": 1 })), &juniper), "another shape: no one");
+        assert!(addressed(r#"{"text":"say "to" me"}"#, &juniper), "the word in a text names no one");
+    }
+
+    /// Goal (FIN-720): one bridge life speaks for an agent's turns at a
+    /// time: the newest heard; a new one of its computer's start or a later
+    /// one takes over; one heard before it is retired (its late word changes
+    /// nothing), and so is one never heard of an earlier start (a container
+    /// gone, its first word late: after its successor's); the same word
+    /// again is heard the same.
+    #[test]
+    fn the_newest_bridge_life_speaks_for_its_turns() {
+        assert_eq!(heard(&[], "a", 3), Heard::TakesOver, "the first life heard");
+        let lives = [("b", 4), ("a", 3)];
+        assert_eq!(heard(&lives, "b", 4), Heard::Speaks);
+        assert_eq!(heard(&lives, "a", 3), Heard::Retired, "a late word from the life before");
+        assert_eq!(heard(&lives, "c", 4), Heard::TakesOver, "a new life of the same start (its bridge restarted)");
+        assert_eq!(heard(&lives, "c", 5), Heard::TakesOver, "a new life of a later start");
+        assert_eq!(heard(&lives, "c", 3), Heard::Retired, "a first word of an earlier start's, late");
+        assert_eq!(heard(&lives, "b", 4), heard(&lives, "b", 4), "replay");
+    }
+
+    /// Goal: the narrowest ask an agent's call for its owner carries while
+    /// turns are open (`Proof`): its owner's newest proof alone; anyone
+    /// else's beside it narrows it, theirs, naming the place whose lend
+    /// holds it; two other people, or one unproven, leave no one's: the
+    /// agent itself, in their places alone; no turn proven of its owner's,
+    /// or none at all, is the bare `for=` as before.
+    #[test]
+    fn the_narrowest_ask_is_carried() {
+        let (ana, ben) = ids();
+        let carol = crate::npub::encode(&"e".repeat(64));
+        let held = |text: &'static str, until: i64, place: &'static str| Some(Held { text, until, place });
+        let turn = |place: &'static str, asker: &str, mandate: Option<Held<'static>>| Turn { place, asker: Box::leak(asker.to_string().into_boxed_str()), mandate };
+        assert_eq!(proof(&ana, &[]), Proof::Bare);
+        assert_eq!(proof(&ana, &[turn("own", &ana, None)]), Proof::Bare, "its owner's, unproven: as before");
+        let (a1, a2) = (held("a1", 10, "npub1own"), held("a2", 20, "npub1own"));
+        assert_eq!(proof(&ana, &[turn("own", &ana, a1), turn("own", &ana, a2)]), Proof::Owner(a2.unwrap()), "its owner's newest");
+        let b = held("b", 5, "npub1room");
+        let bens = proof(&ana, &[turn("own", &ana, a2), turn("room", &ben, b), turn("hall", &ben, held("b2", 4, "npub1hall")), turn("room", &ben, b)]);
+        assert_eq!(bens, Proof::Asker { held: b.unwrap(), at: vec![("hall", "npub1hall"), ("room", "npub1room")] }, "another's beside its owner's is the narrower: their newest, and each place of theirs");
+        let busy = proof(&ana, &[turn("room", &ben, b), turn("hall", &carol, held("c", 9, "npub1hall")), turn("room", &carol, None)]);
+        assert_eq!(busy, Proof::Itself(vec!["hall", "room"]), "two other people: no one's, in their places");
+        assert_eq!(proof(&ana, &[turn("room", &ben, None)]), Proof::Itself(vec!["room"]), "one other, unproven");
+        assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
+        // replay: the same turns decide the same
+        assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
     }
 }
