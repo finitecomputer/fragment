@@ -71,8 +71,10 @@ use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
 
-/// Why a key its owner's Vault lends does not go (`lends_now`).
+/// Why a key its owner's Vault lends does not go (`lends_not`): its link
+/// opens it, or it was a connector that runs other code now.
 const LENT_WHILE_LINKED: &str = "its owner's Vault lends nothing to an app shared by link or public: make it members only first";
+const LENT_UNMADE: &str = "this app was a connector that runs other code now, so it is lent nothing from its owner's Vault: an editor can set the app's own";
 use fragment_core::gather::Gathered;
 
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
@@ -1037,18 +1039,15 @@ impl FragmentCell {
     /// link opens it, it is lent nothing (a key is reach: reach.rs); nor
     /// ever once it was a connector that ran other code (`Unmade`: what was
     /// lent it while it was its owner's alone to edit is not the new
-    /// code's to send).
+    /// code's to send): `lends_not`.
     async fn lent(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         let needs = || permanent(format!("This app needs {name}. Its owner can lend it from their Vault, or an editor can set the app's own."));
         let Some(owner) = self.meta(MetaKey::Owner).map_err(retry)?.filter(|o| npub::is_identity(o)) else {
             return Err(needs());
         };
-        if self.meta(MetaKey::Unmade).map_err(retry)?.is_some() {
-            return Err(permanent(format!("{name}: this app was a connector that runs other code now, so it is lent nothing from its owner's Vault: an editor can set the app's own")));
-        }
-        if !self.lends_now().map_err(retry)? {
-            return Err(permanent(format!("{name}: {LENT_WHILE_LINKED}")));
+        if let Some(why) = self.lends_not().map_err(retry)? {
+            return Err(permanent(format!("{name}: {why}")));
         }
         let host = url.host_str().unwrap_or_default().trim_end_matches('.');
         match crate::vault::lent(&self.env, &owner, &self.name().map_err(retry)?, name, host).await {
@@ -1062,12 +1061,16 @@ impl FragmentCell {
         }
     }
 
-    /// Whether a key its owner's Vault lends may go now: only while its
-    /// link does not open it (FIN-352: a key is reach). Read before the
-    /// Vault is asked and again as the fetch is sent, so a link opened
-    /// meanwhile sends none.
-    fn lends_now(&self) -> CellResult<bool> {
-        Ok(self.visibility()? == fragment_proto::Visibility::Members)
+    /// Why a key its owner's Vault lends may not go now, if it may not:
+    /// ever once it was a connector that ran other code (`Unmade`), and
+    /// while its link opens it (FIN-352: a key is reach). Read before the
+    /// Vault is asked and again as the fetch is sent, so a change meanwhile
+    /// sends none.
+    fn lends_not(&self) -> CellResult<Option<&'static str>> {
+        if self.meta(MetaKey::Unmade)?.is_some() {
+            return Ok(Some(LENT_UNMADE));
+        }
+        Ok((self.visibility()? != fragment_proto::Visibility::Members).then_some(LENT_WHILE_LINKED))
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
@@ -1121,10 +1124,10 @@ impl FragmentCell {
         let mut lent = false;
         let names: Vec<String> = f.headers.values().flat_map(|v| placeholders(v)).map(str::to_string).chain(in_url.iter().cloned()).collect();
         for name in names {
-            if !filled.contains_key(&name) {
-                let (secret, was_lent) = self.fill(&name, &url).await?;
+            if let std::collections::btree_map::Entry::Vacant(slot) = filled.entry(name) {
+                let (secret, was_lent) = self.fill(slot.key(), &url).await?;
                 lent |= was_lent;
-                filled.insert(name, secret);
+                slot.insert(secret);
             }
         }
         for (k, given) in &f.headers {
@@ -1197,8 +1200,10 @@ impl FragmentCell {
         let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
         // a lent key goes only while its link does not open it, decided in
         // the turn it is sent: its owner's Vault was asked meanwhile
-        if lent && !self.lends_now().map_err(|e| StepFail::Retry(e.message))? {
-            return Err(permanent(LENT_WHILE_LINKED));
+        if lent {
+            if let Some(why) = self.lends_not().map_err(|e| StepFail::Retry(e.message))? {
+                return Err(permanent(why));
+            }
         }
         let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();

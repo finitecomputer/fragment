@@ -1151,6 +1151,17 @@ pub fn secrets_page(s: &mut Suite, api: &Api) -> Result<()> {
         guesses.iter().all(|g| g.status == asked.status && g.body == asked.body) && held.body == before.body,
         json!({ "held": { "status": asked.status, "body": asked.body }, "guessed": guesses.iter().map(|g| format!("{} {}", g.status, g.text)).collect::<std::collections::BTreeSet<_>>() }),
     );
+    // nor does its page lend one to its author's app (FIN-615, PR 12): the
+    // Vault's routes are its person's alone, by their key or the shell's
+    // session on the platform's own origin, never a fragment's page
+    let lend = json!({ "key": "STOLEN" });
+    let lend_asked = api.call(api::Call { method: "PUT", url: api.site_url(&name, &format!("api/vault/telegram-e2e/apps/{name}")), body: Some(lend.to_string().into_bytes()), content_type: Some("application/json"), cookie: Some(cookie.clone()), extra: extra.clone(), ..api::Call::default() })?;
+    let held = api.signed(&visitor, "GET", "/api/vault", None)?;
+    s.ok(
+        "a lend asked from the page of an ordinary fragment, with a visiting editor's session, lends nothing: their Vault lists the secret as it was, lent to no app",
+        lend_asked.status != 200 && held.body == before.body,
+        json!({ "asked": lend_asked.status, "vault": held.body }),
+    );
     // their own move (their key) keeps it within the hosts they set for it
     // in their Vault: toward another, refused before anything is claimed
     let wider = api.signed(&visitor, "PUT", &format!("/api/f/{name}/secrets/WIDER"), Some(&json!({ "fromVault": "telegram-e2e", "hosts": ["api.telegram.org", "127.0.0.1"] })))?;
