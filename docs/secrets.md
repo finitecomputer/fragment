@@ -207,8 +207,9 @@ way T3 Code's secret prompt does: the agent never sees what they give.
   not given. An ask whose answer would take the Vault past its 8 hosts
   (above: every distinct one, the catalog's too) is refused as the agent
   asks, in the same words, and no card is drawn: no one is asked to paste
-  what Save would refuse. The person changes or removes a secret with `fragment vault
-  set|list|rm`.
+  what Save would refuse. The person changes or removes a secret in
+  Settings → Secrets, each change made only onto the secret as they read
+  it (`held`, 409 otherwise), or with `fragment vault set|list|rm`.
 - **It ends**: saved, declined, or after ten minutes unanswered (or asked
   again by the same agent for the same name). At most 8 wait on a person,
   and their Vault keeps at most 64, ended ones an hour.

@@ -29,6 +29,12 @@ pub struct PutSecret {
     /// The agents that may use it, each by its fragment's name: at least
     /// one (Paul, 2026-11-09: per agent).
     pub agents: Vec<String>,
+    /// The secret as its writer last read it (`Secret::revision`), or
+    /// `none` for a name not kept: one that changed since is refused (409)
+    /// and nothing is written. None, it is set whatever is held.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub held: Option<String>,
 }
 
 /// Where a secret goes on a request: one of a header in a format
@@ -73,6 +79,12 @@ pub struct Secret {
     pub agents: Vec<String>,
     /// When its value was set, in ms since the epoch.
     pub set_at: i64,
+    /// Which one it is (a new value, or a change to its hosts, place or
+    /// agents, makes another), in every answer that reads it: what a
+    /// `PutSecret::held` names. Never kept with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub revision: Option<String>,
 }
 
 /// `GET /api/vault`: the person's secrets, by name.
