@@ -94,8 +94,8 @@ const CODE_CHANGED_ATTEMPTS_MAX: u32 = 8;
 
 /// Test fleets: the longest an advance is held (`hold-advances`), and how
 /// often a held one looks again.
-const TEST_HOLD_MAX_MS: u64 = 20_000;
-const TEST_HOLD_POLL_MS: u64 = 50;
+pub(crate) const TEST_HOLD_MAX_MS: u64 = 20_000;
+pub(crate) const TEST_HOLD_POLL_MS: u64 = 50;
 /// Queued runs started a pass, in one `createBatch` (which takes at most 100).
 const LAUNCH_BATCH: usize = 100;
 /// Running runs checked against their Workflow per alarm, once they are this old.
