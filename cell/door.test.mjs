@@ -1111,6 +1111,20 @@ test("a way back whose save can't be read, its runner stopped for it: refused, i
   assert.deepEqual([r.status, await r.text(), d.row().stopped], [200, "its last", "handed back"]);
 });
 
+test("a way back from a door holding a staged chat, its save unreadable: its fence let go, nothing started, the chat still its owner's to keep or let go (Codex's check of 2165e149b)", async () => {
+  const d = door();
+  await d.lever("import", { door: DOOR, agent: "Juniper", bytes: btoa("their old chat"), staged: true });
+  const get = d.blobs.get;
+  d.blobs.get = async () => {
+    d.blobs.get = get;
+    throw new Error("the bucket's read failed");
+  };
+  const failed = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.equal(failed.status, 500);
+  const s = await (await d.call("POST", "/door/state", {}, "{}")).json();
+  assert.deepEqual([d.row().stopped, d.c.starts.length, s.staged], [null, 0, true], "never started for them");
+});
+
 test("two ways back at once, the first's save unreadable: the second waits for it, then hands its save back, its runner stopped, never started again after (Codex's fix-check of f9a7b3cb3)", async () => {
   const d = door();
   await d.moved();

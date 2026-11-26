@@ -526,11 +526,16 @@ export class SimplexDoor extends DurableObject {
     }
   }
 
-  // A way back that handed nothing back lets go of the fence it set: its
-  // runner starts again, from its last save (no save of it went anywhere).
+  // A way back that handed nothing back lets go of the fence it set: a
+  // runner that ran starts again, from its last save (no save of it went
+  // anywhere); a door that never started stays so, for its connector's
+  // connect (a staged chat's at its owner's word alone: Codex's check of
+  // 2165e149b).
   async #resume() {
     this.ctx.storage.sql.exec("UPDATE door SET stopped = NULL WHERE id = 1 AND stopped = ?", HANDED_BACK);
-    this.#log("door.resumed", {});
+    const ran = this.#door()?.started > 0;
+    this.#log("door.resumed", { ran });
+    if (!ran) return;
     await this.ctx.storage.setAlarm(Date.now() + WATCH_MS);
     await this.#ensure("resumed").catch((e) => this.#log("door.start_failed", { why: String((e && e.message) || e).slice(0, 300) }));
   }
