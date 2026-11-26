@@ -4319,8 +4319,9 @@ impl ComputerCell {
     /// (`back`): its door's newest save the
     /// body (`x-door-behind` passed on), marked moved no more once its
     /// bridge placed it. Its bridge's answer is passed on as it came; a
-    /// handover it refused (a 4xx but `moved`: it changed nothing) is
-    /// marked moved no more.
+    /// handover it refused at its first ask (a 4xx but `moved`: it changed
+    /// nothing) is marked moved no more, a retried one's never
+    /// (`fragment_core::door::handover_refusal_unmarks`).
     async fn simplex_hand(&self, req: Request) -> CellResult<Response> {
         let header = |k: &str| req.headers().get(k).ok().flatten().unwrap_or_default();
         let (act, agent, behind) = (header("x-door-act"), header("x-door-agent"), header("x-door-behind"));
@@ -4335,8 +4336,11 @@ impl ComputerCell {
             "back" => false,
             _ => return Err(CellError::invalid("x-door-act: handover or back")),
         };
+        // asked again with the ticket it was given (its first ask's answer
+        // lost, or its save damaged on its way)
+        let retried = handover && rec["moved"] == true && rec["ticket"].is_object();
         let ticket = match rec["ticket"].clone() {
-            t if handover && rec["moved"] == true && t.is_object() => t,
+            t if retried => t,
             _ => crate::fragment::ask(&self.env, &agent, "computer/simplex-move", &json!({ "computer": computer, "act": act })).await?,
         };
         // a handover marked before its bridge is asked; a way back unmarked
@@ -4414,7 +4418,7 @@ impl ComputerCell {
             }
         } else if handover && (400..500).contains(&status) {
             let said: Value = answer.read_json().await.unwrap_or(Value::Null);
-            if said["error"] != "moved" {
+            if fragment_core::door::handover_refusal_unmarks(said["error"].as_str().unwrap_or(""), retried) {
                 self.simplex_move_update(&agent, unmark)?;
             }
             return Ok(json_response(&said)?.with_status(status));

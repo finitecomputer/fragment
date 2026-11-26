@@ -87,6 +87,15 @@ pub const FILE_SHA_HEADER: &str = "x-door-sha256";
 /// A door id's digits of its connector's life.
 pub const DOOR_LIFE_HEX: usize = 12;
 
+/// Whether a bridge's refusal of a SimpleX handover (`error`, a 4xx) lets
+/// go of its computer's moved mark: only the first ask's, and not one
+/// saying it is moved. A retried ticket's refusal proves nothing of the
+/// ask before it, which may have packed the link and stopped its core
+/// (Codex's round on 744c41078).
+pub fn handover_refusal_unmarks(error: &str, retried: bool) -> bool {
+    !retried && error != "moved"
+}
+
 /// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
 /// digits of a digest of its life's own key (its npub, drawn new for each
 /// life), as its repo is named (`codestorage::repo_name`). A name made
@@ -330,6 +339,18 @@ mod tests {
 
     pub(crate) fn ticket() -> Ticket {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
+    }
+
+    /// Goal: a handover's refusal lets go of the moved mark only when it
+    /// proves nothing changed. Valid: the first ask's busy. Invalid: one
+    /// saying moved; any refusal of a retried ticket, a damaged one's 403
+    /// included (Codex's round on 744c41078).
+    #[test]
+    fn a_handover_refusal_unmarks_only_a_first_ask() {
+        assert!(handover_refusal_unmarks("busy", false));
+        assert!(!handover_refusal_unmarks("moved", false));
+        assert!(!handover_refusal_unmarks("forbidden", true));
+        assert!(!handover_refusal_unmarks("busy", true));
     }
 
     /// Goal: a SimpleX connector's jobs reach their own door alone, and no
