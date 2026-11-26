@@ -160,6 +160,35 @@ pub struct Facts {
     pub new_image: Option<bool>,
 }
 
+/// What a start's disk did (docs/computers.md, "The start line"), on a
+/// disk's start: its guest's own numbers, as its boot reports them with
+/// its first read of its view (`fpac`'s, at that read), and what its last
+/// sleep left unshipped (the DO's own reading at that sleep).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskFacts {
+    /// ms from its daemon's start to `/data` mounted: its open, its pack's
+    /// head, the device and the mount.
+    pub mount_ms: Option<u64>,
+    /// Reads its daemon fetched from R2 by then.
+    pub misses: Option<u64>,
+    /// Fetches it made again by then, the bytes failing their checksum.
+    pub refetches: Option<u64>,
+    /// Bytes its last sleep had not yet shipped as its stop began.
+    pub slept_unshipped: Option<u64>,
+}
+
+impl DiskFacts {
+    /// Each fact `other` has, over this one's.
+    fn with(self, other: DiskFacts) -> DiskFacts {
+        DiskFacts {
+            mount_ms: other.mount_ms.or(self.mount_ms),
+            misses: other.misses.or(self.misses),
+            refetches: other.refetches.or(self.refetches),
+            slept_unshipped: other.slept_unshipped.or(self.slept_unshipped),
+        }
+    }
+}
+
 /// How a start's line ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum End {
@@ -186,6 +215,7 @@ struct Line {
     heard_ms: Option<i64>,
     turn_ms: Option<i64>,
     failing: Option<Failed>,
+    disk: Option<DiskFacts>,
 }
 
 impl Line {
@@ -207,6 +237,7 @@ impl Line {
                 RestoreSource::Snapshot => "snapshot",
                 RestoreSource::Backup => "restore",
                 RestoreSource::Nothing => "fresh",
+                RestoreSource::Disk => "disk",
             };
             let _ = write!(s, r#","path":"{path}""#);
             if let Some(why) = f.why {
@@ -219,6 +250,18 @@ impl Line {
                 let _ = write!(s, r#","newImage":{new}"#);
             }
         }
+        if let Some(d) = self.disk {
+            let facts = [("mountMs", d.mount_ms), ("misses", d.misses), ("refetches", d.refetches), ("sleptUnshipped", d.slept_unshipped)];
+            let _ = write!(s, r#","disk":{{"#);
+            let mut first = true;
+            for (key, value) in facts {
+                if let Some(v) = value {
+                    let _ = write!(s, r#"{}"{key}":{v}"#, if first { "" } else { "," });
+                    first = false;
+                }
+            }
+            s.push('}');
+        }
         let steps = [("beganMs", Some(self.began_ms)), ("upMs", self.up_ms), ("dataMs", self.data_ms), ("readyMs", self.ready_ms), ("heardMs", self.heard_ms), ("turnMs", self.turn_ms)];
         for (key, at) in steps {
             if let Some(at) = at {
@@ -229,6 +272,45 @@ impl Line {
         assert!(s.len() <= LINE_MAX_BYTES, "a start's line is bounded: {s}");
         s
     }
+}
+
+/// What a disk's sleep did (docs/computers.md, "The sleep line"): one line
+/// per sleep of a computer on a disk, beside the start line, so its stops
+/// can be graphed as its wakes are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SleepFacts {
+    pub generation: u64,
+    /// Bytes its disk had not shipped as its stop began: written and not
+    /// cut, or cut and not landed (`fpac status`). None: unread.
+    pub unshipped: Option<u64>,
+    /// Its life's misses and fetches made again, as its disk counted them
+    /// as its stop began.
+    pub misses: Option<u64>,
+    pub refetches: Option<u64>,
+    /// ms its hold waited for its disk to ship, and its stop took (SIGTERM
+    /// to its container gone).
+    pub drain_ms: i64,
+    pub stop_ms: i64,
+    /// Its guest exited within its wait: its final flush ended.
+    pub exited: bool,
+    /// Its head after the stop marks a clean sleep: the next open replays
+    /// nothing.
+    pub clean: bool,
+}
+
+/// A disk's sleep's line, plain JSON, at most `LINE_MAX_BYTES`:
+/// `{"sleep":{"generation":7,"unshipped":0,…},"computer":"computer:…"}`.
+pub fn sleep_line(computer: &str, f: &SleepFacts) -> String {
+    let mut s = String::with_capacity(LINE_MAX_BYTES);
+    let _ = write!(s, r#"{{"sleep":{{"generation":{}"#, f.generation);
+    for (key, value) in [("unshipped", f.unshipped), ("misses", f.misses), ("refetches", f.refetches)] {
+        if let Some(v) = value {
+            let _ = write!(s, r#","{key}":{v}"#);
+        }
+    }
+    let _ = write!(s, r#","drainMs":{},"stopMs":{},"exited":{},"clean":{}}},"computer":"{}"}}"#, f.drain_ms.max(0), f.stop_ms.max(0), f.exited, f.clean, id_of(computer));
+    assert!(s.len() <= LINE_MAX_BYTES, "a sleep's line is bounded: {s}");
+    s
 }
 
 /// The id a line names: what an id is made of (`computer:` and hex), at
@@ -285,7 +367,7 @@ impl Starts {
             Some((at, woke)) if at <= now_ms => (at, Some(woke)),
             _ => (now_ms, None),
         };
-        self.line = Some(Line { computer: id_of(computer), generation, woke, from_ms, began_ms: now_ms, facts: None, up_ms: None, data_ms: None, ready_ms: None, heard_ms: None, turn_ms: None, failing: None });
+        self.line = Some(Line { computer: id_of(computer), generation, woke, from_ms, began_ms: now_ms, facts: None, up_ms: None, data_ms: None, ready_ms: None, heard_ms: None, turn_ms: None, failing: None, disk: None });
         before
     }
 
@@ -297,6 +379,15 @@ impl Starts {
     pub fn planned(&mut self, generation: u64, facts: Facts) {
         if let Some(l) = self.of(generation) {
             l.facts = Some(facts);
+        }
+    }
+
+    /// What start `generation`'s disk did, as far as is known now: its last
+    /// sleep's unshipped bytes as it is planned, its guest's numbers as it
+    /// reports them. Each fact once known stands.
+    pub fn disk(&mut self, generation: u64, facts: DiskFacts) {
+        if let Some(l) = self.of(generation) {
+            l.disk = Some(l.disk.unwrap_or_default().with(facts));
         }
     }
 
@@ -324,9 +415,15 @@ impl Starts {
     }
 
     /// Its guest read its view at `now_ms`: the first read since the start
-    /// under way began (its boot's, or its bridge's). Answers a line due.
-    pub fn heard(&mut self, now_ms: i64) -> Option<String> {
+    /// under way began (its boot's, or its bridge's), with what its disk
+    /// did if it is on one and said so. Answers a line due.
+    pub fn heard(&mut self, now_ms: i64, disk: Option<DiskFacts>) -> Option<String> {
         if let Some(l) = self.line.as_mut().filter(|l| now_ms >= l.began_ms) {
+            if l.heard_ms.is_none() {
+                if let Some(d) = disk {
+                    l.disk = Some(l.disk.unwrap_or_default().with(d));
+                }
+            }
             l.heard_ms.get_or_insert(now_ms);
         }
         self.due(now_ms)
@@ -456,7 +553,7 @@ mod tests {
                 Outcome::Ready => {
                     self.c.now += 200;
                     // its guest reads its view as its entrypoint starts
-                    self.lines.extend(self.starts.heard(self.c.now));
+                    self.lines.extend(self.starts.heard(self.c.now, None));
                     let save = self.c.saves.current().map(|c| c.id.clone()).filter(|_| plan != Plan::Nothing);
                     assert!(self.c.saves.came_up(g, plan.source(), save.as_deref(), image, self.c.now).is_some());
                     self.apply(Event::Ready { generation: g })
@@ -536,6 +633,47 @@ mod tests {
     /// not before), replay (a turn after its line was written writes
     /// nothing more). Method: the lifecycle and its saves driven as the DO
     /// drives them (`Driven`), the lines it wrote parsed.
+    // Goal: a disk's start line names its path and its disk's numbers:
+    // what its last sleep left unshipped (the DO's, as it is planned) and
+    // its guest's mount time, misses and fetches made again (its boot's,
+    // with its first view read; a later read changes none); and a disk's
+    // sleep says what it left unshipped, how long it took, and whether it
+    // slept clean; both within their bound. Method: a disk start's line
+    // made as the DO makes it, then written; a sleep's line.
+    #[test]
+    fn a_disk_says_its_numbers_on_its_lines() {
+        let id = "computer:17c33cdf88c6d1d8f58b7a0f";
+        let mut starts = Starts::default();
+        starts.asked(Woke::Wake(Wake::Record), &Phase::ASLEEP, 1_000);
+        assert!(starts.begin(id, 7, 1_100).is_none());
+        starts.planned(7, Facts { path: RestoreSource::Disk, why: None, bytes: None, new_image: Some(false) });
+        starts.disk(7, DiskFacts { slept_unshipped: Some(65_536), ..Default::default() });
+        let boot = DiskFacts { mount_ms: Some(120), misses: Some(3), refetches: Some(0), slept_unshipped: None };
+        assert!(starts.heard(2_000, Some(boot)).is_none());
+        assert!(starts.heard(2_500, Some(DiskFacts { misses: Some(99), ..Default::default() })).is_none());
+        let l: Value = serde_json::from_str(&starts.write().expect("its line")).unwrap();
+        let l = &l["start"];
+        assert_eq!(&l["path"], "disk");
+        assert_eq!(l["disk"], serde_json::json!({"mountMs":120,"misses":3,"refetches":0,"sleptUnshipped":65_536}), "{l}");
+        assert!(l.get("bytes").is_none() && l.get("why").is_none(), "nothing restored: {l}");
+        // a sleep's line, the largest it can be
+        let facts = SleepFacts { generation: u64::MAX, unshipped: Some(u64::MAX), misses: Some(u64::MAX), refetches: Some(u64::MAX), drain_ms: i64::MAX, stop_ms: i64::MAX, exited: false, clean: false };
+        let line = sleep_line(id, &facts);
+        assert!(line.len() <= LINE_MAX_BYTES, "{line}");
+        let v: Value = serde_json::from_str(&sleep_line(id, &SleepFacts { generation: 7, unshipped: Some(0), misses: Some(4), refetches: Some(0), drain_ms: 900, stop_ms: 2_100, exited: true, clean: true })).unwrap();
+        assert_eq!(v, serde_json::json!({"sleep":{"generation":7,"unshipped":0,"misses":4,"refetches":0,"drainMs":900,"stopMs":2_100,"exited":true,"clean":true},"computer":id}));
+        // unread, its numbers are left out
+        let v: Value = serde_json::from_str(&sleep_line(id, &SleepFacts { generation: 8, unshipped: None, misses: None, refetches: None, drain_ms: 0, stop_ms: 10, exited: true, clean: false })).unwrap();
+        assert!(v["sleep"].get("unshipped").is_none() && v["sleep"].get("misses").is_none(), "{v}");
+        // the largest start line with disk facts fits too
+        let mut big = Starts::default();
+        big.begin(id, u64::MAX, 0);
+        big.planned(u64::MAX, Facts { path: RestoreSource::Disk, why: None, bytes: Some(u64::MAX), new_image: Some(true) });
+        big.disk(u64::MAX, DiskFacts { mount_ms: Some(u64::MAX), misses: Some(u64::MAX), refetches: Some(u64::MAX), slept_unshipped: Some(u64::MAX) });
+        big.heard(i64::MAX, None);
+        assert!(big.write().is_some_and(|l| l.len() <= LINE_MAX_BYTES));
+    }
+
     #[test]
     fn every_start_writes_one_line_with_its_path() {
         let mut d = Driven::new();

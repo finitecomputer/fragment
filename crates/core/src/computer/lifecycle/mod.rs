@@ -218,6 +218,28 @@ pub struct Lifecycle {
     /// or as a wake or a restart counts its strikes anew.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     blocked_since_ms: Option<i64>,
+    /// Its `/data` is a disk (docs/computers.md, "A disk"; `fpac`): written
+    /// to R2 as it goes, so it is never saved for itself. A sleep's hold
+    /// waits for the disk to ship what it holds (the cell's), and its stop
+    /// follows at once; no save is due awake but its owner's export's
+    /// (`export_due_ms`). Set as it is made, for good: false in every
+    /// lifecycle stored before it was kept.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    disk: bool,
+    /// A disk's save its owner's export asked for (`Event::ExportAsked`):
+    /// due from then, taken awake under the hold as any awake save; one
+    /// that failed is due again after its pause. None once one is saved,
+    /// as its export gives up, and whenever no start runs (asked asleep, or
+    /// its start or life ended): the export asks again while it waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    export_due_ms: Option<i64>,
+    /// When its last save that landed (`Event::Saved`; a disk's sleep is no
+    /// save) was asked for: an export begun before then takes no second
+    /// (`Event::ExportAsked`). Its ask, never its landing: the save is
+    /// stored before its event, so an export begun between finds it too old
+    /// and asks again, and is heard (Codex on #1552).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    saved_asked_ms: Option<i64>,
 }
 
 impl Default for Lifecycle {
@@ -226,11 +248,26 @@ impl Default for Lifecycle {
     }
 }
 
+/// Why a disk's sleep did not stop: its wait ended with writes unshipped.
+const DISK_UNSHIPPED: &str = "its disk still had writes to ship when its wait ended";
+
 impl Lifecycle {
     /// Whether it stays awake whatever is open (a `seat_always_on` seat's,
     /// as its owner's seat says: the registry tells it).
     pub fn always_on(&self) -> bool {
         self.always_on
+    }
+
+    /// Whether its `/data` is a disk (`disk`'s doc).
+    pub fn disk(&self) -> bool {
+        self.disk
+    }
+
+    /// It is made on a disk: before its first start, never after (a
+    /// computer with saves keeps them; moving one is not this).
+    pub fn set_disk(&mut self) {
+        assert!(self.generation == 0 && matches!(self.phase, Phase::Asleep { .. }), "a computer is put on a disk as it is made");
+        self.disk = true;
     }
 
     /// Whether this wake fell back from a snapshot that would not start
@@ -269,6 +306,9 @@ impl Lifecycle {
             tab_used_ms: 0,
             changed_ms: None,
             blocked_since_ms: None,
+            disk: false,
+            export_due_ms: None,
+            saved_asked_ms: None,
         }
     }
 
@@ -429,6 +469,12 @@ impl Lifecycle {
                 };
                 match self.saving {
                     Some(s) => at = at.min(s.deadline_ms()),
+                    // a disk is saved awake only for its owner's export
+                    None if self.disk => {
+                        if let Some(due) = self.export_due_ms {
+                            at = at.min(due);
+                        }
+                    }
                     None => {
                         if let Some(due) = self.save_due_ms.filter(|_| self.keepalives == 0) {
                             at = at.min(due);
@@ -550,6 +596,16 @@ impl Lifecycle {
                     }
                 }
             }
+            // its owner's export asks a disk for a save: due now, or when
+            // one that failed may go again (asked again meanwhile, it waits
+            // its pause), taken by its alarm once it runs (the export wakes
+            // it), never in the ask's own step: the export only looks. A
+            // computer with saves of its own has its newest, and asks none
+            (_, Event::ExportAsked { since_ms }) if self.disk && self.running().is_some() && self.saved_asked_ms.is_none_or(|at| at < since_ms) => {
+                self.export_due_ms.get_or_insert(now_ms);
+            }
+            (_, Event::ExportAsked { .. }) => {}
+            (_, Event::ExportDropped) => self.export_due_ms = None,
             (Phase::Asleep { .. } | Phase::Failed { .. }, Event::SaveChosen) => {
                 self.failures = 0;
                 self.restore_fallbacks = 0;
@@ -619,6 +675,7 @@ impl Lifecycle {
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
+                | Event::AsleepUnshipped { .. }
                 | Event::Exited { .. }
                 | Event::StartFailing { .. }
                 | Event::StartBlocked { .. },
@@ -633,6 +690,20 @@ impl Lifecycle {
             (Phase::Sleeping { generation, owes_start, .. }, Event::Asleep { generation: g }) if g == generation => {
                 // a sleep that owes no start let go of any wake it held: its
                 // hold ran out, or its owner put it to sleep
+                if !owes_start {
+                    self.owed_ms = None;
+                }
+                self.end_life(LifeEnd::Sleep, now_ms, &mut step);
+                self.gone(now_ms, &mut step);
+            }
+            (Phase::Sleeping { generation, owes_start, .. }, Event::AsleepUnshipped { generation: g }) if g == generation => {
+                // its final flush ended in no clean head: its last moments'
+                // writes may not have shipped, so its life ends unsaved,
+                // saying so, never recorded as saved
+                if let Some(Saving::Stop { since_ms, .. }) = self.saving {
+                    self.saving = Some(Saving::Stop { since_ms, saved: false });
+                }
+                step.note = SaveNote::Says("its sleep's final flush did not finish: what it wrote in its last moments may not have shipped".into());
                 if !owes_start {
                     self.owed_ms = None;
                 }
@@ -693,6 +764,23 @@ impl Lifecycle {
                 self.end_life(LifeEnd::Exit, now_ms, &mut step);
                 self.gone(now_ms, &mut step);
             }
+            (Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && self.disk && matches!(self.saving, Some(Saving::Hold { .. })) => {
+                if held {
+                    // a disk's hold waited for it to ship what it held:
+                    // nothing to save, its stop now (its final flush sends
+                    // the writes since its last look)
+                    self.saved(now_ms, &mut step);
+                    self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                    step.actions.push(Action::Stop { generation, saved: true });
+                } else {
+                    // its wait ended with writes still unshipped, or no word
+                    // of them: it never stops with them in it. As a sleep
+                    // whose save failed, it stays awake on its container and
+                    // its next sleep waits again; past the bound it stops
+                    // unsaved, saying so (Codex on #1552)
+                    self.sleep_save_failed(generation, DISK_UNSHIPPED, now_ms, rules, &mut step);
+                }
+            }
             (Phase::Awake { generation, .. } | Phase::Sleeping { generation, .. }, Event::Held { generation: g, held }) if g == generation && matches!(self.saving, Some(Saving::Hold { .. })) => {
                 self.save(generation, held, now_ms, &mut step);
             }
@@ -707,6 +795,8 @@ impl Lifecycle {
                 // let go again, though it let go once its home was in: that
                 // unhold's exec may have failed (Codex on #1378)
                 self.saving = None;
+                self.export_due_ms = None;
+                self.saved_asked_ms = Some(self.save_asked_ms);
                 self.saved(now_ms, &mut step);
                 step.actions.push(Action::Unhold { generation });
             }
@@ -724,6 +814,8 @@ impl Lifecycle {
                         self.meter_span(self.save_asked_ms.max(metered_before), since_ms, &mut step);
                     }
                 }
+                self.export_due_ms = None;
+                self.saved_asked_ms = Some(self.save_asked_ms);
                 self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
                 step.actions.push(Action::Stop { generation, saved: true });
@@ -746,6 +838,7 @@ impl Lifecycle {
                 | Event::Saved { .. }
                 | Event::SaveFailed { .. }
                 | Event::Asleep { .. }
+                | Event::AsleepUnshipped { .. }
                 | Event::Exited { .. }
                 | Event::StartFailing { .. }
                 | Event::StartBlocked { .. },
@@ -887,12 +980,14 @@ impl Lifecycle {
                     if now_ms >= s.deadline_ms() {
                         self.overdue(generation, s, now_ms, rules, &mut step);
                     }
-                } else {
+                } else if !self.disk {
                     let settled = self.keepalives == 0 && self.save_due_ms.is_some_and(|due| now_ms >= due);
                     let busy = self.busy_save_due_ms().is_some_and(|due| now_ms >= due);
                     if settled || busy {
                         self.hold_for_save(generation, now_ms, &mut step);
                     }
+                } else if self.export_due_ms.is_some_and(|due| now_ms >= due) {
+                    self.hold_for_save(generation, now_ms, &mut step);
                 }
             }
             (Phase::Sleeping { generation, since_ms, .. }, Event::Alarm) => {
@@ -904,6 +999,11 @@ impl Lifecycle {
                 }
             }
             (Phase::Failed { .. }, Event::Alarm) => {}
+        }
+        // an export's ask is for a computer that runs: one whose start
+        // failed, or whose life ended, has none (its export asks again)
+        if self.running().is_none() {
+            self.export_due_ms = None;
         }
         step.alarm_ms = self.next_alarm().map(|at| match self.saving {
             // a stop under way is looked at every `STOP_LOOK_MS` up to its

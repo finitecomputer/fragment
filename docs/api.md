@@ -70,7 +70,7 @@ person's fragment so labelled.
 | `POST /api/test/keys` | `{fragment, op, plaintext \| sealed}` |
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
-| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
+| `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?, head?, epoch?}` (`fpac` reads a disk's row and its last fallback; `fpac-head {head}`, asleep, makes `head` its newest; `fpac-objects {epoch}` lists what that life put in the bucket; `fpac-status` reads its running daemon's count, which `kill` reads too, just before its signal) |
 | `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?, files?, bytes?, type?, sha?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply` (`files` as its connector names them), `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `file` (`bytes`, base64, typed `type`, held as its runner gives a file → `{sha256, size}`; or `sha`: what it holds under that name, hashed again → `{sha256, size, type}`), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
@@ -516,7 +516,9 @@ fragment decides their role and meters the request to its owner): who
 they are, their and their agents' lists, each fragment they or their
 agents own (a fragment shared with them is only named, `sharedWithMe`),
 and their computer's newest save, with the newest one set aside beside it
-(docs/computers.md, "Saves and what a wake restores"). What a fragment refuses or lacks is
+(docs/computers.md, "Saves and what a wake restores"); a computer on a
+disk keeps none, so the export has one taken for it, awake (docs/computers.md,
+"A disk"). What a fragment refuses or lacks is
 named in its `meta.json` (`skipped`). The archive is one uncompressed tar
 whose layout and formats its own README states
 (`fragment_core::export::README`); its bounds are

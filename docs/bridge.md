@@ -41,7 +41,8 @@ acts as one of the computer's agents (`x-fragment-agent`), but the
 computer's own:
 
 - the computer's: `GET /api/computer` (`?simplex=1` from an image that
-  names a SimpleX core), `POST /api/computer/door`, and the WebSockets
+  names a SimpleX core; on a disk, what its mount did, until a read has
+  said it: `disk.rs`), `POST /api/computer/door`, and the WebSockets
   `GET /api/computer/keepalive` and `GET /api/computer/relay`;
 - what an agent follows: `GET /api/fragments`, and on each fragment
   `GET …/channels`, `…/channels/{c}`, `…/members` and `…/subscriptions`
@@ -68,6 +69,12 @@ with its default. What an image sets:
 
 - `FRAGMENT_API`, required; `RESTORE_PENDING=1` to wait for
   `BRIDGE_RESTORED` before anything else (docs/computers.md).
+- `BRIDGE_MOUNTS_DISK=1`: the bridge is its image's PID 1 (the stub's),
+  so with `FRAGMENT_DISK=fpac` it mounts `/data` from the computer's disk
+  before anything else and waits for its final flush before it exits
+  (`disk.rs`; docs/computers.md, "A disk"); a head that will not open it
+  says on its disk's route (`POST /unusable`). An image whose boot mounts it
+  (our Hermes image's) leaves it unset.
 - `BRIDGE_HOLD` and `BRIDGE_HELD`, the platform's hold before a save
   (docs/computers.md, "The hold"). The bridge claims no turn while the
   hold exists, and answers it only while no claim is in flight, so a save
