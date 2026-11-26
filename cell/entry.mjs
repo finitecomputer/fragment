@@ -771,11 +771,12 @@ class ContainerHost {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  damage(path, n) {
+  // The levers `damage` and `fail` on its bridge's `path` (computer.rs).
+  damagePort(path, n) {
     this.#portDamage = { path, n };
   }
 
-  fail(path, n) {
+  failPort(path, n) {
     this.#portFail = { path, n };
   }
 

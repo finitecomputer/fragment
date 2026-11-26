@@ -3644,7 +3644,8 @@ impl ComputerCell {
                 // container answered (a handover's answer lost after it packed)
                 let path = b.path.as_deref().filter(|p| p.starts_with('/')).ok_or_else(|| CellError::invalid("damage and fail name their bridge's path"))?;
                 let times = b.times.unwrap_or(1);
-                self.call(b.op.as_str(), &[JsValue::from_str(path), JsValue::from_f64(f64::from(times))]).await?;
+                let method = if b.op == "damage" { "damagePort" } else { "failPort" };
+                self.call(method, &[JsValue::from_str(path), JsValue::from_f64(f64::from(times))]).await?;
                 Ok(json!({ "computer": id, "op": b.op, "path": path, "times": times }))
             }
             "fail-read" => {
