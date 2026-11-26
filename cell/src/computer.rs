@@ -2936,10 +2936,12 @@ impl ComputerCell {
             exited = true;
         }
         let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
-        if !gone && signalled.is_some_and(within) {
-            // still there: its stop goes on until the runtime says it is
-            // gone, within what it keeps (Codex on #1567)
-            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false, "kept": true }));
+        if !gone {
+            // still there: its stop goes on, its destroy asked again at each
+            // look, until the runtime says it is gone (Codex on #1567): a
+            // life never ends with its container running. The runtime's idle
+            // stop (moved to its guest's wait, or `RUNTIME_IDLE_MS`) ends it
+            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
             return None;
         }
         let _ = self.delete_meta(MetaKey::DiskFlushing);
@@ -2955,9 +2957,6 @@ impl ComputerCell {
         let kept_row = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
         if let Err(e) = kept_row {
             console_error!("{}", json!({ "computer": id, "slept": "unkept", "generation": generation, "error": e.message }));
-        }
-        if !gone {
-            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
         }
         // a final flush that posted no clean head: its last moments' writes
         // may not have shipped, and its life ends unsaved, saying so

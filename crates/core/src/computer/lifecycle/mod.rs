@@ -429,6 +429,18 @@ impl Lifecycle {
         }
     }
 
+    /// A disk's stop's time is the platform's, never its owner's: its final
+    /// flush awaited, kept while its storage is unreachable (FIN-783), for
+    /// as long as the start that runs was told, whatever the deployment says
+    /// now. Free from its beginning (or its unsaved window's) until it is
+    /// gone, which closes it (`gone`). Off a disk, nothing.
+    pub(super) fn stop_free(&mut self, now_ms: i64) {
+        assert!(matches!(self.saving, Some(Saving::Stop { .. })), "a stop's window opens with its stop");
+        if self.disk {
+            self.unmetered = Some((self.unmetered.map_or(now_ms, |(from, _)| from.min(now_ms)), i64::MAX));
+        }
+    }
+
     /// Awake time `[from, to)`, but what falls in the unsaved window, and
     /// none while always on.
     fn meter_span(&self, from: i64, to: i64, step: &mut Step) {
@@ -771,11 +783,7 @@ impl Lifecycle {
                     // the writes since its last look)
                     self.saved(now_ms, &mut step);
                     self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
-                    // its stop's time is the platform's: its final flush
-                    // awaited (kept while its storage is unreachable, up to
-                    // `fpac::flush_kept_ms`: FIN-783), never its owner's
-                    let kept = crate::computer::fpac::guest_flush_ms(crate::computer::fpac::flush_kept_ms(rules.unsaved_max_ms));
-                    self.unmetered = Some((now_ms, now_ms.saturating_add(kept)));
+                    self.stop_free(now_ms);
                     step.actions.push(Action::Stop { generation, saved: true });
                 } else {
                     // its wait ended with writes still unshipped, or no word
@@ -823,6 +831,7 @@ impl Lifecycle {
                 self.saved_asked_ms = Some(self.save_asked_ms);
                 self.saved(now_ms, &mut step);
                 self.saving = Some(Saving::Stop { since_ms: now_ms, saved: true });
+                self.stop_free(now_ms);
                 step.actions.push(Action::Stop { generation, saved: true });
             }
             (Phase::Awake { generation, .. }, Event::SaveFailed { generation: g, seq, why }) if g == generation && self.answers(seq) => {
