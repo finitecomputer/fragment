@@ -338,7 +338,7 @@ impl Move<'_> {
         let headers = [("x-door-act", act), ("x-door-agent", self.agent.as_str()), ("x-door-behind", if behind { "1" } else { "0" }), ("x-door-sha256", sha)];
         let mut r = crate::routed::send(self.env, "COMPUTER", &self.computer, crate::routed::internal_stream("computer/simplex-hand", Method::Post, &headers, save)?).await?;
         if r.status_code() != 200 {
-            answer(&mut r, &format!("its computer's {act}")).await?;
+            answer(&mut r, act).await?;
         }
         Ok(r)
     }
@@ -386,7 +386,7 @@ impl Move<'_> {
                 // with it (its person unlinked it): no way back, its
                 // computer's old copy never run again
                 204 if matches!(text(&rec, "step"), "making" | "made") => (None, false, String::new()),
-                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} holds {}'s SimpleX link no more (unlinked, so ended): no way back; its computer's copy stays stopped", self.agent))),
+                204 => return Err(CellError::new(ErrorCode::Conflict, format!("{door} was unlinked, so ended: no way back; {}'s copy on its computer stays stopped", self.agent))),
                 _ => return Err(answer(&mut held, "its door's way back").await.err().unwrap_or_else(|| CellError::host("its door's way back"))),
             };
             match self.hand("back", save, behind, &sha).await {
@@ -403,7 +403,7 @@ impl Move<'_> {
         // ends) once it has taken what its door delivered, and archived
         if let Some(connector) = rec["connector"].as_str() {
             if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
-                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has delivered messages not yet published (an intake run queued, running, held or blocked): ask again, or replay them")));
+                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has delivered messages not yet published (an intake run not done): ask again, or replay them")));
             }
             match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
                 Err(e) if e.code != ErrorCode::NotFound => return Err(e),
