@@ -355,6 +355,12 @@ impl Move<'_> {
         if rec.is_null() {
             return Err(CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {} to go back from", self.agent)));
         }
+        // its computer runs SimpleX only awake and always on (its bridge's
+        // word): else its door keeps the link, never stopped for nothing
+        // (Codex's round on 8cacd32d1)
+        if rec["moved"] == true && read["link"]["said"]["alwaysOn"] != true {
+            return Err(CellError::new(ErrorCode::Conflict, "its computer runs SimpleX only awake and always on: turn always-on on, then ask `--back` again (its door keeps the link meanwhile)"));
+        }
         // its door stops, saving last, and hands its newest save back, with
         // its SHA-256; a copy its computer finds damaged on its way (seen
         // once on Cloudflare) changed nothing there, and is asked for again

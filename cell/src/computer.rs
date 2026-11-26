@@ -4304,6 +4304,13 @@ impl ComputerCell {
         // is the way back again, never a connector deleted beside a link
         // still moved)
         if handover {
+            // its record as it stands after that wait, looked at and marked
+            // with nothing awaited between: a `back` that let the move go
+            // meanwhile leaves no move to mark, so no core is stopped for
+            // none (Codex's round on 8cacd32d1)
+            if self.simplex_moves()?.get(&agent).map(|r| r["step"].clone()) != Some(json!("made")) {
+                return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move was let go, or went on, as its handover began: nothing handed over")));
+            }
             self.simplex_move_update(&agent, |r| {
                 r["moved"] = json!(true);
                 r["ticket"] = ticket.clone();

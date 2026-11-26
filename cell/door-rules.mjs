@@ -17,9 +17,9 @@ export const DELIVERIES_KEPT = 256;
 // (images/simplex-door/src/main.rs, "Marks").
 export const STALE_ASKS = 3;
 
-// The header its deliveries carry its connector's inbox secret in: the one
-// templates/simplex/fragment.json's `inbox` names.
-export const INBOX_HEADER = "x-simplex-door-secret";
+// The header its deliveries carry their signature in, by its connector's
+// inbox secret: the one templates/simplex/fragment.json's `inbox` names.
+export const INBOX_SIGNATURE_HEADER = "x-simplex-door-signature";
 
 // What its connector's jobs ask (cell/src/jobs.rs sends each as
 // `/job/<ask>`): nothing of its runner's own or its levers'. `file` is a
@@ -215,6 +215,14 @@ const hexOf = (digest) => [...new Uint8Array(digest)].map((b) => b.toString(16).
 // Bytes' SHA-256, in lowercase hex.
 export async function sha256Hex(bytes) {
   return hexOf(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+// A delivery's signature for its connector's inbox (`INBOX_SIGNATURE_HEADER`,
+// its inbox's `hmac`: templates/simplex fragment.json): HMAC-SHA256 of its
+// body by the inbox's secret, so a body changed on its way is refused.
+export async function inboxSignature(secret, body) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return `sha256=${hexOf(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))}`;
 }
 
 // A transfer as the e2e's levers damage one on its way (`damage`, as

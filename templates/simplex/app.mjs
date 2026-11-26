@@ -55,6 +55,9 @@ const SEEN_MAX = 2000;
 // (two steps a round, within a job's JOB_STEPS_MAX of 256).
 const REPLY_ASKS_MAX = 30;
 const REPLY_WAIT_MAX_MS = 30_000;
+// An ask of its door, or its answer, damaged on its way, asked again at
+// most this often (`door`).
+const DOOR_ASKS = 3;
 // A reply's file the door found damaged on its way (422: not the bytes its
 // name, its SHA-256, says; FIN-775), given again at most this often before
 // it stays in the chat alone: the chat's own copy is whole.
@@ -71,9 +74,25 @@ const QR_SIZE_MAX = 177;
 // The steps a failure names, the one its setup page tries again.
 const STEPS = ["connect", "link", "unlink"];
 
+// A text's SHA-256, lowercase hex.
+const sha256 = async (text) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
 // An ask of its door, as its job's fetch: its status, and what it said.
+// Its body is named by its SHA-256, which its door checks before it takes
+// it, and its answer is used only as its door named it. Either damaged on
+// its way (FIN-775) is asked again, the same ask (its door answers a reply
+// it took by its key, a link or unlink by its number), at most `DOOR_ASKS`
+// times; still damaged, its step fails, to be tried again.
 async function door(job, ask, body = {}, headers = {}) {
-  const resp = await job.fetch(`${DOOR}/${ask}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const sent = JSON.stringify(body);
+  const named = await sha256(sent);
+  let resp;
+  // bounded: `DOOR_ASKS`
+  for (let n = 1; ; n += 1) {
+    resp = await job.fetch(`${DOOR}/${ask}`, { method: "POST", headers: { "content-type": "application/json", "x-door-sha256": named, ...headers }, body: sent });
+    if (resp.status !== 422 && resp.headers.get("x-door-sha256") === (await sha256(resp.text()))) break;
+    if (n >= DOOR_ASKS) throw new Error(`its door's ${ask} came damaged on its way ${n} times`);
+  }
   let said = {};
   try {
     said = resp.json() ?? {};

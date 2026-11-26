@@ -11,7 +11,9 @@
 //! - its save damaged on its way out of its computer each time its move
 //!   asks for it (FIN-775): never imported, and the move goes back at once,
 //!   its computer running its link again; and its handover failing once its
-//!   core may have stopped: the same way back (no model call before them);
+//!   core may have stopped: the same way back; and moved, its computer
+//!   then not always on: the way back refuses, its door keeping the link,
+//!   until always on again (no model call before them);
 //! - `operator simplex-move` plans it, then goes: the connector made and
 //!   bound as theirs, the link handed over and imported, its door connected
 //!   and linked with the same contact, the old chat archived; a message the
@@ -152,6 +154,47 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
         "its handover failing once its core may have stopped (an answer lost after it packed), whatever the failure: the same way back, its computer running its link again",
         failed.status != 200 && said.contains("went back") && again && forgot.body["record"].is_null(),
         json!({ "go": failed.body, "plan": forgot.body }),
+    );
+    if !again {
+        return Ok(());
+    }
+    // moved (no message yet: no model call), then its computer not always
+    // on (its person may turn that off once their SimpleX is in its door):
+    // the way back refuses, its door keeping the link, never stopped for a
+    // computer that would not run it (Codex's round on 8cacd32d1); always
+    // on again, it goes back
+    let t0 = Instant::now();
+    let mut went = Value::Null;
+    // bounded: SLOW and a door's start
+    while t0.elapsed() < SLOW * 2 && went["record"]["step"] != "done" {
+        let r = mv("go")?;
+        went = r.body.clone();
+        if r.status != 200 && r.status != 409 {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    let door = went["record"]["door"].as_str().unwrap_or("").to_string();
+    let r = lever_with(api, &id, json!({ "op": "always-on", "on": false }))?;
+    anyhow::ensure!(r.status == 200, "always on off: {r}");
+    let refused = mv("back")?;
+    let st = api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": "state" }))).map(|r| r.body).unwrap_or(Value::Null);
+    let r = lever_with(&api.patient(WAKE), &id, json!({ "op": "always-on", "on": true }))?;
+    anyhow::ensure!(r.status == 200, "always on again: {r}");
+    let awake = s.eventually(WAKE, || phase(api, &owner, &id) == "awake");
+    let back = mv("back")?;
+    let again = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
+    s.ok(
+        "moved, its computer then not always on: the way back refuses, its door keeping the link; always on again, it goes back, its computer running its link",
+        went["record"]["step"] == "done"
+            && refused.status == 409
+            && refused.body["message"].as_str().is_some_and(|m| m.contains("always on"))
+            && st["runner"]["phase"] == "linked"
+            && st["door"]["stopped"].is_null()
+            && awake
+            && back.status == 200
+            && again,
+        json!({ "went": went["record"], "refused": refused.body, "door": { "runner": st["runner"]["phase"], "stopped": st["door"]["stopped"] }, "back": back.body }),
     );
     if !again {
         return Ok(());

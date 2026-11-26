@@ -11,9 +11,9 @@
       "newest": ["turn.helpers"]
     }
   },
-  "inbox": { "header": "x-simplex-door-secret", "secret": "SIMPLEX_DOOR_SECRET" },
+  "inbox": { "hmac": { "secret": "SIMPLEX_DOOR_SECRET", "header": "x-simplex-door-signature", "prefix": "sha256=", "signed": "{body}" } },
   "operations": {
-    "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64 }, "keep": { "type": "boolean" } }, "additionalProperties": false }, "description": "Starts this chat's SimpleX door (a small container of its own) as `name` and gives it the secret its deliveries to this chat's inbox carry (SIMPLEX_DOOR_SECRET, set toward door.fragment.internal). A door given its owner's SimpleX chat with their old agent starts only with `keep`: true keeps that chat, false starts a new one." },
+    "connect": { "kind": "job", "role": "owner", "input": { "type": "object", "required": ["name"], "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 64 }, "keep": { "type": "boolean" } }, "additionalProperties": false }, "description": "Starts this chat's SimpleX door (a small container of its own) as `name` and gives it the secret its deliveries to this chat's inbox are signed with (SIMPLEX_DOOR_SECRET, set toward door.fragment.internal). A door given its owner's SimpleX chat with their old agent starts only with `keep`: true keeps that chat, false starts a new one." },
     "connected": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["door"], "properties": { "door": { "type": "string", "maxLength": 128 } } } },
     "state": { "kind": "query", "role": "owner", "description": "Its owner's alone: {connected, invitation: {link, short, qr, at} or null, linked: {name, at} or null, why: {text, code, at, step} or null}: whether its door was started, the invitation waiting for their SimpleX app (with its QR code), whom it linked, and why its last step failed." },
     "failed": { "kind": "mutation", "role": "owner", "input": { "type": "object", "required": ["why"], "properties": { "n": { "type": "integer" }, "why": { "type": "string", "maxLength": 300 }, "code": { "type": ["string", "null"], "maxLength": 40 }, "step": { "enum": ["connect", "link", "unlink"] } } } },

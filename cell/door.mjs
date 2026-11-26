@@ -40,7 +40,7 @@
 // did not take at once.
 import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { settled, startIntercepted } from "./intercepts.mjs";
-import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_HEADER, JOB_ASKS, STALE_ASKS, behind, hashing, doorOf, doorPrefix, fenced, fileKey, flipped, fileRoom, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, sha256Hex, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
+import { DELIVERIES_KEPT, FILE_KEPT_MS, FILE_SHA_HEADER, INBOX_SIGNATURE_HEADER, JOB_ASKS, STALE_ASKS, behind, hashing, doorOf, doorPrefix, fenced, fileKey, flipped, fileRoom, inboxSignature, inboxUrl, nameOk, parseSaveId, replyFiles, restoreOf, saveId, saveKey, secretOk, sha256Hex, shaOk, stale, startable, steps, surplus, typeOf } from "./door-rules.mjs";
 
 const HOST = "door.fragment.internal";
 const PORT = 8080;
@@ -103,8 +103,8 @@ async function bounded(request) {
 // kept: asked again, never taken as a bad original.
 const damaged = (why, code = "damaged") => Object.assign(new Error(`${why}: damaged on its way`), { status: 422, code });
 
-// A runner's JSON body (at most `BODY_MAX`), used only as its runner
-// hashed it (`FILE_SHA_HEADER`).
+// A runner's or its connector's JSON body (at most `BODY_MAX`), used only as
+// its sender hashed it (`FILE_SHA_HEADER`).
 async function taken(request) {
   const bytes = await request.arrayBuffer();
   if (bytes.byteLength > BODY_MAX) throw Object.assign(new Error("a body past its bound"), { status: 413 });
@@ -236,6 +236,13 @@ export class SimplexDoor extends DurableObject {
         await request.body?.cancel();
         return refusal(409, "outdated", "a runner's body names its SHA-256: this runner is older than its door, and starts again");
       }
+      // handed back, its runner ended: a delivery or a file still on its
+      // way from it is taken no more (its last save, which its computer
+      // places, holds it unread, read on there: Codex's round on 8cacd32d1)
+      if (url.pathname.startsWith("/egress/") && request.method !== "GET" && this.#door()?.stopped === HANDED_BACK && !this.ctx.container?.running) {
+        await request.body?.cancel();
+        return refusal(409, "handed_back", "this door handed its link back to its computer: its runner's words are taken no more");
+      }
       if (url.pathname === "/egress/save" && request.method === "GET") return await this.#restore(request);
       if (url.pathname === "/egress/save" && request.method === "PUT") return await this.#save(request, url);
       if (url.pathname === "/egress/deliver" && request.method === "POST") return this.#deliver(await taken(request));
@@ -248,7 +255,9 @@ export class SimplexDoor extends DurableObject {
       }
       const [ask, sha, ...more] = url.pathname.startsWith("/job/") ? url.pathname.slice("/job/".length).split("/") : [];
       const method = ask === "file" ? (sha !== undefined && ["GET", "PUT"].includes(request.method)) : (sha === undefined && request.method === "POST");
-      if (JOB_ASKS.includes(ask) && !more.length && method) return await this.#job(ask, request, sha);
+      // its connector's asks and their answers, each named by its SHA-256
+      // and used only whole, as its runner's are (a file by its name)
+      if (JOB_ASKS.includes(ask) && !more.length && method) return await named(await this.#job(ask, request, sha));
       return refusal(404, "not_found", `no door route ${request.method} ${url.pathname}`);
     } catch (e) {
       return refusal(e.status ?? 500, e.code ?? (e.status ? "invalid" : "internal"), String((e && e.message) || e).slice(0, 300));
@@ -550,7 +559,7 @@ export class SimplexDoor extends DurableObject {
     if (inbox && inbox.fragment !== connector) return refusal(409, "another_connector", `this door is ${inbox.fragment}'s`);
     if (ask === "connect") {
       const secret = request.headers.get(SECRET_HEADER);
-      const body = await bounded(request);
+      const body = await taken(request);
       if (!secretOk(secret)) throw Object.assign(new Error(`connect gives its inbox's secret (${SECRET_HEADER})`), { status: 400 });
       if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them)");
       // fenced before anything (a new chat's let-go included): its computer runs its link now
@@ -577,12 +586,12 @@ export class SimplexDoor extends DurableObject {
     // connector's blobs); `kept`, once its connector has it, by the
     // delivery that named it
     if (ask === "file") return request.method === "PUT" ? await this.#keepFile(sha, request, `r:${String(request.headers.get(FOR_HEADER) ?? "").slice(0, 200)}`) : await this.#giveFile(sha);
-    if (ask === "kept") return this.#kept(await bounded(request));
-    if (ask === "reply") return await this.#reply(await bounded(request));
+    if (ask === "kept") return this.#kept(await taken(request));
+    if (ask === "reply") return await this.#reply(await taken(request));
     // a link or unlink, numbered by its connector: one older than the
     // newest it numbered (a retry of a link after its unlink) is refused,
     // here and while it is asked, so none acts after a newer one
-    const { n } = await bounded(request);
+    const { n } = await taken(request);
     if (!Number.isInteger(n) || n < 1) throw Object.assign(new Error(`${ask} names its number (n), its connector's`), { status: 400 });
     if (n < this.#asked()) return refusal(409, "overtaken", "a newer link or unlink was asked");
     this.ctx.storage.sql.exec("UPDATE inbox SET asked = ? WHERE id = 1", n);
@@ -777,9 +786,12 @@ export class SimplexDoor extends DurableObject {
     for (let n = 0; n <= DELIVERIES_KEPT; n += 1) {
       const next = this.ctx.storage.sql.exec("SELECT id, body FROM deliveries WHERE sent = 0 ORDER BY mark LIMIT 1").toArray()[0];
       if (!next) return;
+      // signed over its body by its inbox's secret: one changed on its
+      // way fails its inbox's check, and is sent again at its next watch
+      const body = JSON.stringify({ source: "simplex", payload: { ...JSON.parse(next.body), door: d.door } });
       let r;
       try {
-        r = await this.ctx.exports.default.fetch(to, { method: "POST", headers: { "content-type": "application/json", [INBOX_HEADER]: inbox.secret }, body: JSON.stringify({ source: "simplex", payload: { ...JSON.parse(next.body), door: d.door } }) });
+        r = await this.ctx.exports.default.fetch(to, { method: "POST", headers: { "content-type": "application/json", [INBOX_SIGNATURE_HEADER]: await inboxSignature(inbox.secret, body) }, body });
       } catch (e) {
         return this.#log("door.inbox_failed", { id: next.id, why: String((e && e.message) || e).slice(0, 300) });
       }

@@ -14,6 +14,11 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+
+const hex = (text) => createHash("sha256").update(text).digest("hex");
+// a door's answer as a job's fetch has it, named by its SHA-256 as the door names each
+const answered = (status, body) => ({ ok: status < 300, status, json: () => body, text: () => JSON.stringify(body), headers: new Headers({ "x-door-sha256": hex(JSON.stringify(body)) }) });
 
 const BASE = "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
 const HOOKS = `export async function resolve(specifier, context, next) {
@@ -56,8 +61,9 @@ function world(answers = {}, connected = true) {
       w.asked.push({ url, ask, method: init.method ?? "GET", headers: init.headers, body: init.body ? JSON.parse(init.body) : null, ...(init.blob ? { blob: init.blob } : {}), ...(init.keep ? { keep: true } : {}) });
       const next = answers[ask]?.shift() ?? [200, {}];
       if (next instanceof Error) throw next;
-      const [status, body, blob] = next;
-      return { ok: status < 300, status, json: () => body, blob: blob ?? null };
+      // its answer named by its SHA-256, as the door names each (`named`: another's, as one damaged on its way)
+      const [status, body, blob, named = hex(JSON.stringify(body))] = next;
+      return { ok: status < 300, status, json: () => body, text: () => JSON.stringify(body), headers: new Headers({ "x-door-sha256": named }), blob: blob ?? null };
     },
   });
   w.delivered = (payload) => ({ record: { body: { source: "simplex", payload } } });
@@ -250,7 +256,7 @@ test("a door linked already keeps whom it linked; check looks once, for its own 
   job.fetch = async (url) => {
     assert.ok(url.endsWith("/state"));
     await late.app.asking();
-    return { ok: true, status: 200, json: () => ({ runner: { phase: "linked", name: "Robin" } }) };
+    return answered(200, { runner: { phase: "linked", name: "Robin" } });
   };
   assert.deepEqual(await late.app.check({}, job), { linked: false, why: "unlinked since" });
   assert.equal(late.app.state().linked, null);
@@ -292,7 +298,7 @@ test("an invitation found after an unlink was asked is kept by no one", async ()
   job.fetch = async (url, init) => {
     if (!url.endsWith("/state")) return fetch(url, init);
     const [status, body] = await (typeof answers[0] === "function" ? answers.shift()() : answers.shift());
-    return { ok: true, status, json: () => body };
+    return answered(status, body);
   };
   assert.deepEqual(await w.app.link({}, job), { invited: false, why: "unlinked since" });
   assert.equal(w.app.state().invitation, null);
@@ -322,6 +328,16 @@ test("a file kept by none (gone from its door, not what it names, a step that fa
   const bad = world();
   await bad.app.intake(bad.delivered({ ...voice("v2"), file: { sha256: "nope" } }), bad.job("channel"));
   assert.deepEqual([bad.asked.length, bad.published[0].body.text], [0, "(I sent a file over SimpleX that did not arrive.)"], "a file named by no SHA-256 is asked of no one");
+});
+
+test("its asks of its door each name their body's SHA-256, and an answer damaged on its way is asked again, never used (Codex's round on 8cacd32d1)", async () => {
+  const w = world({ reply: [[200, { done: true }, null, hex("another answer")], [200, { done: true }]] });
+  assert.deepEqual(await w.app.mirror(w.reply(46), w.job("channel")), { sent: 1 });
+  const replies = w.asked.filter((a) => a.ask === "reply");
+  assert.equal(replies.length, 2, "asked again, the same ask");
+  assert.ok(replies.every((a) => a.headers["x-door-sha256"] === hex(JSON.stringify(a.body))), "its body named");
+  const worse = world({ reply: [1, 2, 3].map(() => [200, { done: true }, null, hex("another answer")]) });
+  await assert.rejects(worse.app.mirror(worse.reply(47), worse.job("channel")), /damaged on its way 3 times/, "still damaged: its step fails, to be tried again");
 });
 
 test("its agent's reply's files are given to the door first, then sent with its text; one the door does not take stays in the chat, said so", async () => {
