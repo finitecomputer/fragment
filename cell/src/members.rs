@@ -671,13 +671,14 @@ impl FragmentCell {
     }
 
     /// `LendOf`: what `agent`'s owner lends it here, for its own fragment
-    /// at each use on someone else's ask: nothing where `place` is not this
-    /// life's own key, or the agent is no member.
+    /// at each use on someone else's ask, with what they allowed that
+    /// request once (asks.rs `lent_once`): nothing where `place` is not
+    /// this life's own key, or the agent is no member.
     pub(crate) fn lend_here(&self, asked: &crate::fragment::calls::LendOf) -> CellResult<Lend> {
         if self.meta(MetaKey::Npub)?.as_deref() != Some(asked.place.as_str()) || self.member_role(&asked.agent)?.is_none() {
             return Ok(Lend::NONE);
         }
-        self.lend_of(&asked.agent)
+        self.lent_once(asked, self.lend_of(&asked.agent)?)
     }
 
     /// `PUT /api/f/<name>/members/<agent>/lend` (the lend card): what of

@@ -238,8 +238,9 @@ else. One never set is `Lend::DEFAULT`: spend on, accounts off.
 acting `for` its owner, and not held below them, on a fragment its owner
 owns, an agent manages members, invites, visibility and rotation as its
 owner would (never granting `owner`, never touching the owner). Any other
-agent's sharing request is 403, saying why. Deleting a fragment, setting
-its cap and sharing a connector (An agent's doors) are 403 to every agent.
+agent's sharing request is 403, saying why. Deleting a fragment and
+setting its cap ask its owner to confirm it (One ask); sharing a connector
+(An agent's doors) is 403 to every agent.
 What an agent shares names it (`addedBy`,
 `createdBy`), and each event (`member.set`, `member.removed`,
 `invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`) carries
@@ -955,6 +956,42 @@ A question is answered only by whom it asks (FIN-615,
 
 A reader still attributes an answer by its `principal`, as any record: a
 record stored before this rule promises nothing.
+
+### One ask
+
+Where a call needs someone's yes, the platform asks them on one card, in
+the chat it was asked in (FIN-615, `fragment_core::permit::Ask`), and the
+call is 403, saying whom it asked: "Asked ana@example.com, on a card in
+the chat. Ask again once they answer." Two calls ask:
+
+- **A dangerous action** (`DELETE /api/f/{name}`, `PUT …/cap`) an agent
+  asks for someone, unheld, asks the fragment's owner to confirm it: the
+  asker, when they own it, else the agent's own owner, when the asker is
+  in it too; anyone else's is its owner's alone (`decide`'s rule 8). It is
+  asked every time and never remembered. Its Confirm is the owner's own
+  request, made by the shell in person after its own dialog ("Delete
+  Recipes?"); the agent never holds the right. With no turn of the
+  asker's open (its terminal, a schedule) it is 403 "This needs … to
+  confirm it in a chat".
+- **Someone else's ask that needs what its place doesn't lend** (the swap's
+  credit or accounts: Who asked, mandates) asks the agent's owner: **Allow
+  once** lends it to the asker's next request there (each of its calls)
+  and no other, **Always here** turns it on in that place's lend, and
+  **No** writes nothing.
+
+The card goes to the chat the asker's newest turn runs in (a lend's: one
+of theirs that lends it not); where whom it asks is not in that chat, to
+their own newest chat with the agent, so it never lands where its
+answerer can't see it. One for the same agent, asker, ask and thing is
+open at a time (a second ask is the same card), at most
+`limits::ASKS_OPEN_MAX` in a chat (429 past it), each answerable for
+`limits::ASK_LIFE_MS`. Its records are the platform's own on `work`
+(docs/chat-records.md, `ask`). Its answer is a post `{kind: "ask_answer",
+option, answers: {channel: "work", seq}}` alone (400 otherwise:
+`permit::ask_answer`), from whom it asks (Questions and answers), once (409
+once answered or run out). Never words or a message: an answer starts no
+turn, and the asker asks again (the debt ledger, "A card's answer resumes
+nothing").
 
 ### Listed records
 

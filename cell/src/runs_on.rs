@@ -381,8 +381,12 @@ impl FragmentCell {
             Proof::Asker { at, .. } => at,
         };
         let agent = self.must(MetaKey::AgentIdentity)?;
+        let asker = turns.iter().map(|t| t.asker).find(|a| npub::display(a) != owner).expect("someone else's ask is open").to_string();
+        // the request each place's turn is: its newest mandate's record there,
+        // to which what its owner allowed once is lent
+        let request = |place: &str| turns.iter().filter_map(|t| t.mandate).filter(|m| m.place == place).filter_map(|m| mandate::record_of(m.text)).max_by_key(|r| r.2).map(|(c, s, at)| (c.to_string(), s, at));
         // bounded: the places of its open turns, at most `TURNS_HELD_MAX`
-        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string() })).collect();
+        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string(), asker: asker.clone(), request: request(place) })).collect();
         let asked = calls.iter().map(|(name, call)| crate::fragment::call(&self.env, name, call));
         let lent = futures_util::future::join_all(asked).await.into_iter().fold(Lend::OWNER, |lent, here| {
             let here = here.unwrap_or(Lend::NONE);
@@ -541,7 +545,7 @@ impl FragmentCell {
         }
     }
 
-    fn created(&self) -> CellResult<()> {
+    pub(crate) fn created(&self) -> CellResult<()> {
         self.must(MetaKey::CreatedAt).map(drop).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))
     }
 

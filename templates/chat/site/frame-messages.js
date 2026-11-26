@@ -36,7 +36,7 @@ export const MESSAGES = Object.freeze({
     kind: "add-agent",
     from: "a frame of a fragment the person owns → the shell",
     fields: "{identity, nonce}",
-    says: "Asks to add one of their agents: the shell asks the person in its own dialog (\"Add Fred to …?\", Add armed after 800 ms) and only on Add makes the agent an editor of the frame's fragment. Nothing is remembered.",
+    says: "Asks to add one of their agents: the shell asks the person in its one ask dialog (\"Add Fred to …?\", Add armed after 800 ms) and only on Add makes the agent an editor of the frame's fragment. Nothing is remembered.",
   },
   agentAdded: {
     kind: "agent-added",
@@ -92,6 +92,18 @@ export const MESSAGES = Object.freeze({
     from: "a chat → the shell, and the shell's answer back",
     fields: "asked: {nonce, on, key?}; answered: {nonce, state: on | off | denied | unsupported | failed, subscription?, endpoint?, error?}",
     says: "Turns its alerts on or off (on: the release's chat alone), and the shell's answer to it or to `alerts?`.",
+  },
+  confirm: {
+    kind: "confirm",
+    from: "the release's chat → the shell",
+    fields: "{nonce, what: delete | cap, name, micros?}",
+    says: "A platform card's Delete… or Set cap…: the shell asks the person in its one ask dialog (\"Delete Recipes?\", armed after 800 ms) and on its button deletes the fragment `name`, or sets its cap to `micros` (null: the default), as them. Nothing is remembered.",
+  },
+  confirmed: {
+    kind: "confirmed",
+    from: "the shell → that chat",
+    fields: "{nonce, ok, error?}",
+    says: "`confirm`'s answer: `error` is \"declined\", \"not answered\" (90 s), \"busy\", or the API's refusal.",
   },
   // ---- any frame and the shell ----
   open: {

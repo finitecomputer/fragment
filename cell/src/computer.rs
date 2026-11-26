@@ -67,6 +67,7 @@ use fragment_core::price::Usage;
 use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
+use fragment_core::permit::{self, Lent};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
 use fragment_proto::{ErrorCode, IdentityKind, Lend};
 use serde::Deserialize;
@@ -4609,10 +4610,12 @@ impl ComputerCell {
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
             let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
             // someone else's ask uses the owner's paid tools when the place
-            // lends their credit, and their accounts and keys when it lends those
-            let lent = grants.lend.unwrap_or(Lend::OWNER);
-            if !(if provider.kind == Kind::Operator { lent.spend } else { lent.accounts }) {
-                return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if provider.kind == Kind::Operator { "their credit" } else { "their accounts and keys" })));
+            // lends their credit, and their accounts and keys when it lends
+            // those; else it asks them, on a card (asks.rs)
+            let needs = if provider.kind == Kind::Operator { Lent::Spend } else { Lent::Accounts };
+            if let Some(ask) = permit::lend_asks(grants.lend.unwrap_or(Lend::OWNER), needs) {
+                let unasked = format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if needs == Lent::Spend { "their credit" } else { "their accounts and keys" });
+                return Err(crate::asks::refused(&self.env, agent, None, &owner, crate::asks::lend_card(ask), &unasked).await);
             }
             if !grants.may_use(&provider.name) {
                 let list = grants.connections.as_deref().unwrap_or_default();
@@ -5498,7 +5501,8 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         // it goes, over https
         let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
         if !vaulted.is_empty() && answer["accounts"] == false {
-            return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here")));
+            let unasked = format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here");
+            return Err(crate::asks::refused(env, &agent, None, &owner, crate::asks::lend_card(permit::Ask::Lend(Lent::Accounts)), &unasked).await);
         }
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {

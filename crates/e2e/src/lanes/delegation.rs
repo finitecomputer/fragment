@@ -635,9 +635,10 @@ fn sharing(s: &mut Suite, api: &Api) -> Result<()> {
     let deleted = hand_for_paul("DELETE", "", None)?;
     let capped = hand_for_paul("PUT", "cap", Some(json!({ "id": "agent-cap", "micros": 1 })))?;
     let still = api.status(&paul, &app)?;
+    let asks = |r: &Reply| refused(r) && r.message().contains("to confirm it in a chat");
     s.ok(
-        "for Paul, it never deletes his app nor sets its cap",
-        refused(&deleted) && refused(&capped) && still.status == 200,
+        "for Paul, it deletes his app or sets its cap only on his confirm, on a card in a chat: a key with no chat to ask in is refused, saying so",
+        asks(&deleted) && asks(&capped) && still.status == 200,
         json!({ "delete": deleted.body, "cap": capped.body, "status": still.status }),
     );
     let vis = ask(&hand, Some(&skyler_id), "PUT", &app, "%76isibility", Some(json!({ "visibility": "public" })))?;

@@ -162,6 +162,16 @@ pub fn place_of(text: &str) -> Option<&str> {
     text.strip_prefix(PREFIX)?.split('.').nth(2)
 }
 
+/// The record a mandate's text names (the asker's request in its place):
+/// its channel, its seq and when it was written (ms), read as `place_of`
+/// reads its place. Allow once lends the first such request after its
+/// answer (docs/api.md, "One ask").
+pub fn record_of(text: &str) -> Option<(&str, i64, i64)> {
+    let mut fields = text.strip_prefix(PREFIX)?.split('.').skip(3);
+    let (channel, seq, until) = (fields.next()?, fields.next()?.parse().ok()?, fields.next()?.parse::<i64>().ok()?);
+    Some((channel, seq, until.saturating_sub(limits::MANDATE_LIFE_MS)))
+}
+
 /// Whose own words a record is, as a mandate names them: a person's own
 /// post (its `principal`, an identity: an anonymous visitor asks no one
 /// elsewhere), or a door's relay of its agent's owner (its `body`'s
@@ -330,6 +340,8 @@ mod tests {
         assert!(text.starts_with(PREFIX) && text.len() <= limits::MANDATE_MAX_BYTES / 2 + 64, "{text}");
         assert_eq!(open(&old, &text, 1_000), Ok(m.clone()));
         assert_eq!(open(&old, &text, 2_000), Ok(m.clone()), "replay: the same text again");
+        // what an agent fragment reads of one it kept: its place and its record
+        assert_eq!((place_of(&text), record_of(&text)), (Some(m.place.as_str()), Some((m.channel.as_str(), m.seq, 1_000))));
         // a rotation: the new secret's key first, the old one's after it
         assert_eq!(open(&rotating, &text, 2_000), Ok(m.clone()));
         assert_eq!(open(&new, &text, 2_000), Err(Refused::Forged), "once the old secret is gone");

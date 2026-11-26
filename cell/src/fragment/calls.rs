@@ -92,15 +92,83 @@ impl Call for FaceOf {
 /// (members.rs `lend_here`), asked by that agent's fragment at each use
 /// (runs_on.rs `lent_now`): `place` is the key the ask's mandate names, so
 /// a fragment made again under its name lends nothing.
+/// `asker`, whose ask it is, with `request`, their record that asked
+/// (its channel, seq and when): what their owner allowed once is lent to
+/// it alone (asks.rs `lent_once`); none takes nothing allowed once.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LendOf {
     pub agent: String,
     pub place: String,
+    pub asker: String,
+    pub request: Option<(String, i64, i64)>,
 }
 
 impl Call for LendOf {
     const PATH: &'static str = "/call/lend";
     type Answer = fragment_proto::Lend;
+}
+
+/// What a card asks (asks.rs): `what` as `permit::Ask::what` names it,
+/// about `fragment` (a lend's place, with its `key`; a dangerous action's
+/// fragment, with its `title`, and a cap's `micros`, none the default).
+#[derive(Serialize, Deserialize, Clone)]
+pub(crate) struct Card {
+    pub what: String,
+    pub fragment: String,
+    pub key: Option<String>,
+    pub title: Option<String>,
+    pub micros: Option<i64>,
+}
+
+/// An agent fragment's: a card for `asks` in the chat its asker's newest
+/// turn runs in (a lend's: one of theirs that lends it not), else their own
+/// newest chat with the agent (`asker` none: a lend's, the one other person
+/// whose proven ask is open). Answers the chat it asked in, if any.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct AskFor {
+    pub asker: Option<String>,
+    pub asks: String,
+    pub card: Card,
+}
+
+impl Call for AskFor {
+    const PATH: &'static str = "/call/ask";
+    type Answer = Option<String>;
+}
+
+/// A chat's: the card, in `agent`'s `turn`, posted (or the same one still
+/// open kept) while `asks` is in it. Answers whether it is.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct PostAsk {
+    pub agent: String,
+    pub asker: String,
+    pub asks: String,
+    pub turn: String,
+    pub card: Card,
+}
+
+impl Call for PostAsk {
+    const PATH: &'static str = "/call/ask/post";
+    type Answer = bool;
+}
+
+/// A lend's place: `by`'s Allow once (`always` false) or Always here of
+/// `what` (`spend`, `accounts`) for `agent` on `asker`'s ask, answered on
+/// its card in another chat. Taken only where `key` is this life's, and
+/// `by` is the agent's owner.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct LendAnswer {
+    pub agent: String,
+    pub asker: String,
+    pub key: String,
+    pub what: String,
+    pub always: bool,
+    pub by: String,
+}
+
+impl Call for LendAnswer {
+    const PATH: &'static str = "/call/ask/lend";
+    type Answer = ();
 }
 
 /// Its reach, whether its link opens it, and whether it is an agent
