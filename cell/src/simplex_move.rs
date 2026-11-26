@@ -386,10 +386,11 @@ impl Move<'_> {
         if rec.is_null() {
             return Err(CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {} to go back from", self.agent)));
         }
-        // its computer runs SimpleX only awake and always on (its bridge's
-        // word): else its door keeps the link, never stopped for nothing
-        // (Codex's round on 8cacd32d1)
-        if rec["moved"] == true && read["link"]["said"]["alwaysOn"] != true {
+        // its computer runs SimpleX only awake and always on (its own word,
+        // never its bridge's, which reads it a minute late): else its door
+        // keeps the link, never stopped for nothing (Codex's round on
+        // 8cacd32d1; the hosted check on 8c0ad40ec)
+        if rec["moved"] == true && (read["awake"] != true || read["alwaysOn"] != true) {
             return Err(CellError::new(ErrorCode::Conflict, "its computer runs SimpleX only awake and always on: turn always-on on, then ask `--back` again (its door keeps the link meanwhile)"));
         }
         // its door stops, saving last, and hands its newest save back, with

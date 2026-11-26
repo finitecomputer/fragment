@@ -4238,7 +4238,10 @@ impl ComputerCell {
         let mut moves = self.simplex_moves()?;
         match b["op"].as_str().unwrap_or("") {
             "read" => {
-                let awake = matches!(self.lifecycle()?.phase, Phase::Awake { .. });
+                // whether it is awake and always on, its own word (its
+                // bridge's view of always-on is read a minute late)
+                let life = self.lifecycle()?;
+                let awake = matches!(life.phase, Phase::Awake { .. });
                 let mut link = Value::Null;
                 if awake {
                     let asked = worker_sys::web_sys::Request::new_with_str(&format!("http://computer/simplex/state?agent={agent}")).map_err(|_| CellError::host("a request"))?;
@@ -4250,7 +4253,7 @@ impl ComputerCell {
                         Err(e) => json!({ "status": 0, "said": e.message }),
                     };
                 }
-                Ok(json!({ "record": moves.get(agent), "awake": awake, "link": link }))
+                Ok(json!({ "record": moves.get(agent), "awake": awake, "alwaysOn": life.always_on(), "link": link }))
             }
             "set" => {
                 let from = b["from"].as_str().ok_or_else(|| CellError::invalid("a set names the step it moves on from (from)"))?;
