@@ -123,11 +123,13 @@ yourself: it does, with or without versions. It shares only the folders
 the brain holds now: a folder made later in the old brain, or one left
 out, never comes in by a catch-up. It takes out of the push (`removed`)
 each folder left out, one your old agent couldn't read, and the assets
-their notes name (they are in the parent folder's `raw/assets/`).
-- **`ambiguous`:** assets a page you keep names too. They stay out: ask
-  your owner, before anyone is invited, whether everyone may read each.
-- **An asset no note names** stops it while a folder is out: ask your
-  owner whose it is.
+it withholds.
+- **`withheld`:** assets a note of a folder it doesn't share names (even
+  with a page you keep), or, while a folder is out, assets no note
+  names: they sit in the parent folder's `raw/assets/`. It records them,
+  so no teammate's catch-up brings one in. Ask your owner, before anyone
+  is invited, whether everyone may read each; to let one in, copy it
+  from the copy into the brain and sync.
 - **`refused`:** pages `fragment sync` can't carry (a path over 300
   bytes, say). They stay out, so name them in the report.
 - **`"versions": false`** (an export, a stage from before versions, or
@@ -224,7 +226,7 @@ own versions, and only in the folders the real one shares. It brings in:
 - **updated:** pages the old brain changed after the real one's copy was
   taken, which nobody here has changed since;
 - **assets:** the files those pages' frontmatter names, when the real one
-  lacks them.
+  lacks them and doesn't withhold them.
 
 It leaves the rest as it is, for a person, and lists it:
 - **both:** pages changed or deleted here and changed in the old brain
@@ -233,6 +235,9 @@ It leaves the rest as it is, for a person, and lists it:
 - **gone:** pages the old brain deleted since. It deletes nothing;
 - **unsynced:** pages your old agent edited and never synced: the old
   brain never had that text;
+- **withheld:** assets the real one keeps out: withheld when it was made,
+  or named by a note of a folder you couldn't read or it doesn't share.
+  Their notes come; the assets stay in your copy, for your owner;
 - **missing:** pages your copy should hold and doesn't;
 - **older:** pages in a folder the real one took from a newer copy than
   yours, which it doesn't hold as yours does (a page the old brain

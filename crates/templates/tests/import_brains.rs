@@ -161,7 +161,7 @@ impl Dir {
 
 /// A catch-up's answer: nothing taken and nothing listed, but `said`.
 fn answer(said: Value) -> Value {
-    let mut all = json!({"added": 0, "updated": 0, "assets": 0, "both": [], "gone": [], "unsynced": [], "missing": [], "older": [], "extra": [], "refused": [], "unshared": [], "unread": [], "settled": false});
+    let mut all = json!({"added": 0, "updated": 0, "assets": 0, "both": [], "gone": [], "unsynced": [], "missing": [], "older": [], "withheld": [], "extra": [], "refused": [], "unshared": [], "unread": [], "settled": false});
     for (k, v) in said.as_object().unwrap() {
         assert!(all.get(k).is_some(), "{k}");
         all[k] = v.clone();
@@ -184,7 +184,7 @@ fn a_team_brain_comes_together_one_move_at_a_time() {
         pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/b.md", "b", 1, "b1"), ("Notes/g.md", "g", 1, "g1"), ("Board/m.md", "m", 1, "m1"), ("Leadership/x.md", "x", 1, "x1")],
     };
     // the founder leaves the restricted folder out: never shared, nor named
-    assert_eq!(d.found(&at10, &[], &["Leadership"]), json!({"versions": true, "recorded": 4, "shared": ["Board", "Notes"], "not shared": ["Leadership"], "removed": ["Leadership/x.md"], "ambiguous": [], "refused": []}));
+    assert_eq!(d.found(&at10, &[], &["Leadership"]), json!({"versions": true, "recorded": 4, "shared": ["Board", "Notes"], "not shared": ["Leadership"], "removed": ["Leadership/x.md"], "withheld": [], "refused": []}));
     assert!(!d.read(RECORD).unwrap().contains("Leadership"));
     d.put("brain/Notes/b.md", "b1, edited here");
 
@@ -284,7 +284,7 @@ fn what_the_brain_doesnt_share_never_comes_in() {
         "shared": ["Board", "Drafts", "Notes", "Team", "Team/Public"],
         "not shared": ["Archive", "Notes/Old", "Notes/Private"],
         "removed": ["Archive/listed.md", "Archive/old.md", "Notes/Old/n.md", "Notes/Private/p.md", "Notes/raw/assets/old.png", "Notes/raw/assets/private.pdf"],
-        "ambiguous": [],
+        "withheld": ["Notes/raw/assets/old.png", "Notes/raw/assets/private.pdf"],
         "refused": ["Drafts/y.conflict-1.md"],
     });
     assert_eq!(d.start(&["Notes/Private"]), Ok(started.clone()), "a folder's assets go with it, wherever its note is");
@@ -312,14 +312,14 @@ fn what_the_brain_doesnt_share_never_comes_in() {
     let before = d.files("brain");
     assert_eq!(
         d.catch_up("t20"),
-        answer(json!({"updated": 1, "both": ["Team/Public/v.md"], "extra": ["Team/raw/assets/v.png"], "unshared": ["Board", "Finance", "Notes/Private"], "unread": ["Team"]}))
+        answer(json!({"updated": 1, "added": 1, "withheld": ["Team/raw/assets/v.png"], "unshared": ["Board", "Finance", "Notes/Private"], "unread": ["Team"]}))
     );
     let after = d.files("brain");
     let changed: Vec<_> = after.keys().filter(|p| before.get(*p) != after.get(*p)).collect();
-    assert_eq!(changed, ["Notes/a.md", "imported-from-finite.json"], "only the shared folder it could read, and the record");
+    assert_eq!(changed, ["Notes/a.md", "Team/Public/v.md", "imported-from-finite.json"], "only the shared folders it could read, and the record");
 
     // a quoted name it can't read exactly names nothing, never another
-    // file: here a left-out note's asset whose name starts the same
+    // file: here a stale attachment no note names, while a folder is out
     let q = Dir::new("quoted");
     let at10 = Old {
         sequence: 10,
@@ -327,7 +327,7 @@ fn what_the_brain_doesnt_share_never_comes_in() {
         pages: vec![
             ("Notes/a.md", "a", 1, "---\nresource: 'raw/assets/report.pdf''s notes.pdf'\n---\na1"),
             ("Notes/b.md", "b", 1, "---\nresource: raw/assets/report.pdf's notes.pdf\n---\nb1"),
-            ("Notes/Private/p.md", "p", 1, "---\nresource: raw/assets/report.pdf\n---\np1"),
+            ("Notes/Private/p.md", "p", 1, "p1"),
         ],
     };
     q.copy("founder", &at10, &[]);
@@ -335,7 +335,7 @@ fn what_the_brain_doesnt_share_never_comes_in() {
     q.put("founder/Notes/raw/assets/report.pdf's notes.pdf", "a shared note's");
     assert_eq!(
         q.make(&["Notes/Private"]),
-        json!({"versions": true, "recorded": 2, "shared": ["Notes"], "not shared": ["Notes/Private"], "removed": ["Notes/Private/p.md", "Notes/raw/assets/report.pdf"], "ambiguous": [], "refused": []})
+        json!({"versions": true, "recorded": 2, "shared": ["Notes"], "not shared": ["Notes/Private"], "removed": ["Notes/Private/p.md", "Notes/raw/assets/report.pdf"], "withheld": ["Notes/raw/assets/report.pdf"], "refused": []})
     );
 }
 
@@ -509,17 +509,16 @@ fn without_versions_or_a_record_it_compares_by_hand() {
     assert!(d.start(&[]).unwrap_err().starts_with("STOP"), "start over a brain that changed");
     assert_eq!(d.read(RECORD).unwrap(), record);
 
-    // while a folder is out, an asset no note names stops it: whose it is
-    // can't be told; nor can a folder left out that the copy doesn't have
+    // a folder left out that the copy doesn't have stops it; with nothing
+    // out, an asset no note names is no one else's
     let o = Dir::new("stray");
     o.copy("founder", &Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Private", "np", true)], pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/Private/p.md", "p", 1, "p1")] }, &[]);
     o.put("founder/Notes/raw/assets/stray.png", "no note names it");
     o.lay();
     assert!(o.start(&["Notes/Privte"]).unwrap_err().starts_with("STOP: Notes/Privte is no folder"), "a folder left out is one the copy has");
-    assert!(o.start(&["Notes/Private"]).unwrap_err().contains("Notes/raw/assets/stray.png"));
-    assert!(o.read(RECORD).is_none() && o.read("brain/Notes/raw/assets/stray.png").is_some() && o.read("brain/Notes/Private/p.md").is_some(), "nothing recorded, nothing taken out");
+    assert!(o.read(RECORD).is_none() && o.read("brain/Notes/Private/p.md").is_some(), "nothing recorded, nothing taken out");
     let whole = o.start(&[]).unwrap();
-    assert_eq!((&whole["removed"], &whole["versions"]), (&json!([]), &json!(true)), "with nothing out, it's no one else's: it stays");
+    assert_eq!((&whole["removed"], &whole["withheld"]), (&json!([]), &json!([])), "with nothing out, it's no one else's: it stays");
 
     // what it must take out of the push, and can't: it stops, recording nothing
     let e = Dir::new("stuck");
@@ -562,12 +561,86 @@ fn without_versions_a_folder_left_out_stays_out() {
     let started = json!({
         "versions": false, "recorded": 0, "shared": [], "not shared": ["Notes/Private"],
         "removed": ["Notes/Private/both.md", "Notes/Private/payroll.md", "Notes/raw/assets/both.png", "Notes/raw/assets/payroll.pdf"],
-        "ambiguous": ["Notes/raw/assets/both.png"], "refused": [],
+        "withheld": ["Notes/raw/assets/both.png", "Notes/raw/assets/payroll.pdf"], "refused": [],
     });
     assert_eq!(d.start(&["Notes/Private"]), Ok(started));
     let pushed = || d.files("brain").into_keys().collect::<Vec<_>>();
     assert_eq!(pushed(), ["Notes/a.md", "Notes/both.md", "Notes/raw/assets/shared.png"], "the push holds what is kept, and no record");
     let again = d.start(&["Notes/Private"]).unwrap();
-    assert_eq!((&again["removed"], &again["ambiguous"]), (&json!([]), &json!([])), "replay");
+    assert_eq!((&again["removed"], &again["withheld"]), (&json!([]), &json!([])), "replay: nothing recorded, nothing more to take out");
     assert_eq!(pushed(), ["Notes/a.md", "Notes/both.md", "Notes/raw/assets/shared.png"]);
+}
+
+/// Goal (FIN-774): an attachment goes up only when no note of a folder the
+/// brain doesn't bring in names it, and, while a folder is out, some note
+/// does. One withheld is recorded, so no later catch-up brings it in, even
+/// beside its unchanged note; its note still comes, and a person lets it in
+/// by adding it. Invalid: what re-added a kept-out attachment at the next
+/// teammate's import, and published a stale attachment of a folder the
+/// founder's agent couldn't read, with no note of it staged.
+#[test]
+fn a_withheld_attachment_stays_out() {
+    let d = Dir::new("withheld");
+    let kept = "---\nresource: raw/assets/both.png\n---\nkept";
+    let at10 = Old {
+        sequence: 10,
+        folders: vec![("Notes", "n", true), ("Notes/Private", "np", true), ("Notes/Board", "nb", false)],
+        pages: vec![("Notes/both.md", "both", 1, kept), ("Notes/Private/p.md", "p", 1, "---\nresource: raw/assets/both.png\n---\nleft out")],
+    };
+    d.copy("founder", &at10, &[]);
+    d.put("founder/Notes/raw/assets/both.png", "both");
+    // a stale attachment of the folder the founder's agent can't read, no note of it staged
+    d.put("founder/Notes/raw/assets/payroll.pdf", "payroll");
+    let started = d.make(&["Notes/Private"]);
+    let withheld = json!(["Notes/raw/assets/both.png", "Notes/raw/assets/payroll.pdf"]);
+    assert_eq!((&started["withheld"], &d.record()["withheld"]), (&withheld, &withheld), "withheld, and recorded");
+    assert!(d.read("brain/Notes/raw/assets/both.png").is_none() && d.read("brain/Notes/raw/assets/payroll.pdf").is_none());
+
+    // the next teammate: the same note, a new one naming a withheld
+    // attachment, and one an unread folder's stale note names too
+    let (new, c) = ("---\nresource: raw/assets/payroll.pdf\n---\nnew", "---\nresource: raw/assets/c.png\n---\nc");
+    let at20 = Old {
+        sequence: 20,
+        folders: vec![("Notes", "n", true), ("Notes/Private", "np", false), ("Notes/Board", "nb", false)],
+        pages: vec![("Notes/both.md", "both", 1, kept), ("Notes/new.md", "new", 1, new), ("Notes/c.md", "c", 1, c)],
+    };
+    d.copy("t20", &at20, &[]);
+    for asset in ["both.png", "payroll.pdf", "c.png"] {
+        d.put(&format!("t20/Notes/raw/assets/{asset}"), asset);
+    }
+    d.put("t20/Notes/Private/stale.md", "---\nresource: raw/assets/c.png\n---\nfrom before");
+    let listed = json!({
+        "withheld": ["Notes/raw/assets/both.png", "Notes/raw/assets/c.png", "Notes/raw/assets/payroll.pdf"],
+        "extra": ["Notes/Private/stale.md"], "unread": ["Notes/Board", "Notes/Private"],
+    });
+    let mut first = listed.clone();
+    first["added"] = json!(2);
+    assert_eq!(d.catch_up("t20"), answer(first), "the notes come, their attachments don't");
+    let brain = d.files("brain");
+    assert!(brain.contains_key("Notes/new.md") && brain.contains_key("Notes/c.md") && !brain.keys().any(|p| p.contains("raw/assets")), "{brain:?}");
+    assert_eq!(d.record()["withheld"], listed["withheld"], "recorded, for every later catch-up");
+    assert_eq!(d.catch_up("t20"), answer(listed), "replay");
+
+    // a person lets one in by adding it: nothing more to keep out of it
+    d.put("brain/Notes/raw/assets/both.png", "both");
+    assert_eq!(d.catch_up("t20")["withheld"], json!(["Notes/raw/assets/c.png", "Notes/raw/assets/payroll.pdf"]));
+    assert_eq!(d.read("brain/Notes/raw/assets/both.png").as_deref(), Some("both"));
+
+    // and with nothing left out, only a folder the founder's agent couldn't read
+    let e = Dir::new("withheld-unread");
+    e.copy("founder", &Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Private", "np", false)], pages: vec![("Notes/a.md", "a", 1, "a1")] }, &[]);
+    e.put("founder/Notes/raw/assets/payroll.pdf", "payroll");
+    assert_eq!(e.make(&[])["withheld"], json!(["Notes/raw/assets/payroll.pdf"]), "no note names it, and a folder is out");
+    assert!(e.read("brain/Notes/raw/assets/payroll.pdf").is_none());
+
+    // a brain made from its stage, as its own is: the stage's note names its
+    // old place, the work folder's names its asset, and that goes up
+    let f = Dir::new("withheld-own");
+    let stage = "---\nresource: /data/x.png\n---\nx";
+    f.stage("stage", &Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Private", "np", false)], pages: vec![("Notes/x.md", "x", 1, stage)] }, &[]);
+    f.put("brain/Notes/x.md", "---\nresource: raw/assets/x.png\n---\nx");
+    f.put("brain/Notes/raw/assets/x.png", "x");
+    let made = f.run(&["start", OLD, "stage.json", "brain", "stage"]).unwrap();
+    assert_eq!((&made["withheld"], &made["recorded"]), (&json!([]), &json!(1)));
+    assert_eq!(f.read("brain/Notes/raw/assets/x.png").as_deref(), Some("x"));
 }

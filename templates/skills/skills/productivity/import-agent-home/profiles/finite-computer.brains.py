@@ -20,6 +20,13 @@
 # old brain" is by its own revisions (the name file's `versions`, FIN-773),
 # never two copies' bytes: an import rewrites asset notes.
 #
+# An attachment (a file of a wiki's `raw/assets/`) is decided by the notes
+# that name it, never by where it sits (`withheld`): it stays out of the
+# brain when a note of a folder the brain doesn't bring in names it (alone,
+# or with one it does), or, while a folder is out, when no note names it.
+# Its note still comes. The record keeps each one withheld, so no later
+# catch-up brings it in; a person lets one in by adding it.
+#
 # The base is a file of the brain's because an agent can't read the
 # brain's history yet: `fragment` reads `main` as it is now, never a file
 # at an earlier commit nor `main`'s commit messages (FIN-780). Once it
@@ -186,6 +193,28 @@ def count(n):
     return n
 
 
+def attachment(rel):
+    # A file of a wiki's `raw/assets/`.
+    parts = rel.split("/")
+    return len(parts) > 3 and parts[1:3] == ["raw", "assets"]
+
+
+def namers(roots):
+    # Each attachment, and the notes (as (root, path)) that name it.
+    found = {}
+    for root in roots:
+        for rel in files_in(root):
+            for a in assets(root, rel):
+                found.setdefault(a, set()).add((root, rel))
+    return found
+
+
+def withheld_by(names, excluded, anything_out):
+    # The one rule: kept out when a note it doesn't bring in names it, or,
+    # while a folder is out, when no note names it.
+    return any(excluded(root, rel) for root, rel in names) or (not names and anything_out)
+
+
 def folder_of(path, known):
     # The deepest of `known` that `path` is in (a child folder is under its parent).
     return max((f for f in known if path.startswith(f + "/")), key=len, default=None)
@@ -235,6 +264,7 @@ if record is not MISSING:
         for p, seen in record["pages"].items():
             need(clean(p) and (seen["written"] is None or isinstance(seen["written"], str)))
             ident(seen["id"]), count(seen["revision"])
+        need(isinstance(record["withheld"], list) and all(clean(a) for a in record["withheld"]))
     except (TypeError, KeyError, ValueError, AttributeError):
         stop(f"{RECORD} is not one this file wrote: change nothing")
     if record["old"] != old:
@@ -281,28 +311,24 @@ if mode == "start":
         # to it in the old brain is for a person.
         exact_text = path in exact if isinstance(exact, list) else sha(staged, path) == old_sha
         pages[path] = {"id": id_, "revision": revision, "written": h if exact_text else None}
-    new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages} if versions else MISSING
+    # Out of the push goes all a folder it doesn't share holds, with or
+    # without versions: its files, and each attachment the rule withholds,
+    # by the notes here and in the copy (a folder's sit in its parent
+    # wiki's `raw/assets/`).
+    mine = list(files_in(work))
+    names = namers((work, staged))
+    anything_out = bool(left_out) or any(f not in shared for f in folders)
+    withheld = sorted(
+        a for a in mine
+        if attachment(a) and a not in listed and not outside(a)
+        and withheld_by(names.get(a, ()), lambda root, rel: outside(rel), anything_out)
+    )
+    if record is not MISSING:
+        withheld = sorted(set(withheld) | set(record["withheld"]))  # again: what it withheld before
+    new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages, "withheld": withheld} if versions else MISSING
     if record is not MISSING and record != new:
         stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
-    # Out of the push goes all a folder it doesn't share holds, with or
-    # without versions: its files, and the assets its notes name, here or
-    # in the copy (they sit in its parent wiki's `raw/assets/`). One a page
-    # it shares names too stays out for a person (`ambiguous`). While a
-    # folder is out, an asset no note names stops it: whose it is can't be
-    # told.
-    mine = list(files_in(work))
-    gone = [(work, rel) for rel in mine if outside(rel)] + [(staged, rel) for rel in files_in(staged) if outside(rel)]
-    theirs = {a for root, rel in gone for a in assets(root, rel)}
-    kept = {a for rel in mine if not outside(rel) and carried(rel) for a in assets(work, rel)}
-    held_out = {a for a in theirs if a not in listed and sha(work, a) is not None}
-    stray = sorted(
-        rel for rel in mine
-        if gone and rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2
-        and not outside(rel) and rel not in kept | theirs and rel not in listed
-    )
-    if stray:
-        stop(f"no page it shares names {', '.join(stray)}: push nothing, and ask whose each is")
-    removed = sorted({rel for rel in mine if outside(rel)} | held_out)
+    removed = sorted({rel for rel in mine if outside(rel)} | {a for a in withheld if a in mine})
     # What is left of a folder (empty folders, dot folders) never syncs.
     try:
         for rel in removed:
@@ -314,7 +340,7 @@ if mode == "start":
     print(json.dumps({
         "versions": versions, "recorded": len(pages), "shared": sorted(shared),
         "not shared": sorted(set(folders) - set(shared) | set(left_out)),
-        "removed": removed, "ambiguous": sorted(held_out & kept), "refused": refused,
+        "removed": removed, "withheld": withheld, "refused": refused,
     }))
     sys.exit(0)
 
@@ -326,6 +352,7 @@ if not isinstance(exact, list):
 exact = {p for p in exact if isinstance(p, str)}
 copy_dir, shared = other, record["folders"]
 known = set(folders) | set(shared)
+names = namers((copy_dir, work))
 
 
 def ours(folder):
@@ -339,25 +366,31 @@ def older(folder):
     return sequence < shared[folder]["sequence"]
 
 
-def asset_plan(names):
-    # The assets to bring with a note, or None when one can't come or
-    # differs here: none is ever written over.
-    plan = []
-    for asset in names:
+def kept_out(asset):
+    # Withheld already (the record), by the rule (a note of the copy's in a
+    # folder it doesn't bring in names it), or one that would come into such
+    # a folder. The brain's own notes are all its.
+    return asset in record["withheld"] or not ours(folder_of(asset, known)) or withheld_by(
+        names.get(asset, ()), lambda root, rel: root == copy_dir and not ours(folder_of(rel, known)), False)
+
+
+def asset_plan(named):
+    # The assets to bring with a note, and those it keeps out; None when
+    # one can't come or differs here: none is ever written over.
+    plan, out = [], []
+    for asset in named:
         there, here = sha(copy_dir, asset), sha(work, asset)
         if not carried(asset) or blocked(copy_dir, asset) or blocked(work, asset):
             return None  # one sync never carries, or a link or a folder there
         if there is None and here is None or None not in (there, here) and there != here:
             return None  # in neither, or different here
         if here is None:
-            if not ours(folder_of(asset, known)):
-                return None  # it would come into a folder this copy doesn't bring in
-            plan.append(asset)
-    return plan
+            (out if kept_out(asset) else plan).append(asset)
+    return plan, out
 
 
 took = {"added": 0, "updated": 0, "assets": 0}
-held = {k: [] for k in ("both", "gone", "unsynced", "missing", "older", "extra", "refused")}
+held = {k: [] for k in ("both", "gone", "unsynced", "missing", "older", "withheld", "extra", "refused")}
 unshared, take = set(), []
 for path, (id_, revision, _) in sorted(listed.items()):
     if not carried(path) or at(copy_dir, path) is None or at(work, path) is None:
@@ -411,12 +444,14 @@ for path, (id_, revision, _) in sorted(listed.items()):
         continue
     take.append((kind, path, entry, plan))
 
-for kind, path, entry, plan in take:
+withheld = set()
+for kind, path, entry, (plan, out) in take:
     brought = [a for a in plan if sha(work, a) is None]
     if not all(put(copy_dir, work, a) for a in brought) or (kind != "same" and not put(copy_dir, work, path)):
         held["both"].append(path)  # something here in the way
         continue
     took["assets"] += len(brought)
+    withheld.update(out)
     if kind != "same":
         took[kind] += 1
     if entry is not None:
@@ -424,9 +459,11 @@ for kind, path, entry, plan in take:
 
 # Files the copy holds that no listed page is: kept for a person, unless
 # an asset the brain holds the same.
+held["withheld"] = sorted(withheld)
+record["withheld"] = sorted(withheld | set(record["withheld"]))
 for rel in files_in(copy_dir):
     asset = "/raw/assets/" in "/" + rel and sha(copy_dir, rel) is not None and sha(copy_dir, rel) == sha(work, rel)
-    if rel not in listed and not asset:
+    if rel not in listed and not asset and rel not in withheld:
         held["extra"].append(rel)
 # Pages the old brain deleted since, by a copy no older: listed, while they're here.
 held["gone"] = sorted(
