@@ -364,6 +364,13 @@ test("its connector's jobs ask only their own door, and only their asks", async 
   assert.ok(asks[1].mark > asks[0].mark);
 });
 
+test("a deployment that runs no doors refuses a move's fence and keeps nothing, so the move makes no connector for nothing", async () => {
+  const d = door({ noDoors: true });
+  const r = await d.call("POST", "/door/expect", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, (await r.json()).error], [409, "no_doors"]);
+  assert.equal(d.row(), undefined);
+});
+
 test("a deployment that runs no doors refuses its connector's connect and keeps nothing", async () => {
   const d = door({ noDoors: true });
   const r = await d.connect();

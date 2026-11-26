@@ -841,6 +841,22 @@ fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::
 /// The ids a wake's failure names (every one, and why, is on stderr).
 const WAKE_NAMED_MAX: usize = 20;
 
+/// What a SimpleX move does next from the step its record stands at
+/// (`operator simplex-move`; the admin Worker says only the step).
+fn simplex_next(step: &str) -> &'static str {
+    match step {
+        "" => "make its connector, hand its link over, connect its door",
+        "making" => "wait: a `go` is making its connector (one that stopped: --back)",
+        "made" => "hand its link over, connect its door",
+        "imported" => "bind its connector and connect its door",
+        "bound" => "connect its door",
+        "connecting" => "wait for its door to link",
+        "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
+        "done" => "nothing: moved",
+        _ => "a step this release does not know",
+    }
+}
+
 /// An admin call's answer as JSON, or its refusal.
 fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
     c.call_as::<Value>(resp)
@@ -1784,7 +1800,7 @@ fn run(cli: Cli) -> Result<()> {
             if dry_run || !yes {
                 let v = ask("plan")?;
                 json_exit(j, &v);
-                println!("{agent}: next, {}", v["next"].as_str().unwrap_or("?"));
+                println!("{agent}: next, {}", simplex_next(v["record"]["step"].as_str().unwrap_or("")));
                 println!("  its computer {}, its link {}", if v["awake"] == true { "awake" } else { "asleep" }, v["link"]["phase"].as_str().unwrap_or("unread"));
                 if let Some(why) = v["blocked"].as_str() {
                     println!("  it may not begin: {why}");
@@ -1809,7 +1825,7 @@ fn run(cli: Cli) -> Result<()> {
                     return Ok(());
                 }
                 if !j {
-                    println!("  {step}: {}", v["next"].as_str().unwrap_or(""));
+                    println!("  {step}: {}", simplex_next(&step));
                 }
                 if t0.elapsed() > std::time::Duration::from_secs(15 * 60) {
                     json_exit(j, &v);

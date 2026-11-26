@@ -403,6 +403,7 @@ export class SimplexDoor extends DurableObject {
   // handed back, takes no link (409).
   async #expect(body) {
     if (!nameOk(body.door)) throw Object.assign(new Error("an expected link names its door"), { status: 400 });
+    if (!this.ctx.container) return refusal(409, "no_doors", "this deployment runs no doors (no container for them): nothing moved");
     if (this.#over) return refusal(410, "over", "this door's connector is gone");
     if (this.#ended) {
       this.#migrate();

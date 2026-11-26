@@ -144,20 +144,11 @@ impl Move<'_> {
         answer(&mut r, "its door's state").await
     }
 
+    /// What it is and what blocks it; the CLI words its next step from
+    /// its record's (cli/src/main.rs `simplex_next`).
     async fn plan(&self) -> CellResult<Value> {
         let read = self.read().await?;
-        let next = match text(&read["record"], "step") {
-            "" => "make its connector, hand its link over, bind its connector and connect its door",
-            "making" => "wait: a `go` is making its connector (one that stopped: `back`)",
-            "made" => "hand its link over, bind its connector and connect its door",
-            "imported" => "bind its connector and connect its door",
-            "bound" => "connect its door",
-            "connecting" => "wait for its door to link",
-            "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
-            "done" => "nothing: moved",
-            _ => "its record says a step this release does not know",
-        };
-        Ok(json!({ "agent": self.agent, "computer": self.computer, "awake": read["awake"], "link": read["link"]["said"], "record": read["record"], "next": next, "blocked": self.blocked(&read) }))
+        Ok(json!({ "agent": self.agent, "computer": self.computer, "awake": read["awake"], "link": read["link"]["said"], "record": read["record"], "blocked": self.blocked(&read) }))
     }
 
     /// Why a move that has not begun may not: its computer asleep (its
@@ -171,7 +162,7 @@ impl Move<'_> {
         }
         let said = &read["link"]["said"];
         let movable = said["phase"] == "linked" || (said["phase"] == "off" && said["staged"] == true);
-        (read["link"]["status"] != 200 || !movable).then(|| format!("its computer holds no bound SimpleX link for it, nor a staged chat: {said}"))
+        (read["link"]["status"] != 200 || !movable).then(|| format!("no SimpleX link or staged chat to move: {said}"))
     }
 
     async fn go(&self) -> CellResult<Value> {
@@ -213,9 +204,9 @@ impl Move<'_> {
             let state = self.door_state(text(&rec, "door")).await?;
             if state["runner"]["phase"] != "linked" {
                 if over && state["door"]["started"] == 0 {
-                    return Err(self.went_back(CellError::new(ErrorCode::Conflict, "its connector's connect ended, its door never started")).await);
+                    return Err(self.went_back(CellError::new(ErrorCode::Conflict, "its connect ended unstarted")).await);
                 }
-                return Ok(json!({ "agent": self.agent, "record": rec, "next": "wait for its door to link, then ask again", "door": { "running": state["running"], "runner": state["runner"]["phase"] } }));
+                return Ok(json!({ "agent": self.agent, "record": rec }));
             }
             // its connector told whom its door is linked to, as its page asks
             let connector = text(&rec, "connector").to_string();
@@ -226,12 +217,7 @@ impl Move<'_> {
             rec = self.set("connecting", None, json!({ "step": "done" })).await?;
             self.note(format!("{}'s SimpleX moved into {connector}; {} archived", self.agent, rec["chat"].as_str().unwrap_or("no old chat"))).await?;
         }
-        let next = match text(&rec, "step") {
-            "done" => "nothing: moved",
-            "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
-            _ => "ask again",
-        };
-        Ok(json!({ "agent": self.agent, "record": rec, "next": next }))
+        Ok(json!({ "agent": self.agent, "record": rec }))
     }
 
     /// Its link handed over and imported, its connector bound, then its
@@ -269,15 +255,16 @@ impl Move<'_> {
         let made = answer(&mut made, "its connector's making").await?;
         let (name, npub) = (text(&made, "name").to_string(), text(&made, "npub"));
         let door = fragment_core::door::door_id(&name, npub).ok_or_else(|| CellError::host(format!("{name} names no door")))?;
-        if self.door_state(&door).await?["doors"] != true {
+        // its door fenced from now until the link is given (cell/door.mjs
+        // `EXPECTING`): its setup page, opened meanwhile, starts no new
+        // profile. Refused (a deployment that runs no doors), its
+        // connector goes, nothing moved.
+        let mut expected = crate::routed::send(self.env, "SIMPLEX_DOOR", &door, crate::routed::internal_request("door/expect", &json!({ "door": door }).to_string())?).await?;
+        if let Err(e) = answer(&mut expected, "its door's fence").await {
             self.as_person(&name, Method::Delete, "/delete", None).await?;
             self.forget().await?;
-            return Err(CellError::new(ErrorCode::Conflict, "this deployment runs no SimpleX doors: nothing moved"));
+            return Err(e);
         }
-        // its door fenced from now until the link is given (cell/door.mjs
-        // `EXPECTING`): its setup page, opened meanwhile, starts no new profile
-        let mut expected = crate::routed::send(self.env, "SIMPLEX_DOOR", &door, crate::routed::internal_request("door/expect", &json!({ "door": door }).to_string())?).await?;
-        answer(&mut expected, "its door's fence").await?;
         let secret = hex::encode(crate::js::random_bytes::<32>());
         self.as_person(&name, Method::Put, &format!("/api/secrets/{SECRET}"), Some(&json!({ "value": secret, "hosts": [DOOR_HOST] }))).await?;
         let rec = match self.set("making", Some(claim), json!({ "connector": name, "door": door, "step": "made" })).await {
@@ -375,7 +362,7 @@ impl Move<'_> {
         // keeps the link, never stopped for nothing (Codex's round on
         // 8cacd32d1; the hosted check on 8c0ad40ec)
         if rec["moved"] == true && (read["awake"] != true || read["alwaysOn"] != true) {
-            return Err(CellError::new(ErrorCode::Conflict, "its computer runs SimpleX only awake and always on: turn always-on on, then ask `--back` again (its door keeps the link meanwhile)"));
+            return Err(CellError::new(ErrorCode::Conflict, "its computer must be awake and always on: turn always-on on, then `--back` again (its door keeps the link)"));
         }
         // its door stops, saving last, and hands its newest save back, with
         // its SHA-256; a copy its computer finds damaged on its way (seen
