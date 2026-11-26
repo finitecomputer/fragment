@@ -479,6 +479,11 @@ pub(crate) enum MetaKey {
     /// Test fleets: set while a wake waits there, until it has decided
     /// (`woke-held`).
     TestWokeHeld,
+    /// Test fleets: while set, a live socket's upgrade waits after who it
+    /// is was asked (live.rs `held_live`), at most `TEST_HOLD_MAX_MS`.
+    TestHoldLive,
+    /// Test fleets: set while an upgrade waits there (`live-held`).
+    TestLiveHeld,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
@@ -609,6 +614,8 @@ impl MetaKey {
             MetaKey::TestAdvanceHeld => "test_advance_held",
             MetaKey::TestHoldWoke => "test_hold_woke",
             MetaKey::TestWokeHeld => "test_woke_held",
+            MetaKey::TestHoldLive => "test_hold_live",
+            MetaKey::TestLiveHeld => "test_live_held",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Grants => "grants",

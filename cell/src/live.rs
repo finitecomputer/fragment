@@ -23,9 +23,13 @@
 //! cursor, which a channel above its role refuses until it may read it
 //! again; so no record is missed. Each time who it is is asked again
 //! (below), its role is decided again too, and one that would differ now
-//! closes it with 4001 as well. So what the fragment decides (a member
-//! removed or their role changed, a channel's read role, the visibility,
-//! the share link) reaches every socket at once, and what the registry
+//! closes it with 4001 as well. So what the fragment decides reaches
+//! every socket at once: a member removed or their role changed, a person
+//! joining (their agents' sockets reopen: a hold applies beside its
+//! person), the visibility, the share link (decided as a socket opens),
+//! and a deploy that changes a channel's read role or drops a channel
+//! (every socket reopens, plane.rs `install_rows`, so one refused it
+//! subscribes again as it may now). And what the registry
 //! holds of who it is reaches a key's socket (an agent held lower by its
 //! owner, a key revoked) within `LIVE_IDENTITY_MS` plus one reconnect, and
 //! a cookie's (a sign-out) at its next frame after that. A socket asks
@@ -432,6 +436,28 @@ impl FragmentCell {
             }
         }
         Ok(sockets.len())
+    }
+
+    /// Test fleets: a socket's upgrade waits while `hold-live` is on, at
+    /// most `TEST_HOLD_MAX_MS`, saying so (`live-held`): a test changes the
+    /// fragment between who it is being asked and its accept.
+    pub(crate) async fn held_live(&self) -> CellResult<()> {
+        use crate::jobs::{TEST_HOLD_MAX_MS, TEST_HOLD_POLL_MS};
+        assert!(self.cfg.test_hooks, "only a test fleet holds an upgrade");
+        for _ in 0..TEST_HOLD_MAX_MS / TEST_HOLD_POLL_MS {
+            if self.meta(MetaKey::TestHoldLive)?.is_none() {
+                return Ok(());
+            }
+            self.set_meta(MetaKey::TestLiveHeld, "1")?;
+            Delay::from(std::time::Duration::from_millis(TEST_HOLD_POLL_MS)).await;
+        }
+        Ok(())
+    }
+
+    /// Closes every live socket so that its page reconnects, decided afresh:
+    /// what the fragment's channels let it read changed (plane.rs).
+    pub(crate) fn reopen_live(&self, reason: &str) {
+        self.reopen_sockets(LIVE_TAG, reason);
     }
 
     /// Closes the sockets of `tag` so that their pages reconnect: a

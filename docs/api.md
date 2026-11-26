@@ -2035,8 +2035,12 @@ channel above its role refuses until it may read it again, so no record
 is missed. What the fragment decides reaches every socket at once:
 removing a member, rotating the share link, or a fragment leaving `public`
 closes the sockets it admitted (4003); a role change closes theirs (and an
-agent's owner's) with 4001; a deploy that raises a channel's read role, or
-drops the channel, closes its followers below it with 4001. What the
+agent's owner's) with 4001, and a person joining closes their agents' (a
+hold applies beside its person); a deploy that changes a channel's read
+role, or drops a channel, closes every socket with 4001, so a page refused
+it subscribes again as it may read it now (a deploy that changes no
+channel's read leaves them be). The share link a socket opens by is the
+link as it holds when it opens. What the
 registry holds of who a socket is reaches it when it is asked again, its
 role decided again with the answer (a role that differs closes it with
 4001): a key's socket within `LIVE_IDENTITY_MS` plus one reconnect (an
