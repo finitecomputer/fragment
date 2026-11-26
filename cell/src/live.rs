@@ -13,18 +13,22 @@
 //! client pages comes in a later page, never live ahead of the records
 //! before it, so a client's cursor never jumps a gap.
 //!
-//! A socket's role is fixed when it connects, and it reads a channel as
-//! `permit::decide` says over that kept standing and the channel as it is
-//! declared now (`socket_reads`): at its subscribe, at each record and
-//! draft sent to the channel's followers, and at each query. So a deploy
-//! that raises a channel's read role stops what reaches the sockets below
-//! it at once; they still follow it, and are sent it again should it come
-//! back down. Removing a member closes
-//! theirs, and rotating the share link closes link holders' (4003);
-//! deleting the fragment closes every socket (4004). Both codes are
-//! final: the browser library does not reconnect after them. A member
-//! whose role changes has theirs closed with 4001 (`ROLE_CHANGED`), after
-//! which the library reconnects, at the new role.
+//! A socket's role is the one a connect decides (`permit::decide` over
+//! the caller's standing), decided again each time who it is is asked
+//! again (below): a role that would differ now closes it with 4001
+//! (`ROLE_CHANGED`), and the library reconnects at the new role. So what
+//! the registry holds of who it is (an agent held lower by its owner, as
+//! a key revoked) reaches an open socket within `LIVE_IDENTITY_MS`, at its
+//! next frame. It reads a channel as `decide` says over that role and the
+//! channel as it is declared now (`socket_reads`): at its subscribe, at
+//! each record and draft sent to the channel's followers, and at each
+//! query. So a deploy that raises a channel's read role stops what reaches
+//! the sockets below it at once; they still follow it, and are sent it
+//! again should it come back down. Removing a member closes theirs, and
+//! rotating the share link closes link holders' (4003); deleting the
+//! fragment closes every socket (4004). Both codes are final: the browser
+//! library does not reconnect after them. A member whose role changes
+//! here has theirs closed with 4001 at once.
 //!
 //! A query over the socket runs as the socket's principal and role, as its
 //! subscriptions read, and outside the public call budget (ops.rs): no
@@ -33,9 +37,10 @@
 //! sockets. Opening a socket at the public role is one call of the public
 //! budget, so reconnecting to get more is bounded as calls are.
 //!
-//! A signed-in socket acts as who it connected as for `LIVE_IDENTITY_MS`;
-//! at its next frame after that, the registry is asked again with the
-//! credential it connected with. A key is a public key, kept in the
+//! A signed-in socket acts as who it connected as, at the role it
+//! connected with, for `LIVE_IDENTITY_MS`; at its next frame after that,
+//! the registry is asked again with the credential it connected with, and
+//! its role decided again with what it answers. A key is a public key, kept in the
 //! socket's attachment, so it is asked about after waking too; a cookie's
 //! token is a secret, held in this activation's memory only. A socket
 //! whose credential no longer names its principal (a sign-out, an ended
@@ -129,6 +134,10 @@ pub struct LiveState {
     /// at their next check, as all were); an older release ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// Whether it opened with the share link: its role is decided again
+    /// as it was decided as it connected (`still_who`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub link: bool,
 }
 
 impl LiveState {
@@ -274,6 +283,7 @@ impl FragmentCell {
             presence_at: 0,
             checked_at: if signed_in { js::now_ms() } else { 0 },
             key,
+            link,
         };
         assert_eq!(st.signed(), signed_in, "a signed-in socket's principal is not an anonymous one");
         if let Some(cookie) = cookie {
@@ -484,8 +494,9 @@ impl FragmentCell {
         Ok(())
     }
 
-    /// Whether a socket still acts as who it connected as (the module doc);
-    /// a registry that cannot answer closes it too: fail closed.
+    /// Whether a socket still acts as who it connected as, at the role a
+    /// connect would decide now (the module doc); a registry that cannot
+    /// answer closes it too: fail closed.
     async fn still_who(&self, ws: &WebSocket, st: &mut LiveState) -> bool {
         let now = js::now_ms();
         if !st.signed() || now - st.checked_at < limits::LIVE_IDENTITY_MS {
@@ -497,19 +508,23 @@ impl FragmentCell {
         };
         let same = match (credential, self.meta(MetaKey::Name)) {
             (Some(credential), Ok(Some(name))) => match credential.resolve(&self.env, &name).await {
-                Ok(Some(signed)) => npub::display(&signed.identity.id) == st.principal,
-                Ok(None) | Err(_) => false,
+                Ok(Some(signed)) if npub::display(&signed.identity.id) == st.principal => Some(Caller::of(signed)),
+                Ok(_) | Err(_) => None,
             },
-            _ => false,
+            _ => None,
         };
-        if same {
+        // the role a connect would decide now, after the last await: one
+        // that differs is reconnected to, at it
+        let role = same.map(|caller| self.require(&caller, st.link, Role::Public).ok());
+        if role == Some(Some(st.role)) {
             st.checked_at = now;
             if ws.serialize_attachment(&*st).is_ok() {
                 return true;
             }
         }
         self.live.borrow_mut().credentials.remove(&st.id);
-        let _ = ws.close(Some(ROLE_CHANGED), Some("who you are is checked again: reconnect"));
+        let why = if role.is_some() { "your role here changed: reconnect" } else { "who you are is checked again: reconnect" };
+        let _ = ws.close(Some(ROLE_CHANGED), Some(why));
         false
     }
 

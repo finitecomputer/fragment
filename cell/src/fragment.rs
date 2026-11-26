@@ -304,6 +304,12 @@ pub struct Caller {
 }
 
 impl Caller {
+    /// Someone the platform resolved itself, with no request of theirs at
+    /// hand (a live socket's identity asked again): signed, as themselves.
+    pub(crate) fn of(signed: Signed) -> Caller {
+        Caller { signed: Some(signed), unresolved: None, url: url::Url::parse("https://fragment.internal/").expect("a URL"), site: false }
+    }
+
     /// The caller's identity (an npub), when someone signed or has a session.
     pub fn principal(&self) -> Option<&str> {
         self.signed.as_ref().map(|s| s.id.as_str())
