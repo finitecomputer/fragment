@@ -317,6 +317,7 @@ fn what_the_brain_doesnt_share_never_comes_in() {
     let after = d.files("brain");
     let changed: Vec<_> = after.keys().filter(|p| before.get(*p) != after.get(*p)).collect();
     assert_eq!(changed, ["Notes/a.md", "Team/Public/v.md", "imported-from-finite.json"], "only the shared folders it could read, and the record");
+    assert!(d.record()["withheld"].as_array().unwrap().contains(&json!("Team/raw/assets/v.png")), "what it withheld, recorded");
 
     // a quoted name it can't read exactly names nothing, never another
     // file: here a stale attachment no note names, while a folder is out
@@ -563,11 +564,11 @@ fn without_versions_a_folder_left_out_stays_out() {
         "removed": ["Notes/Private/both.md", "Notes/Private/payroll.md", "Notes/raw/assets/both.png", "Notes/raw/assets/payroll.pdf"],
         "withheld": ["Notes/raw/assets/both.png", "Notes/raw/assets/payroll.pdf"], "refused": [],
     });
-    assert_eq!(d.start(&["Notes/Private"]), Ok(started));
+    assert_eq!(d.start(&["Notes/Private"]), Ok(started.clone()));
     let pushed = || d.files("brain").into_keys().collect::<Vec<_>>();
     assert_eq!(pushed(), ["Notes/a.md", "Notes/both.md", "Notes/raw/assets/shared.png"], "the push holds what is kept, and no record");
     let again = d.start(&["Notes/Private"]).unwrap();
-    assert_eq!((&again["removed"], &again["withheld"]), (&json!([]), &json!([])), "replay: nothing recorded, nothing more to take out");
+    assert_eq!((&again["removed"], &again["withheld"]), (&json!([]), &started["withheld"]), "replay: the same withheld, nothing more to take out");
     assert_eq!(pushed(), ["Notes/a.md", "Notes/both.md", "Notes/raw/assets/shared.png"]);
 }
 
@@ -643,4 +644,39 @@ fn a_withheld_attachment_stays_out() {
     let made = f.run(&["start", OLD, "stage.json", "brain", "stage"]).unwrap();
     assert_eq!((&made["withheld"], &made["recorded"]), (&json!([]), &json!(1)));
     assert_eq!(f.read("brain/Notes/raw/assets/x.png").as_deref(), Some("x"));
+}
+
+/// Goal (FIN-774): an attachment is withheld for good the moment any copy
+/// shows a note of a folder the brain doesn't bring in naming it, whether
+/// or not the file is there and whether or not that note comes. Method:
+/// the founder's left-out note names a file it doesn't hold; teammate A,
+/// who reads that folder, shows another; teammate B, who can't read it,
+/// brings shared notes naming both. Invalid: what published both at B's
+/// import, as neither had been recorded.
+#[test]
+fn an_attachment_is_withheld_on_sight() {
+    let d = Dir::new("on-sight");
+    let private = |asset: &str| format!("---\nresource: raw/assets/{asset}\n---\nprivate");
+    let (missing, secret) = (private("missing.pdf"), private("secret.pdf"));
+    let at10 = Old { sequence: 10, folders: vec![("Notes", "n", true), ("Notes/Private", "np", true)], pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/Private/p.md", "p", 1, &missing)] };
+    assert_eq!(d.found(&at10, &[], &["Notes/Private"])["withheld"], json!(["Notes/raw/assets/missing.pdf"]), "the founder's, though the file isn't there");
+
+    // A reads the left-out folder: its note there names another attachment
+    let at20 = Old { sequence: 20, folders: vec![("Notes", "n", true), ("Notes/Private", "np", true)], pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/Private/q.md", "q", 1, &secret)] };
+    d.copy("a20", &at20, &[]);
+    d.put("a20/Notes/raw/assets/secret.pdf", "secret");
+    let a = d.catch_up("a20");
+    assert_eq!((&a["withheld"], &a["unshared"], &a["extra"]), (&json!(["Notes/raw/assets/secret.pdf"]), &json!(["Notes/Private"]), &json!([])));
+    assert_eq!(d.record()["withheld"], json!(["Notes/raw/assets/missing.pdf", "Notes/raw/assets/secret.pdf"]), "A's, though its note never comes");
+
+    // B can't read it: shared notes naming both, both files in B's copy
+    let (b, m) = ("---\nresource: raw/assets/secret.pdf\n---\nb", "---\nresource: raw/assets/missing.pdf\n---\nm");
+    let at30 = Old { sequence: 30, folders: vec![("Notes", "n", true), ("Notes/Private", "np", false)], pages: vec![("Notes/a.md", "a", 1, "a1"), ("Notes/b.md", "b", 1, b), ("Notes/m.md", "m", 1, m)] };
+    d.copy("b30", &at30, &[]);
+    d.put("b30/Notes/raw/assets/secret.pdf", "secret");
+    d.put("b30/Notes/raw/assets/missing.pdf", "missing");
+    let caught = d.catch_up("b30");
+    assert_eq!((&caught["added"], &caught["withheld"]), (&json!(2), &json!(["Notes/raw/assets/missing.pdf", "Notes/raw/assets/secret.pdf"])));
+    let brain = d.files("brain");
+    assert!(brain.contains_key("Notes/b.md") && brain.contains_key("Notes/m.md") && !brain.keys().any(|p| p.contains(".pdf")), "{brain:?}");
 }

@@ -24,8 +24,9 @@
 # that name it, never by where it sits (`withheld`): it stays out of the
 # brain when a note of a folder the brain doesn't bring in names it (alone,
 # or with one it does), or, while a folder is out, when no note names it.
-# Its note still comes. The record keeps each one withheld, so no later
-# catch-up brings it in; a person lets one in by adding it.
+# Its note still comes. The record keeps each one withheld from the moment
+# any copy shows such a note naming it, whether or not the file is there,
+# so no later catch-up brings it in; a person lets one in by adding it.
 #
 # The base is a file of the brain's because an agent can't read the
 # brain's history yet: `fragment` reads `main` as it is now, never a file
@@ -319,9 +320,8 @@ if mode == "start":
     names = namers((work, staged))
     anything_out = bool(left_out) or any(f not in shared for f in folders)
     withheld = sorted(
-        a for a in mine
-        if attachment(a) and a not in listed and not outside(a)
-        and withheld_by(names.get(a, ()), lambda root, rel: outside(rel), anything_out)
+        {a for a, by in names.items() if a not in listed and withheld_by(by, lambda root, rel: outside(rel), False)}
+        | {a for a in mine if attachment(a) and a not in listed and not outside(a) and not names.get(a) and anything_out}
     )
     if record is not MISSING:
         withheld = sorted(set(withheld) | set(record["withheld"]))  # again: what it withheld before
@@ -457,10 +457,14 @@ for kind, path, entry, (plan, out) in take:
     if entry is not None:
         record["pages"][path] = entry
 
+# On sight: each attachment a note of the copy's, in a folder it doesn't
+# bring in, names, whether that note comes or not, and the file is here or not.
+seen = {a for a, by in names.items() if withheld_by(by, lambda root, rel: root == copy_dir and not ours(folder_of(rel, known)), False)}
+held["withheld"] = sorted(withheld | {a for a in seen if sha(copy_dir, a) is not None and sha(work, a) is None})
+record["withheld"] = sorted(withheld | seen | set(record["withheld"]))
+withheld = set(held["withheld"])
 # Files the copy holds that no listed page is: kept for a person, unless
-# an asset the brain holds the same.
-held["withheld"] = sorted(withheld)
-record["withheld"] = sorted(withheld | set(record["withheld"]))
+# an asset the brain holds the same, or one withheld.
 for rel in files_in(copy_dir):
     asset = "/raw/assets/" in "/" + rel and sha(copy_dir, rel) is not None and sha(copy_dir, rel) == sha(work, rel)
     if rel not in listed and not asset and rel not in withheld:

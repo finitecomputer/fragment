@@ -236,8 +236,9 @@ It leaves the rest as it is, for a person, and lists it:
 - **unsynced:** pages your old agent edited and never synced: the old
   brain never had that text;
 - **withheld:** assets the real one keeps out: withheld when it was made,
-  or named by a note of a folder you couldn't read or it doesn't share.
-  Their notes come; the assets stay in your copy, for your owner;
+  or named by a note of a folder you couldn't read or it doesn't share
+  (it records each, so no later catch-up brings one in). Their notes come;
+  the assets stay in your copy, for your owner;
 - **missing:** pages your copy should hold and doesn't;
 - **older:** pages in a folder the real one took from a newer copy than
   yours, which it doesn't hold as yours does (a page the old brain
