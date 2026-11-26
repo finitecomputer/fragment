@@ -394,12 +394,14 @@ impl Move<'_> {
             match self.hand("back", save, behind, &sha).await {
                 Err(e) if e.message.contains(" 422 damaged:") && asks < HAND_ASKS => continue,
                 Err(e) => return Err(e),
-                Ok(_) => {}
+                Ok(_) => break,
             }
-            if let Some(chat) = rec["chat"].as_str() {
-                crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: false }).await?;
-            }
-            break;
+        }
+        // its computer runs its link: its old chat unarchived, again on a
+        // `back` asked again after this failed, its computer's mark let go
+        // already (Codex's round on 6e6b1e955)
+        if let Some(chat) = rec["chat"].as_str() {
+            crate::principal::ask(self.env, &self.person.id, &crate::principal::calls::SetOwn { fragment: chat.into(), own: crate::principal::calls::Own::Archived, on: false }).await?;
         }
         // its connector kept, its chat's history with it: unbound (its door
         // ends) once it has taken what its door delivered, and archived
