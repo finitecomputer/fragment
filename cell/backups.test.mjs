@@ -69,6 +69,19 @@ test("a backup that keeps coming out damaged is tried a bounded number of times,
   assert.equal(seen.again.length, SAVE_TRIES - 1);
 });
 
+test("a backup whose copy cannot be read is deleted, never left without a record, and its save fails", async () => {
+  const forgot = [];
+  const unread = backupChecked({
+    backup: async () => record(1),
+    stored: async () => {
+      throw new Error("the check of record id-1: no answer within 10 ms");
+    },
+    forget: async (r) => void forgot.push(r.id),
+  });
+  await assert.rejects(unread, /no answer within/);
+  assert.deepEqual(forgot, ["id-1"]);
+});
+
 test("a backup that fails is not tried again here, nor its copy read: its save fails as before", async () => {
   let read = 0;
   const failing = backupChecked({

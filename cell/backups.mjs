@@ -38,14 +38,18 @@ function against(held, record) {
 
 // One directory's backup, kept once R2's copy is its record's. `backup()`
 // makes a fresh archive and answers its record; `stored(record)` reads
-// what R2 holds of it; `forget(record)` deletes a copy that is not it;
-// `again(tried, why)` is told of each backed up again. Throws once
-// `SAVE_TRIES` came out damaged (the save fails, and its lifecycle tries it
-// again), and whatever those throw.
+// what R2 holds of it; `forget(record)` deletes a copy that is not it, or
+// that could not be read (no copy is left without a record); `again(tried,
+// why)` is told of each backed up again. Throws once `SAVE_TRIES` came out
+// damaged (the save fails, and its lifecycle tries it again), and whatever
+// those throw.
 export async function backupChecked({ backup, stored, forget, again = () => {} }) {
   for (let tried = 1; ; tried++) {
     const record = await backup();
-    const held = await stored(record);
+    const held = await stored(record).catch(async (e) => {
+      await forget(record);
+      throw e;
+    });
     if (holds(held, record)) return record;
     const why = against(held, record);
     await forget(record);

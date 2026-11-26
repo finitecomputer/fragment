@@ -300,6 +300,11 @@ async function tail(stream, keep) {
 
 // The bucket a computer's saves are in (computer.rs's `js::BLOBS`).
 const BACKUPS_BINDING = "BLOBS";
+// A copy's delete when its backup is not kept (damaged, or unread) answers
+// within this, its own bound, even once the save's ran out: an R2 delete
+// answers in well under a second (computer.rs `FORGET_PASS_MS`), and the
+// alarm keeps a minute free beside a save's steps (`ALARM_OTHER_MS`).
+const FORGET_MS = 5_000;
 
 // A container step that answered nothing within its bound: its name
 // (`step`) and the bound (`ms`) say which, in its message too, so the
@@ -604,9 +609,10 @@ class ContainerHost {
         return bounded(`the backup of ${dir}`, left(), (signal) => this.#backups.backup({ ...options, signal }));
       },
       stored: (record) => this.#stored(record, left()),
-      // a copy left behind is its prefix's, which a wipe deletes
+      // within its own bound, the save's perhaps spent (one that failed
+      // anyway leaves the copy to its prefix, which a wipe deletes)
       forget: (record) =>
-        bounded(`the delete of record ${record.id}`, left(), (signal) => this.#backups.delete(record, { signal })).catch((e) =>
+        bounded(`the delete of record ${record.id}`, FORGET_MS, (signal) => this.#backups.delete(record, { signal })).catch((e) =>
           console.error(JSON.stringify({ backup: "unforgotten", key: this.#key(record), error: String(e?.message ?? e) })),
         ),
       again: (tried, why) => console.log(JSON.stringify({ backup: "saved again", tried, dir, why, key: this.#prefix })),
