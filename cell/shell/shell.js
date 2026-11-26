@@ -33,7 +33,6 @@ import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
 import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SIMPLEX } from "./connections.js";
-import { createSecrets } from "./secrets.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -2166,7 +2165,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), secretsSection: (...args) => secretsSection(...args), simplexSection, telegramSection, readConnectors },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,
@@ -2183,11 +2182,6 @@ const { connectionsSection } = createConnections({
     computerIs(v);
     state.agents = new Map((state.computer?.agents ?? []).map((x) => [x.identity, x]));
   },
-  asks, isOpen: () => state.page === "Settings", reopenSettings,
-});
-
-const { secretsSection } = createSecrets({
-  api, el, section, named, computer: () => state.computer,
   asks, isOpen: () => state.page === "Settings", reopenSettings,
 });
 

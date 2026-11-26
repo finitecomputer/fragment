@@ -911,19 +911,13 @@ label.settings-line { cursor: pointer; }
   .provider-status .settings-actions > button { flex: 1 1 auto; justify-content: center; }
 }
 .provider-status .quiet { font: var(--type-control); min-height: 32px; height: auto; padding: 5px 14px; border-radius: 999px; background: var(--bg-active); color: var(--text-primary); }
-.provider-status [data-action=disconnect], .provider-status [data-action=remove-key], .provider-status [data-action=remove-secret], .provider-status [data-action=confirm-remove-secret] { color: var(--danger-text); }
+.provider-status [data-action=disconnect], .provider-status [data-action=remove-key] { color: var(--danger-text); }
 .provider-details { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; padding: 0 2px; }
 .provider-detail { font: var(--type-body-sm); }
 .provider-said:empty { display: none; }
 .provider-manage { font: var(--type-body-sm); color: var(--text-secondary); }
 .provider-key { display: flex; gap: 8px; flex-wrap: wrap; }
 .provider-key input { font: var(--type-field); height: 32px; min-width: 0; width: 220px; max-width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
-.secret-hosts-form input, .secret-replace-form input { flex: 1; min-width: 180px; }
-.secret-add-form { display: flex; flex-direction: column; gap: 12px; }
-.secret-field-label { display: flex; flex-direction: column; gap: 5px; font: var(--type-body-sm); color: var(--text-secondary); }
-.secret-field-label input { font: var(--type-field); height: 34px; width: 100%; padding: 0 10px; border: 1px solid var(--border-strong); border-radius: 10px; background: var(--bg-card); color: var(--text-primary); }
-.secret-said { margin: 4px 0 0; font: var(--type-body-sm); }
-.secret-form-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
 .provider-accounts { display: flex; flex-direction: column; gap: 8px; margin: 0 0 8px; padding-left: 12px; border-left: 2px solid var(--border-strong); }
 .provider-account-row { display: flex; flex-direction: column; gap: 4px; }
 .provider-account-row .provider-head { display: flex; align-items: flex-start; gap: 12px; }

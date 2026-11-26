@@ -2792,7 +2792,7 @@ fn run(cli: Cli) -> Result<()> {
                 use fragment_proto::vault::{Place, PutSecret as PutVault, Secret};
                 let place = Place { header, format, query, basic, sign };
                 let value = if keep_value { None } else { Some(vault_value(&name)?) };
-                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents, held: None })?)?;
+                let set: Secret = c.call_as(c.put_json(&format!("/api/vault/{name}"), &PutVault { value, hosts, place, agents })?)?;
                 // what was set, never the value
                 json_exit(j, &set);
                 let kept = if keep_value { ", its value kept" } else { "" };
