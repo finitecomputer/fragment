@@ -114,20 +114,28 @@ in only what changed since ("Once you are in the real one"):
 ```sh
 W="$HOME/home-import/work/brains/<id>" H="$HOME/home-import/home/workspace/finitebrain/<id>" && \
 { fragment home extract <source> workspace/finitebrain/<id>.json --to "$HOME/home-import/home" --layout <L> || true; } && \
-python3 -I "<profiles>/finite-computer.brains.py" start <id> "$H.json" "$W" "$H"
+python3 -I "<profiles>/finite-computer.brains.py" start <id> "$H.json" "$W" "$H" <each folder left out, quoted>
 ```
 
-It shares only the folders the brain holds now: a folder made later in
-the old brain, or one left out, never comes in by a catch-up. It takes
-out of the push what would show a folder it doesn't share (`removed`):
-the files of one your old agent couldn't read, and the assets a
-left-out folder's notes name (they are in its parent's `raw/assets/`).
-An asset no note names stops it: ask your owner whose it is. `refused` lists pages `fragment sync`
-can't carry (a path over 300 bytes, say): they stay out, so name them in
-the report. Running it again before the push is safe. If it says `NO VERSIONS` (an export, a
-stage from before versions, or no name file), there is nothing to
-record: go on. If it says `STOP`, push nothing, and say in the report
-what it said.
+End it with each folder you leave out ("If no one brings it over"), as
+`ls` names it; for a brain you keep whole, with none. Never remove one
+yourself: it does, with or without versions. It shares only the folders
+the brain holds now: a folder made later in the old brain, or one left
+out, never comes in by a catch-up. It takes out of the push (`removed`)
+each folder left out, one your old agent couldn't read, and the assets
+their notes name (they are in the parent folder's `raw/assets/`).
+- **`ambiguous`:** assets a page you keep names too. They stay out: ask
+  your owner, before anyone is invited, whether everyone may read each.
+- **An asset no note names** stops it while a folder is out: ask your
+  owner whose it is.
+- **`refused`:** pages `fragment sync` can't carry (a path over 300
+  bytes, say). They stay out, so name them in the report.
+- **`"versions": false`** (an export, a stage from before versions, or
+  no name file): nothing is recorded, so a teammate who moves later
+  compares by hand.
+
+Running it again before the push is safe. If it says `STOP`, push
+nothing, and say in the report what it said.
 
 Then push it, only if its folder holds nothing but the brain: the old
 brain's own top level, `fragment.json` and its record. Anything else
@@ -281,11 +289,11 @@ wait for each answer:
 
 Then make it as above, from the copy: the same steps, with `H` the
 copy's folder (`$HOME/old-finite-brains/<id>`, so its name file is
-`$H.json`) and no `fragment home extract`. Before you record it, remove
-each folder you leave out from its work folder (`rm -rf -- "$W/<folder>"`):
-the record shares only the folders the brain holds, so no teammate's
-catch-up brings another in. Leave the copy as it is. Then ask your owner for their teammates'
-emails, and invite each as an editor, so their agents come in with them
+`$H.json`) and no `fragment home extract`. End "Record it"'s command
+with each folder you leave out: it takes them out of the push, with
+their assets, and the record never shares them, so no teammate's
+catch-up brings one in. Leave the copy as it is. Then ask your owner for
+their teammates' emails, and invite each as an editor, so their agents come in with them
 and bring in what changed when they move:
 
 ```sh

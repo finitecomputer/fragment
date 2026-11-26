@@ -1,8 +1,10 @@
 # A team brain from the old Finite, brought together one move at a time
 # (finite-computer.md, "Record it" and "Once you are in the real one").
 #
-#   start <old id> <name file> <brain folder> <staged folder>
-#     records, in the brain's imported-from-finite.json, which folders it
+#   start <old id> <name file> <brain folder> <staged folder> [<folder left out>...]
+#     takes out of the brain's first push each folder left out, and the
+#     assets their notes name, with versions or without; with them, it
+#     records in the brain's imported-from-finite.json which folders it
 #     shares and which version of each of their pages it holds.
 #   copied <old id> <copy's name file> <staged folder>
 #     marks in a reference copy's name file which pages were staged as
@@ -189,8 +191,13 @@ def folder_of(path, known):
     return max((f for f in known if path.startswith(f + "/")), key=len, default=None)
 
 
-usage = "usage: start|catch-up <old id> <name file> <brain folder> <folder> | copied <old id> <name file> <staged folder>"
-if len(sys.argv) < 2 or (sys.argv[1], len(sys.argv)) not in (("start", 6), ("catch-up", 6), ("copied", 5)):
+usage = (
+    "usage: start <old id> <name file> <brain folder> <staged folder> [<folder left out>...]"
+    " | copied <old id> <name file> <staged folder> | catch-up <old id> <name file> <brain folder> <copy folder>"
+)
+if len(sys.argv) < 2 or not (
+    (sys.argv[1] == "start" and len(sys.argv) >= 6) or (sys.argv[1], len(sys.argv)) in (("catch-up", 6), ("copied", 5))
+):
     sys.exit(usage)
 mode, old, name_file = sys.argv[1:4]
 named = load(name_file, "the name file")
@@ -202,8 +209,12 @@ try:
     # path -> (identity, revision, sha256)
     listed = {p["path"]: (ident([p["brain"], p["object"]]), count(p["revision"]), p["sha256"]) for p in v["pages"]}
     need(all(clean(f) for f in folders) and all(isinstance(p, str) for p in listed))
+    versions = True
 except (TypeError, KeyError, ValueError, AttributeError):
-    sys.exit("NO VERSIONS: this copy has no page versions; compare by hand")
+    if mode != "start":
+        sys.exit("NO VERSIONS: this copy has no page versions; compare by hand")
+    # `start` takes a folder left out of the push without them too.
+    versions, sequence, folders, listed = False, 0, {}, {}
 unread = sorted(f for f, (_, read) in folders.items() if not read)
 
 if mode == "copied":
@@ -231,20 +242,31 @@ if record is not MISSING:
 
 if mode == "start":
     # From a reference copy, `copied` checked its staged pages already.
-    staged, exact = other, named.get("exact")
-    here = {p: h for p in listed if (h := sha(work, p)) is not None}
+    staged, left_out = other, sys.argv[6:]
+    exact = named.get("exact") if isinstance(named, dict) else None
+    for f in left_out:
+        if not clean(f) or not os.path.isdir(at(staged, f) or ""):
+            stop(f"{f} is no folder of {staged}: name each folder left out as `ls` names it")
+
+    def out(rel):
+        # In a folder its owner left out, or that folder itself.
+        return any(rel == f or rel.startswith(f + "/") for f in left_out)
+
+    here = {p: h for p in listed if not out(p) and (h := sha(work, p)) is not None}
     # The folders it shares: each the old agent could read, with a page
-    # here (or, with no pages, a folder here). One left out stays out.
+    # here (or, with no pages, a folder here), and not left out.
     held = {folder_of(p, folders) for p in here}
     empty = set(folders) - {folder_of(p, folders) for p in listed}
     shared = {
         f: {"id": id_, "sequence": sequence}
         for f, (id_, read) in folders.items()
-        if read and (f in held or (f in empty and os.path.isdir(at(work, f) or "")))
+        if read and not out(f) and (f in held or (f in empty and os.path.isdir(at(work, f) or "")))
     }
 
     def outside(rel):
-        return folder_of(rel, folders) not in (None, *shared)
+        # In a folder it doesn't share: one left out, or one the old agent
+        # couldn't read (which only versions name).
+        return out(rel) or folder_of(rel, folders) not in (None, *shared)
 
     pages, refused = {}, []
     for path, h in sorted(here.items()):
@@ -259,31 +281,41 @@ if mode == "start":
         # to it in the old brain is for a person.
         exact_text = path in exact if isinstance(exact, list) else sha(staged, path) == old_sha
         pages[path] = {"id": id_, "revision": revision, "written": h if exact_text else None}
-    new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages}
+    new = {"from": "finite.computer", "old": old, "folders": shared, "pages": pages} if versions else MISSING
     if record is not MISSING and record != new:
         stop(f"{RECORD} is there already, and isn't this brain's start: push nothing")
-    # Out of the push goes what would show a folder it doesn't share: the
-    # files of one (left out, or one the old agent couldn't read), and the
-    # assets its notes name, here or staged, that no page it shares and
-    # sync carries names (they sit in the parent wiki's `raw/assets/`). An
-    # asset no note names at all is for a person: whose it is can't be told.
-    kept = {a for rel in files_in(work) if not outside(rel) and carried(rel) for a in assets(work, rel)}
-    theirs = {a for root in (work, staged) for rel in files_in(root) if outside(rel) for a in assets(root, rel)}
+    # Out of the push goes all a folder it doesn't share holds, with or
+    # without versions: its files, and the assets its notes name, here or
+    # in the copy (they sit in its parent wiki's `raw/assets/`). One a page
+    # it shares names too stays out for a person (`ambiguous`). While a
+    # folder is out, an asset no note names stops it: whose it is can't be
+    # told.
+    mine = list(files_in(work))
+    gone = [(work, rel) for rel in mine if outside(rel)] + [(staged, rel) for rel in files_in(staged) if outside(rel)]
+    theirs = {a for root, rel in gone for a in assets(root, rel)}
+    kept = {a for rel in mine if not outside(rel) and carried(rel) for a in assets(work, rel)}
+    held_out = {a for a in theirs if a not in listed and sha(work, a) is not None}
     stray = sorted(
-        rel for rel in files_in(work)
-        if rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2 and not outside(rel)
-        and rel not in kept | theirs and rel not in listed
+        rel for rel in mine
+        if gone and rel.split("/")[1:3] == ["raw", "assets"] and rel.count("/") > 2
+        and not outside(rel) and rel not in kept | theirs and rel not in listed
     )
     if stray:
         stop(f"no page it shares names {', '.join(stray)}: push nothing, and ask whose each is")
-    removed = sorted({rel for rel in files_in(work) if outside(rel)} | {a for a in theirs - kept if a not in listed and sha(work, a)})
-    for rel in removed:
-        try:
+    removed = sorted({rel for rel in mine if outside(rel)} | held_out)
+    # What is left of a folder (empty folders, dot folders) never syncs.
+    try:
+        for rel in removed:
             os.unlink(os.path.join(work, *rel.split("/")))  # a link itself, never what it names
-        except OSError as e:
-            stop(f"{rel} can't be taken out of the push ({e}): push nothing")
-    save(record_path, new)
-    print(json.dumps({"recorded": len(pages), "shared": sorted(shared), "not shared": sorted(set(folders) - set(shared)), "removed": removed, "refused": refused}))
+    except OSError as e:
+        stop(f"{e.filename} can't be taken out of the push ({e.strerror}): push nothing")
+    if versions:
+        save(record_path, new)
+    print(json.dumps({
+        "versions": versions, "recorded": len(pages), "shared": sorted(shared),
+        "not shared": sorted(set(folders) - set(shared) | set(left_out)),
+        "removed": removed, "ambiguous": sorted(held_out & kept), "refused": refused,
+    }))
     sys.exit(0)
 
 if record is MISSING:
