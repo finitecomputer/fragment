@@ -242,7 +242,7 @@ pub(crate) async fn signed_in(env: &Env, signed: &SignedIn) -> CellResult<String
 
 /// The secret `person` bound to their app `app` under `key`, its name in
 /// the app's code, for that app's fetch to `host`: a value toward one of
-/// its hosts, or why not (none bound: 424 `not_connected`).
+/// its hosts, or why not (none bound: `not_connected`).
 pub(crate) async fn lent(env: &Env, person: &str, app: &str, key: &str, host: &str) -> CellResult<Lent> {
     crate::routed::ask_object(env, "VAULT", person, "vault/lent", &LendAsk(app.to_string(), key.to_string(), host.to_string())).await
 }

@@ -3,8 +3,9 @@
 //! that no answer, list or log ever names; an agent, even their own, is
 //! refused every route; another person sees none of them; each refusal of
 //! a bad secret writes nothing; the limit holds; set again with no value,
-//! one keeps its value and goes where it is set to; and a restart keeps
-//! them.
+//! one keeps its value and goes where it is set to; a restart keeps them;
+//! and the CLI lends one to an app (FIN-615, PR 12; its fills are the jobs
+//! lane's, `lent`).
 use anyhow::Result;
 use fragment_nip98::Keys;
 use serde_json::{json, Value};
@@ -238,6 +239,21 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
             && ![&kept_text, &listed, &parked_list, &after].iter().any(|t| t.contains(&cli_key)),
         format!("{kept_text} / {listed} / {parked_list} / {} / {} / {after}", String::from_utf8_lossy(&new.stderr), String::from_utf8_lossy(&to_fill.stderr)),
     );
+    // an app lent one: said plainly where it is bound (SHIP IT, 2026-11-26)
+    let app_value = sentinel();
+    let lent = piped_cli(s, &api, &home, &["vault", "set", "cli-app", "--app", "dash--k3x9=API_KEY", "--to", "api.example.com"], &app_value)?;
+    let lent_text = String::from_utf8_lossy(&lent.stdout).into_owned();
+    let lent_list = String::from_utf8_lossy(&s.cli(&api, &home, &["vault", "list"]).stdout).into_owned();
+    s.ok(
+        "the CLI lends a secret to an app as the name its code fills, says anyone who can edit that app can make it use the key, and lists it so",
+        lent.status.success()
+            && lent_text.contains("secret cli-app set for dash--k3x9 as API_KEY, toward api.example.com")
+            && lent_text.contains("Anyone who can edit dash--k3x9 can make it use this key.")
+            && lent_list.contains("cli-app  api.example.com  for dash--k3x9=API_KEY")
+            && !lent_text.contains(&app_value)
+            && !lent_list.contains(&app_value),
+        format!("{lent_text} / {lent_list} / {}", String::from_utf8_lossy(&lent.stderr)),
+    );
     let empty = piped_cli(s, &api, &home, &["vault", "set", "cli-empty", "--agent", "ada--k3x9"], "")?;
     let argv = s.cli(&api, &home, &["vault", "set", "cli-argv", &piped, "--agent", "ada--k3x9"]);
     let gone = s.cli(&api, &home, &["vault", "rm", "cli-key"]);
@@ -251,7 +267,7 @@ pub fn vault(s: &mut Suite, api: &Api) -> Result<()> {
     let text = logs(s);
     s.ok(
         "no value put (a token, its rotation, a Nostr key) is in any node log",
-        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&kept_key) && !text.contains(&cli_key) && !text.contains(&piped),
+        !text.is_empty() && !text.contains(&value) && !text.contains(&rotated) && !text.contains(&nsec) && !text.contains(&kept_key) && !text.contains(&cli_key) && !text.contains(&piped) && !text.contains(&app_value),
         format!("{} bytes of logs", text.len()),
     );
     Ok(())
