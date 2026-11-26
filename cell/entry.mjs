@@ -62,20 +62,47 @@ export class DirectoryBackupGateway extends SandboxGateway {
   }
 
   // What R2 holds at the control props' key (`ContainerHost`'s `#stored`):
-  // its size and the SHA-256 of its bytes as they stream, or null when it
-  // is gone; its read cut off past `ms`. A call of its own, as the SDK's
-  // other control calls are, so its hashing is not the computer's alarm's.
+  // the size and SHA-256 of the bytes it read, or null when it is gone; cut
+  // off past `ms`. A call of its own, as the SDK's other control calls are,
+  // so its CPU is not the computer's alarm's. Read `STORED_READ_BYTES` at a
+  // time, each into a buffer of its own (never one written over while the
+  // digest may hold it).
   async stored(ms) {
     const { protocolVersion, mode, binding, key } = this.ctx.props ?? {};
     if (protocolVersion !== 1 || mode !== "control") throw new Error("a stored copy is read with control props alone");
     const object = await this.env[binding].get(key);
     if (object === null) return null;
+    const signal = AbortSignal.timeout(ms);
     const digest = new crypto.DigestStream("SHA-256");
-    await object.body.pipeTo(digest, { signal: AbortSignal.timeout(ms) });
+    const hashing = digest.getWriter();
+    const reader = object.body.getReader({ mode: "byob" });
+    let size = 0;
+    try {
+      // bounded: each read takes `STORED_READ_BYTES` until the last, short one
+      for (;;) {
+        signal.throwIfAborted();
+        const { value, done } = await reader.readAtLeast(STORED_READ_BYTES, new Uint8Array(STORED_READ_BYTES));
+        if (value?.byteLength) {
+          size += value.byteLength;
+          await hashing.write(value);
+        }
+        if (done || !value || value.byteLength < STORED_READ_BYTES) break;
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    await hashing.close();
     const sha256 = [...new Uint8Array(await digest.digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
-    return { size: object.size, sha256 };
+    return { size, sha256 };
   }
 }
+
+// A read of R2's copy of a backup (`DirectoryBackupGateway.stored`) takes
+// this much at a time. On preview (2026-11-26) a 512 MiB copy read in 8 MiB
+// reads took 5.0 s and 0.97 s of CPU; piped whole into the digest in the
+// body's own small chunks, 8.1 s and 5.1 s, which put a copy over about
+// 3 GB past a Worker call's 30 s of CPU. The hash alone took 0.31 s.
+const STORED_READ_BYTES = 8 << 20;
 
 // `body` with one byte of its first chunk flipped, its length kept: the
 // levers' damage (`damage-saves`, `damage-restores`), as FIN-775's
