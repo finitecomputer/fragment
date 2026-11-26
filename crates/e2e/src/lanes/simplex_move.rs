@@ -10,7 +10,10 @@
 //!   computer's SimpleX chat;
 //! - its save damaged on its way out of its computer each time its move
 //!   asks for it (FIN-775): never imported, and the move goes back at once,
-//!   its computer running its link again; and its handover failing once its
+//!   its computer running its link again; its making stopped before its
+//!   record says made, and asked again with its secret's write failing:
+//!   made by the name its record holds, one connector, deleted by `--back`,
+//!   a fresh move making exactly one; and its handover failing once its
 //!   core may have stopped: the same way back; and moved, its computer
 //!   then not always on: the way back refuses, its door keeping the link,
 //!   until always on again (no model call before them);
@@ -121,6 +124,45 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     s.ok("its computer's SimpleX linked to the phone, by its owner's ticket", linking.status == 200 && linked && contact > 0, json!({ "link": linking.status, "invite": invite["phase"] }));
     let old = s.eventually(SLOW, || simplex_chat(api, &owner, &agent).is_some()).then(|| simplex_chat(api, &owner, &agent)).flatten().unwrap_or_default();
     let mv = |act: &str| api.signed(&operator, "POST", &format!("/api/admin/people/{owner_id}/simplex-move"), Some(&json!({ "agent": agent, "act": act })));
+
+    // its making stopped before its record says made (as its Worker
+    // stopping there would), then asked again with its connector's secret
+    // failing to write: each `go` makes its connector by the name its
+    // record holds, so its person holds that one alone; `--back` deletes
+    // it, never bound, and a fresh move makes exactly one (the review of
+    // #1541's `make`)
+    let label = agent.rsplit_once("--").map_or(agent.as_str(), |(l, _)| l).to_string();
+    let connectors = || -> Vec<String> { listed(api, &owner).into_iter().filter_map(|f| f["name"].as_str().map(str::to_string)).filter(|n| *n != old && n.rsplit_once("--").is_some_and(|(l, _)| l == format!("{label}-simplex"))).collect() };
+    let stop_made = || lever_with(api, &id, json!({ "op": "fail-set", "path": "made", "times": 1 }));
+    anyhow::ensure!(stop_made()?.status == 200, "the fail-set lever");
+    let stopped = mv("go")?;
+    let named = mv("plan")?.body["record"].clone();
+    let first_name = named["connector"].as_str().unwrap_or("").to_string();
+    let first = connectors();
+    s.ok(
+        "its making stopped before its record says made: its record names its connector, made as its person's, the one connector they hold",
+        stopped.status != 200 && named["step"] == "making" && !first_name.is_empty() && first == vec![first_name.clone()],
+        json!({ "go": stopped.body, "record": named, "connectors": first }),
+    );
+    if first_name.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(super::ledger::lever(api, &first_name, "fail-secrets", json!({ "times": 1 }))?.status == 200, "the fail-secrets lever");
+    let again = mv("go")?;
+    let still = connectors();
+    let back = mv("back")?;
+    let gone = connectors();
+    anyhow::ensure!(stop_made()?.status == 200, "the fail-set lever");
+    let fresh = mv("go")?;
+    let fresh_name = mv("plan")?.body["record"]["connector"].as_str().unwrap_or("").to_string();
+    let one = connectors();
+    let cleared = mv("back")?;
+    let none = connectors();
+    s.ok(
+        "asked again, its secret's write failing: made by that name, still one connector; `--back` deletes it (never bound); a fresh move makes exactly one, and its `--back` deletes that",
+        again.status != 200 && still == vec![first_name.clone()] && back.status == 200 && gone.is_empty() && fresh.status != 200 && !fresh_name.is_empty() && fresh_name != first_name && one == vec![fresh_name.clone()] && cleared.status == 200 && none.is_empty(),
+        json!({ "again": again.body, "still": still, "back": back.body, "gone": gone, "fresh": fresh.body, "one": one, "cleared": cleared.body, "none": none }),
+    );
 
     // its link's save damaged on its way out of its computer each of the
     // times its move asks for it (FIN-775): never imported, and the move

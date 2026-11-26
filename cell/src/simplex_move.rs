@@ -11,7 +11,8 @@
 //!   (`computer/simplex-moves`) before the next, so a `go` again goes on
 //!   from where the last one stopped; each record names the step it moves
 //!   on from, so two `go`s at once never both act on one (the first claims
-//!   it, **making**, before any connector is made):
+//!   it, **making**, naming its connector before any connector is made, so
+//!   a `go` or `back` after one that stopped finds it by that name):
 //!   1. **made**: the connector, the person's own (made as Settings' Set
 //!      up makes one, as the person: the platform makes a fragment for its
 //!      person, a first, each logged as `simplex-move`), its door fenced
@@ -175,16 +176,17 @@ impl Move<'_> {
             if let Some(why) = self.blocked(&read) {
                 return Err(CellError::new(ErrorCode::Conflict, why));
             }
-            // claimed first, by a claim of its own: a `go` beside this one
-            // finds it claimed, and one after a `back` let this claim go
-            // never has its record finished by this one
+            // claimed first, by a claim of its own (a `go` beside it finds it
+            // claimed), its connector named in the same write before anything
+            // makes it: whatever stops it, `make` and `back` find it by that name
+            let label = fragment_core::door::connector_label(label_of(&self.agent), TEMPLATE, fragment_proto::label_room(self.cfg.host_label_suffix()));
+            let name = fragment_proto::fragment_name(&label, crate::js::random_bytes::<3>());
             let claim = hex::encode(crate::js::random_bytes::<8>());
-            self.set("", None, json!({ "step": "making", "claim": claim })).await?;
-            read["record"] = self.make(&claim).await?;
+            read["record"] = self.set("", None, json!({ "step": "making", "claim": claim, "connector": name })).await?;
         }
         let mut rec = read["record"].clone();
         if text(&rec, "step") == "making" {
-            return Err(CellError::new(ErrorCode::Conflict, "a `go` is making its connector: ask again, or `back`"));
+            rec = self.make(&rec).await?;
         }
         // one failure handler (Rule B): from its handover until its door is
         // connected, any failure but another `go`'s moving it on goes back,
@@ -243,37 +245,43 @@ impl Move<'_> {
         Ok(rec)
     }
 
-    /// Its connector: made as the person's own from the SimpleX template,
-    /// on a deployment whose doors run, its inbox's secret set, recorded
-    /// as it is made (the claim's `go` alone makes one). Bound only once
+    /// Its connector, by the name its record holds: made as the person's
+    /// own from the SimpleX template (made already by a `go` that stopped,
+    /// or whose answer was lost: the same one, never a second), on a
+    /// deployment whose doors run, its inbox's secret set. Bound only once
     /// its door holds the link (`bind`).
-    async fn make(&self, claim: &str) -> CellResult<Value> {
-        let label = fragment_core::door::connector_label(label_of(&self.agent), TEMPLATE, fragment_proto::label_room(self.cfg.host_label_suffix()));
-        let create = CreateFragment { name: String::new(), label: Some(label), visibility: None, template: Some(TEMPLATE.into()), title: None, agent: None };
+    async fn make(&self, rec: &Value) -> CellResult<Value> {
+        let name = text(rec, "connector");
+        let create = CreateFragment { name: name.into(), label: None, visibility: None, template: Some(TEMPLATE.into()), title: None, agent: None };
         let mut made = crate::create_fragment(self.env, self.cfg, self.url, create, self.person.clone()).await?;
-        // read by its two fields alone (a whole `Created` decoder costs the
-        // admin Worker kilobytes for nothing more)
-        let made = answer(&mut made, "its connector's making").await?;
-        let (name, npub) = (text(&made, "name").to_string(), text(&made, "npub"));
-        let door = fragment_core::door::door_id(&name, npub).ok_or_else(|| CellError::host(format!("{name} names no door")))?;
+        // made, or made already by its name (409): the same connector
+        match answer(&mut made, "its connector's making").await {
+            Err(e) if e.code != ErrorCode::AlreadyExists => return Err(e),
+            _ => {}
+        }
+        let status = self.as_person(name, Method::Get, "/api/status", None).await?;
+        let door = fragment_core::door::door_id(name, text(&status, "npub")).ok_or_else(|| CellError::host(format!("{name} names no door")))?;
         // its door fenced from now until the link is given (cell/door.mjs
         // `EXPECTING`): its setup page, opened meanwhile, starts no new
         // profile. Refused (a deployment that runs no doors), its
         // connector goes, nothing moved.
         let mut expected = crate::routed::send(self.env, "SIMPLEX_DOOR", &door, crate::routed::internal_request("door/expect", &json!({ "door": door }).to_string())?).await?;
         if let Err(e) = answer(&mut expected, "its door's fence").await {
-            self.as_person(&name, Method::Delete, "/delete", None).await?;
+            self.delete(name).await?;
             self.forget().await?;
             return Err(e);
         }
         let secret = hex::encode(crate::js::random_bytes::<32>());
-        self.as_person(&name, Method::Put, &format!("/api/secrets/{SECRET}"), Some(&json!({ "value": secret, "hosts": [DOOR_HOST] }))).await?;
-        let rec = match self.set("making", Some(claim), json!({ "connector": name, "door": door, "step": "made" })).await {
+        self.as_person(name, Method::Put, &format!("/api/secrets/{SECRET}"), Some(&json!({ "value": secret, "hosts": [DOOR_HOST] }))).await?;
+        let rec = match self.set("making", Some(text(rec, "claim")), json!({ "door": door, "step": "made" })).await {
             Ok(rec) => rec,
             // its claim let go meanwhile (a `back`): the connector it made
-            // is no one's move, so it goes, its door with it
+            // is no one's move, so it goes, its door with it; one another
+            // `go` of this claim recorded meanwhile stays
             Err(e) if e.code == ErrorCode::Conflict => {
-                self.as_person(&name, Method::Delete, "/delete", None).await?;
+                if self.read().await?["record"]["connector"] != name {
+                    self.delete(name).await?;
+                }
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -348,6 +356,14 @@ impl Move<'_> {
         Ok(r)
     }
 
+    /// Its connector `name` deleted, its door with it (gone already: done).
+    async fn delete(&self, name: &str) -> CellResult<()> {
+        match self.as_person(name, Method::Delete, "/delete", None).await {
+            Err(e) if e.code != ErrorCode::NotFound => Err(e),
+            _ => Ok(()),
+        }
+    }
+
     async fn forget(&self) -> CellResult<Value> {
         crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "forget", "agent": self.agent })).await
     }
@@ -406,9 +422,12 @@ impl Move<'_> {
         if let Some(chat) = rec["chat"].as_str() {
             self.archived(chat, false).await?;
         }
-        // its connector kept, its chat's history with it: unbound (its door
-        // ends) once it has taken what its door delivered, and archived
-        if let Some(connector) = rec["connector"].as_str() {
+        // its connector never bound (no message of its person's in it): it
+        // goes. Bound, it is kept, its chat's history with it: unbound (its
+        // door ends) once it has taken what its door delivered, and archived
+        if let Some(connector) = rec["connector"].as_str().filter(|_| matches!(text(&rec, "step"), "making" | "made" | "imported")) {
+            self.delete(connector).await?;
+        } else if let Some(connector) = rec["connector"].as_str() {
             if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
                 return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published (an intake run not done): ask again")));
             }

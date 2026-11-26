@@ -846,7 +846,7 @@ const WAKE_NAMED_MAX: usize = 20;
 fn simplex_next(step: &str) -> &'static str {
     match step {
         "" => "make its connector, hand its link over, connect its door",
-        "making" => "wait: a `go` is making its connector (one that stopped: --back)",
+        "making" => "make its connector (by the name its record holds), hand its link over, connect its door",
         "made" => "hand its link over, connect its door",
         "imported" => "bind its connector and connect its door",
         "bound" => "connect its door",

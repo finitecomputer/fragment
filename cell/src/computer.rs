@@ -620,6 +620,8 @@ pub struct ComputerCell {
     /// move records marked moved fail, as a computer gone unreachable once
     /// its core stopped would. In memory only.
     failing_reads: std::cell::Cell<u32>,
+    /// The e2e's lever `fail-set`: the step, and how many more sets to it fail.
+    failing_sets: RefCell<(String, u32)>,
 }
 
 #[cfg(not(feature = "admin"))]
@@ -654,6 +656,7 @@ impl DurableObject for ComputerCell {
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
             failing_reads: std::cell::Cell::new(0),
+            failing_sets: RefCell::default(),
         }
     }
 
@@ -3648,6 +3651,12 @@ impl ComputerCell {
                 self.call(method, &[JsValue::from_str(path), JsValue::from_f64(f64::from(times))]).await?;
                 Ok(json!({ "computer": id, "op": b.op, "path": path, "times": times }))
             }
+            "fail-set" => {
+                // the next `times` sets of its move records to step `path` fail
+                let times = b.times.unwrap_or(1);
+                self.failing_sets.replace((b.path.clone().unwrap_or_default(), times));
+                Ok(json!({ "computer": id, "op": b.op, "times": times }))
+            }
             "fail-read" => {
                 // the next `times` reads of its SimpleX move records marked
                 // moved fail, as a computer gone unavailable once its core
@@ -4881,6 +4890,14 @@ impl ComputerCell {
     /// it moves on from (`from`, "" for none: a `go` claiming it), and is
     /// refused when the record stands elsewhere: two `go`s at once never
     /// both act on one step (two connectors made, two cores of one link).
+    /// Whether the `fail-set` lever fails this set (to `step`), counted.
+    fn failing_set(&self, step: &Value) -> bool {
+        let mut f = self.failing_sets.borrow_mut();
+        let fails = f.1 > 0 && *step == f.0.as_str();
+        f.1 -= u32::from(fails);
+        fails
+    }
+
     async fn simplex_record(&self, b: &Value) -> CellResult<Value> {
         let agent = b["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name its agent"))?;
         if self.rows("SELECT 1 FROM agents WHERE fragment = ?", vec![agent.into()])?.is_empty() {
@@ -4910,6 +4927,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "record": moves.get(agent), "awake": awake, "alwaysOn": life.always_on(), "link": link }))
             }
+            "set" if self.failing_set(&b["record"]["step"]) => Err(CellError::host("the test lever's failed set")),
             "set" => {
                 let from = b["from"].as_str().ok_or_else(|| CellError::invalid("a set names the step it moves on from (from)"))?;
                 let at = moves.get(agent).map(|r| r["step"].as_str().unwrap_or("").to_string());
