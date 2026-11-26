@@ -327,6 +327,15 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
 
+#### `vault.lend`
+
+`PUT /api/vault/{secret}/apps/{app}`: Lends a secret to an app of the signer's under the name its code fills, and changes nothing else of it: its value, hosts, place, agents and other apps stay as they are.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`LendSecret`](#lendsecret)
+- Answer: [`Secret`](#secret)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
 #### `vault.list`
 
 `GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
@@ -594,6 +603,14 @@ both, closed. What an agent's owner lends it for someone else's ask in one place
 | --- | --- | --- | --- |
 | `accounts` | `boolean` | required | The owner's accounts and keys: their connections, their own keys, their Vault's secrets. |
 | `spend` | `boolean` | required | The owner's credit, for paid tools (an operator's keys). |
+
+### `LendSecret`
+
+in, closed. `PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under `key`, the name its code fills, in place of any name it had for that app; nothing else of the secret changes, so a lend never puts back what its person changed meanwhile (FIN-615, PR 12).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `key` | `string` | required | The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`). |
 
 ### `ListWatchFrame`
 

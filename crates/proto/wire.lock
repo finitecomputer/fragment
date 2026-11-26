@@ -236,6 +236,7 @@ field LeftBehind.path required string
 field LeftBehind.why required string
 field Lend.accounts required boolean
 field Lend.spend required boolean
+field LendSecret.key required string
 field ListWatchFrame.changed.type required "changed"
 field ListWatchFrame.hello.type required "hello"
 field ListWatchFrame.invited.type required "invited"
@@ -551,6 +552,8 @@ field migrations.secrets.path.old required string
 field migrations.yes.path.old required string
 field migrations.zip.path.stage required string
 field search.find.query.q required string
+field vault.lend.path.app required string
+field vault.lend.path.secret required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
 other Author other
@@ -759,6 +762,13 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
+route vault.lend PUT /api/vault/{secret}/apps/{app}
+route vault.lend accepts nip98
+route vault.lend accepts session
+route vault.lend path vault.lend.path
+route vault.lend query vault.lend.query
+route vault.lend request LendSecret
+route vault.lend response Secret
 route vault.list GET /api/vault
 route vault.list accepts nip98
 route vault.list accepts session
@@ -802,6 +812,7 @@ type Has in object
 type IdentityKind out enum
 type LeftBehind both object
 type Lend both object closed
+type LendSecret in object closed
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -981,6 +992,8 @@ type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
+type vault.lend.path in object
+type vault.lend.query in object
 type vault.list.path in object
 type vault.list.query in object
 type vault.put.path in object
