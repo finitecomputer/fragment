@@ -7,7 +7,7 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
-import { readAgain, restoreChecked } from "./backups.mjs";
+import { readAgain, restoreChecked, verdictOf } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
@@ -403,6 +403,9 @@ class ContainerHost {
   // The e2e's lever `damage-restores` (computer.rs): how many of the next
   // restores' grants the gateway damages, one each.
   #damage = 0;
+  // A start's reads of R2's copies begun with its restores
+  // (`checkAhead`): its generation, and each record's verdict by its id.
+  #ahead = { generation: 0, verdicts: new Map() };
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -623,13 +626,13 @@ class ContainerHost {
 
   // Restores `record` into its directory within `ms` (`Overdue` past it),
   // asked again while its bytes come damaged and R2's copy is not found bad
-  // (backups.mjs `restoreChecked`; `readFirst`: R2's copy read beside its
-  // first try, a start's after a failed one): null once it is in place, `{unusable}`
+  // (backups.mjs `restoreChecked`; its verdict begun ahead, `checkAhead`,
+  // when its start asked): null once it is in place, `{unusable}`
   // when the save itself will never restore (its archive gone, the SDK's
   // BACKUP_NOT_FOUND, or R2's own copy not its record), or `{noRoom}` when
   // it found no room on the disk (a restore's SandboxFileError ENOSPC),
   // which the Rust side tells from a failure that may pass (it throws).
-  async restore(generation, record, ms, readFirst = false) {
+  async restore(generation, record, ms) {
     const until = Date.now() + ms;
     const left = () => Math.max(1, until - Date.now());
     const restore = async () => {
@@ -643,9 +646,10 @@ class ContainerHost {
       }
     };
     try {
+      const ahead = this.#ahead.generation === generation ? (this.#ahead.verdicts.get(record.id) ?? null) : null;
       return await restoreChecked({
         record,
-        readFirst,
+        ahead,
         restore,
         stored: () => this.#stored(record, left()),
         again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),
@@ -659,6 +663,16 @@ class ContainerHost {
       }
       throw e;
     }
+  }
+
+  // Start `generation`'s reads of R2's copy of each of `records`, begun
+  // with its first restore, each within `ms` (a start's after a failed
+  // one, computer.rs `try_start`): a record's restore uses its verdict, so
+  // a copy damaged in R2 is found even when the restores before it leave
+  // no time to read it after. Answers at once.
+  checkAhead(generation, records, ms) {
+    const verdicts = new Map(records.map((record) => [record.id, verdictOf(record, () => this.#stored(record, ms))]));
+    this.#ahead = { generation, verdicts };
   }
 
   // Deletes `record`'s archive within `ms` (`Overdue` past it).

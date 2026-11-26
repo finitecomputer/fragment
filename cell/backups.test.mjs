@@ -15,7 +15,7 @@
 // computer::checks, and the e2e's computer-damage.)
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, readAgain, restoreChecked } from "./backups.mjs";
+import { READ_PAUSE_MS, READ_TRIES, RESTORE_TRIES, readAgain, restoreChecked, verdictOf } from "./backups.mjs";
 
 const SHA = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -29,26 +29,28 @@ const DAMAGED = "BACKUP_INTEGRITY: the backup is corrupt: Data corruption detect
 // Error: thrown), and `copies` each read of R2's copy at once (an Error:
 // thrown; "never": a read that never answers; `{late: copy}`: that copy,
 // 40 ms after it is asked).
-function restores(tries, copies, readFirst = false) {
+function restores(tries, copies, ahead = false) {
   const seen = { restores: 0, reads: 0, again: [] };
   const later = (ms) => new Promise((r) => setTimeout(r, ms));
+  const stored = async () => {
+    const copy = copies[Math.min(seen.reads++, copies.length - 1)];
+    if (copy === "never") return new Promise(() => {});
+    if (copy?.late !== undefined) return later(40).then(() => copy.late);
+    if (copy instanceof Error) throw copy;
+    return copy;
+  };
+  // a start after a failed one: its verdict begun before any restore of it
   const run = () =>
     restoreChecked({
       record: r,
-      readFirst,
+      ahead: ahead ? verdictOf(r, stored) : null,
       restore: async () => {
         const t = tries[Math.min(seen.restores++, tries.length - 1)];
         await later(5);
         if (t instanceof Error) throw t;
         return t;
       },
-      stored: async () => {
-        const copy = copies[Math.min(seen.reads++, copies.length - 1)];
-        if (copy === "never") return new Promise(() => {});
-        if (copy?.late !== undefined) return later(40).then(() => copy.late);
-        if (copy instanceof Error) throw copy;
-        return copy;
-      },
+      stored,
       again: (tried, why) => seen.again.push([tried, why]),
     });
   return { seen, run };
@@ -116,7 +118,7 @@ test("a check of R2's copy that fails condemns nothing, and is made again beside
   assert.equal(later.seen.restores, 3);
 });
 
-test("a start after a failed one reads R2's copy beside its first try: a copy bad is found though no try is left to read it after", async () => {
+test("a start after a failed one reads R2's copy from its restores' start: a copy bad is found though no try is left to read it after", async () => {
   // its first try came damaged late in a long restore, and the next ran out of time
   const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
   const late = restores([DAMAGED, overdue], [bad], true);
@@ -130,6 +132,9 @@ test("a start after a failed one reads R2's copy beside its first try: a copy ba
   const first = restores([null], [whole]);
   assert.equal(await first.run(), null);
   assert.equal(first.seen.reads, 0);
+  // its reads slower than every try (restores before it took the time): the verdict is awaited at the end
+  const slow = restores([DAMAGED, overdue], [{ late: bad }], true);
+  assert.match((await slow.run()).unusable, /^the restore of \/data: no answer within 1 ms; R2's copy holds 100 bytes/);
 });
 
 test("a restore that keeps coming in damaged is asked a bounded number of times and fails, its save kept", async () => {

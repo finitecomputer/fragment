@@ -31,32 +31,40 @@ function against(held, record) {
   return `R2's copy ${found}, not its record's ${record.size} bytes of SHA-256 ${record.sha256}`;
 }
 
+// R2's copy of `record` read (`stored()`, twice when the first is not it),
+// as a verdict that never rejects: `{bad}` (two reads agree it is not its
+// record), `{unread}` (a read failed), or `{}` (not found bad).
+export function verdictOf(record, stored) {
+  return badCopy(record, stored).then(
+    (bad) => (bad === null ? {} : { bad }),
+    (e) => ({ unread: String(e?.message ?? e) }),
+  );
+}
+
 // One record's restore. `restore()` answers null once it is in place, or
 // why its bytes came damaged; `stored()` reads what R2 holds of `record`;
 // `again(tried, why)` is told of each asked again. R2's copy is read beside
-// the tries after one that came damaged (`readFirst`: beside the first
-// too, a start's after a failed one, so a copy damaged in R2 is found even
-// when a long restore comes damaged with no time left to read it after),
-// and no try ever waits for it: its
+// the tries after one that came damaged (`ahead`: its verdict already under
+// way, a start's after a failed one, begun with its first record's restore
+// so a copy damaged in R2 is found even when restores before it leave no
+// time to read it after: `ContainerHost.checkAhead`), and no try ever
+// waits for it: its
 // verdict is used once it is in, and awaited only once no try is left (the
 // last came damaged, or one failed otherwise). Answers null once restored, or
 // `{unusable}` when R2's own copy is not its record: the save never will
 // restore. Throws once `RESTORE_TRIES` came in damaged while R2's copy was
 // not found bad (a failed start, which may pass: the save is kept), and
 // whatever `restore` throws.
-export async function restoreChecked({ record, restore, stored, again = () => {}, readFirst = false }) {
+export async function restoreChecked({ record, restore, stored, again = () => {}, ahead = null }) {
   // a read of R2's copy under way or done (it never rejects), and its
   // verdict once in: {bad}, {unread} or {} (not found bad)
   let checking = null;
   let verdict = null;
-  const check = () => {
+  const check = (under = verdictOf(record, stored)) => {
     verdict = null;
-    checking = badCopy(record, stored).then(
-      (bad) => (verdict = bad === null ? {} : { bad }),
-      (e) => (verdict = { unread: String(e?.message ?? e) }),
-    );
+    checking = under.then((v) => (verdict = v));
   };
-  if (readFirst) check();
+  if (ahead !== null) check(ahead);
   for (let tried = 1; ; tried++) {
     let damaged;
     try {

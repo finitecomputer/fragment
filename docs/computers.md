@@ -552,9 +552,10 @@ the DO removes them from one started from a snapshot.
   failed too; otherwise (a read that failed too) the restore is asked
   again, three tries in all, within its own bound, and a start whose tries
   all came damaged fails as one that may pass, its save kept. A start
-  after a failed one reads R2's copy beside its first try too, so a copy
-  damaged in R2 is found even when a long restore comes damaged with no
-  time left to read it after (an 8 GB save's). A first start's restore
+  after a failed one reads R2's copy of each of its records from the start
+  of its restores (`checkAhead`), so a copy damaged in R2 is found even
+  when a long restore, or the restores before it, leave no time to read it
+  after (an 8 GB save's). A first start's restore
   that works reads nothing more. A save is still checked for length alone
   as it reaches R2, so one damaged on its way out is found only by the
   restore that reads it (FIN-784's other half, a lifecycle step of its own).

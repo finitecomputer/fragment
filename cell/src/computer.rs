@@ -1996,17 +1996,20 @@ impl ComputerCell {
                 let lever = self.meta(MetaKey::FailRestore)?.is_some_and(|n| n == save.number.to_string());
                 // a directory's record before any inside it, as it was taken;
                 // together within `RESTORE_MS`, each given what is left. A
-                // start after a failed one reads R2's copy beside its first
-                // try (backups.mjs `restoreChecked`): a copy damaged in R2 is
-                // found so even when a restore comes damaged too late in its
-                // time to read it after (an 8 GB save's, say)
+                // start after a failed one reads R2's copy of each record
+                // from the start (entry.mjs `checkAhead`): a copy damaged in
+                // R2 is found so even when a restore comes damaged too late
+                // in its time, or after the restores before it, to read it
+                // after (an 8 GB save's, say)
                 let until = js::now_ms() + RESTORE_MS;
-                let read_first = JsValue::from_bool(self.lifecycle()?.failures() > 0);
+                if self.lifecycle()?.failures() > 0 {
+                    self.call("checkAhead", &[g.clone(), js::to_js(&save.records), JsValue::from_f64(RESTORE_MS as f64)]).await?;
+                }
                 for record in &save.records {
                     let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
                     let restored = match lever {
                         true => Err(CellError::host(format!("restore stopped with ~203 MB free, below the 268435456 byte floor (the test lever's fail-restore of save {})", save.number))),
-                        false => self.call("restore", &[g.clone(), js::to_js(record), left, read_first.clone()]).await,
+                        false => self.call("restore", &[g.clone(), js::to_js(record), left]).await,
                     };
                     let of = |why: &str| format!("save {}'s {}: {why}", save.number, record["dir"].as_str().unwrap_or("?"));
                     // a save that no longer fits its disk (the host's typed
