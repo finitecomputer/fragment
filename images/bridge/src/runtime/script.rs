@@ -185,15 +185,20 @@ fn data_path(root: &std::path::Path, rel: &str) -> Option<PathBuf> {
     (parts.len() <= 8 && parts.iter().all(part_ok)).then(|| root.join(rel))
 }
 
-/// `write <path> <text>`: the text in a file under the data root.
+/// `write <path> <text>`: the text in a file under the data root, synced
+/// before it says so (a write a computer's disk acknowledged: what its
+/// lane's crashes must never lose).
 async fn write_data(root: &std::path::Path, rest: &str) -> String {
+    use tokio::io::AsyncWriteExt;
     let (rel, text) = rest.split_once(' ').unwrap_or((rest, ""));
     let Some(path) = data_path(root, rel) else { return format!("write refused: {rel:?} is no path under the data") };
     let wrote = async {
         if let Some(dir) = path.parent() {
             tokio::fs::create_dir_all(dir).await?;
         }
-        tokio::fs::write(&path, text.as_bytes()).await
+        let mut f = tokio::fs::File::create(&path).await?;
+        f.write_all(text.as_bytes()).await?;
+        f.sync_all().await
     };
     match wrote.await {
         Ok(()) => format!("wrote {rel}"),
@@ -228,6 +233,36 @@ async fn fill_data(root: &std::path::Path, rest: &str) -> String {
     };
     match wrote.await {
         Ok(()) => format!("filled {rel} {}", bytes.len()),
+        Err(e) => format!("fill refused: {e}"),
+    }
+}
+
+/// `fill-files <folder> <count>`: that many small files under a folder
+/// below the data root, a thousand a folder (`<folder>/<n / 1000>/<n>`),
+/// at most `FILL_FILES_MAX`: a disk of many files, for a test that checks
+/// nothing in a sleep grows with them.
+async fn fill_files(root: &std::path::Path, rest: &str) -> String {
+    const FILL_FILES_MAX: usize = 200_000;
+    let mut words = rest.split_whitespace();
+    let (Some(rel), Some(count)) = (words.next(), words.next().and_then(|n| n.parse::<usize>().ok()).filter(|n| (1..=FILL_FILES_MAX).contains(n))) else {
+        return format!("say `fill-files <folder> <count>`, at most {FILL_FILES_MAX}");
+    };
+    let Some(dir) = data_path(root, rel) else { return format!("fill refused: {rel:?} is no path under the data") };
+    // bounded by FILL_FILES_MAX
+    let made = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        for n in 0..count {
+            let folder = dir.join((n / 1000).to_string());
+            if n % 1000 == 0 {
+                std::fs::create_dir_all(&folder)?;
+            }
+            std::fs::write(folder.join(n.to_string()), format!("{n}\n"))?;
+        }
+        Ok(())
+    })
+    .await;
+    match made {
+        Ok(Ok(())) => format!("filled {rel} {count} files"),
+        Ok(Err(e)) => format!("fill refused: {e}"),
         Err(e) => format!("fill refused: {e}"),
     }
 }
@@ -906,6 +941,9 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
     if let Some(rest) = ts.text.strip_prefix("fill-data ") {
         reply = fill_data(&cfg.data, rest.trim()).await;
     }
+    if let Some(rest) = ts.text.strip_prefix("fill-files ") {
+        reply = fill_files(&cfg.data, rest.trim()).await;
+    }
     if let Some(rest) = ts.text.strip_prefix("read ") {
         reply = read_data(&cfg.data, rest.trim()).await;
     }
@@ -1176,6 +1214,13 @@ mod tests {
         assert!(fill_data(&root, "../escape 1").await.starts_with("fill refused"));
         assert!(fill_data(&root, "big.bin 257").await.starts_with("say `fill-data"));
         assert!(fill_data(&root, "big.bin").await.starts_with("say `fill-data"));
+        // many files: a thousand a folder, never outside the data, never past its bound
+        assert_eq!(fill_files(&root, "many 1001").await, "filled many 1001 files");
+        assert_eq!(std::fs::read_to_string(root.join("many/1/1000")).ok().as_deref(), Some("1000\n"));
+        assert_eq!(std::fs::read_dir(root.join("many/0")).map(|d| d.count()).ok(), Some(1000));
+        assert!(fill_files(&root, "../escape 1").await.starts_with("fill refused"));
+        assert!(fill_files(&root, "many 0").await.starts_with("say `fill-files"));
+        assert!(fill_files(&root, "many 200001").await.starts_with("say `fill-files"));
         let _ = std::fs::remove_dir_all(&root);
     }
 }

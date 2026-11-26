@@ -94,6 +94,40 @@ pub struct World {
     pub log: Vec<String>,
     /// While down every request is 503 and every upgrade refused.
     pub down: bool,
+    /// What each agent's fragment was told of its turns (`/api/computer/turns`):
+    /// (agent, `PUT` or `DELETE`, body), in order.
+    pub turns: Vec<(String, String, Value)>,
+    /// A platform from before the turns route: it sends the call on to
+    /// its API, which has no such route (404).
+    pub no_turns: bool,
+    /// The turns each agent's fragment holds open, as told: turn → (agent,
+    /// the bridge life that told it).
+    pub turns_open: BTreeMap<String, (String, String)>,
+    /// Each agent's bridge lives heard, each with its computer's start,
+    /// the first heard first: the last heard of the latest start speaks for
+    /// its turns, and every other is retired, as is a new one of an earlier
+    /// start (cell runs_on.rs `turn_life`, `mandate::heard`).
+    pub turn_lives: HashMap<String, Vec<(String, u64)>>,
+    /// Each turn whose runtime spoke (its first draft or reply), with the
+    /// agent's other turns its fragment held open then (whose mandates its
+    /// calls would carry).
+    pub ran_beside: Vec<(String, Vec<String>)>,
+    /// The next this many turn closes (one turn, or all of an agent's) are
+    /// refused 503, as a platform that failed one.
+    pub fail_turn_closes: u32,
+    /// The next this many turn opens are taken, and their answers lost (503).
+    pub lose_turn_opens: u32,
+    /// A turn's close waits this long before the platform takes it.
+    pub turn_close_delay_ms: u64,
+    /// A turn's open waits this long before the platform takes it (as the
+    /// cell's waits on the mandate keys).
+    pub turn_open_delay_ms: u64,
+    /// Each blob read answers this late (a slow download).
+    pub blob_get_delay_ms: u64,
+    /// Pages read over the API give an agent a mandate beside each record
+    /// a person other than its owner wrote (`fm1.<principal>.<seq>`, the
+    /// fake's), as the platform gives one; live frames carry none.
+    pub mandates: bool,
     pub fail_posts: u32,
     /// A blob upload past this many bytes is refused 413, as a computer's
     /// egress that reads a body whole refuses one past 32 MiB.
@@ -211,6 +245,15 @@ impl World {
     }
 
     /// Appends a record and sends it to every socket live on its channel.
+    /// `turn` of `agent` spoke: the first time, what else was held open.
+    fn ran(&mut self, agent: &str, turn: &str) {
+        if turn.is_empty() || self.ran_beside.iter().any(|(t, _)| t == turn) {
+            return;
+        }
+        let beside: Vec<String> = self.turns_open.iter().filter(|(t, (a, _))| a == agent && t.as_str() != turn).map(|(t, _)| t.clone()).collect();
+        self.ran_beside.push((turn.to_string(), beside));
+    }
+
     pub fn append(&mut self, fragment: &str, channel: &str, principal: &str, body: Value) -> Value {
         self.append_aged(fragment, channel, principal, body, 0)
     }
@@ -582,6 +625,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 Method::POST if path.ends_with("/channels/work") => w.work_post_delay_ms,
                 Method::POST if path.ends_with("/channels/chat") => w.chat_post_delay_ms,
                 Method::GET if path.ends_with("/__people") => w.people_delay_ms,
+                Method::GET if path.contains("/blobs/") => w.blob_get_delay_ms,
                 Method::GET if path.contains("/channels/") && query(&q, "limit") == [fragment_bridge::limits::RECAP_PAGE_RECORDS.to_string()] => w.recap_page_delay_ms,
                 _ => 0,
             }
@@ -757,6 +801,61 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
         };
     }
 
+    // its agent's turns, as the agent (the platform's `computer/turns`)
+    if p.as_slice() == ["api", "computer", "turns"] && matches!(method, Method::PUT | Method::DELETE) {
+        let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let delay = {
+            let mut w = world.lock().unwrap();
+            if w.no_turns {
+                return refuse(StatusCode::NOT_FOUND, "no route /api/computer/turns");
+            }
+            if method == Method::DELETE && w.fail_turn_closes > 0 {
+                w.fail_turn_closes -= 1;
+                w.turns.push((agent, "REFUSED".into(), v));
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "a close refused, as asked");
+            }
+            match (method.clone(), v["turn"].is_string()) {
+                (Method::DELETE, true) => w.turn_close_delay_ms,
+                (Method::PUT, true) => w.turn_open_delay_ms,
+                _ => 0,
+            }
+        };
+        if delay > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+        let mut w = world.lock().unwrap();
+        // as one bridge life of its computer's start: a new one of that
+        // start or a later one takes the agent's turns (every other life's
+        // forgotten), and a retired one's word is refused, changing nothing
+        let (life, start) = (v["life"].as_str().unwrap_or("").to_string(), v["generation"].as_u64().unwrap_or(0));
+        let lives = w.turn_lives.entry(agent.clone()).or_default();
+        let newest = lives.iter().max_by_key(|(_, g)| *g).cloned();
+        if newest.as_ref().is_none_or(|(l, _)| *l != life) {
+            if lives.iter().any(|(l, _)| *l == life) || newest.is_some_and(|(_, g)| g > start) {
+                w.turns.push((agent, "RETIRED".into(), v));
+                return refuse(StatusCode::CONFLICT, "this bridge life was retired: a newer one runs this agent's turns");
+            }
+            lives.push((life.clone(), start));
+            w.turns_open.retain(|_, (a, l)| *a != agent || *l == life);
+        }
+        match (method.clone(), v["turn"].as_str()) {
+            (Method::PUT, Some(turn)) => {
+                w.turns_open.insert(turn.to_string(), (agent.clone(), life));
+                if w.lose_turn_opens > 0 {
+                    w.lose_turn_opens -= 1;
+                    w.turns.push((agent, "LOST".into(), v));
+                    return refuse(StatusCode::SERVICE_UNAVAILABLE, "an open taken, its answer lost, as asked");
+                }
+            }
+            (Method::DELETE, Some(turn)) => {
+                w.turns_open.remove(turn);
+            }
+            _ => {}
+        }
+        w.turns.push((agent, method.to_string(), v));
+        return answer(StatusCode::OK, json!({ "ok": true }));
+    }
     // a chat an agent makes for its owner, as the platform makes one: theirs,
     // the agent its maker and an editor, told so on its own `tasks`
     if p.as_slice() == ["api", "fragments"] && method == Method::POST {
@@ -878,7 +977,13 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
             let after: u64 = query(&q, "after").first().and_then(|a| a.parse().ok()).unwrap_or(0);
             let limit: usize = query(&q, "limit").first().and_then(|a| a.parse().ok()).unwrap_or(1000).min(1000);
-            let page: Vec<Value> = c.records.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > after).take(limit).cloned().collect();
+            let mut page: Vec<Value> = c.records.iter().filter(|r| r["seq"].as_u64().unwrap_or(0) > after).take(limit).cloned().collect();
+            if w.mandates {
+                let owner = w.agent_owner(&agent);
+                for r in page.iter_mut().filter(|r| r["principal"] != me.as_str() && r["principal"].as_str() != owner.as_deref() && r["author"].is_null()) {
+                    r["mandate"] = json!(format!("fm1.{}.{}", r["principal"].as_str().unwrap_or(""), r["seq"]));
+                }
+            }
             let next = page.last().and_then(|r| r["seq"].as_u64()).unwrap_or(after);
             answer(StatusCode::OK, json!({ "channel": channel, "records": page, "next": next }))
         }
@@ -928,6 +1033,9 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             if lost == Some(false) {
                 return refuse(StatusCode::SERVICE_UNAVAILABLE, "a failed post on this channel, as asked");
             }
+            if channel == "chat" {
+                w.ran(&agent, body["turn"].as_str().unwrap_or(""));
+            }
             let record = w.append(&fragment, &channel, &me, body.clone());
             let seq = record["seq"].as_u64().unwrap();
             w.fragments.get_mut(&fragment).unwrap().channels.get_mut(&channel).unwrap().ids.insert(id, (seq, body));
@@ -940,6 +1048,7 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
             let turn = v["turn"].as_str().unwrap_or("").to_string();
             let text = v["text"].as_str().map(str::to_string);
+            w.ran(&agent, &turn);
             w.drafts.push((fragment.clone(), me.clone(), turn.clone(), text.clone()));
             w.log.push(format!("draft {fragment} {turn} {}", if text.is_some() { "text" } else { "null" }));
             let at = w.now();

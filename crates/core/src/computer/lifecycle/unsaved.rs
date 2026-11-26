@@ -114,7 +114,11 @@ impl Lifecycle {
             self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
             step.actions.push(Action::Stop { generation, saved: false });
-            step.note = SaveNote::Says(format!("its restart could not save /data first ({why}), so it started again from its last save"));
+            step.note = SaveNote::Says(if self.disk {
+                format!("its restart stopped it before its disk shipped all it held ({why}): what it had not shipped is lost")
+            } else {
+                format!("its restart could not save /data first ({why}), so it started again from its last save")
+            });
             return;
         }
         if self.unsaved_since_ms.is_none() {
@@ -131,7 +135,7 @@ impl Lifecycle {
             // told that time, and it is kept
             self.save_due_ms = Some((now_ms + self.retry_pause_ms()).min(bound));
             step.actions.push(Action::Unhold { generation });
-            step.note = SaveNote::Says(format!("its sleep could not save /data ({why}): it stays awake and tries again, for up to {} minutes", rules.unsaved_max_ms / 60_000));
+            step.note = SaveNote::Says(format!("its sleep could not {} ({why}): it stays awake and tries again, for up to {} minutes", if self.disk { "ship all its disk held" } else { "save /data" }, rules.unsaved_max_ms / 60_000));
         } else {
             // the try under way at the bound, begun within the window, was
             // kept for a failed save as the others were: free to its failure
@@ -143,10 +147,11 @@ impl Lifecycle {
             self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
             step.actions.push(Action::Stop { generation, saved: false });
-            step.note = SaveNote::Says(format!(
-                "it slept unsaved: its saves failed for {} minutes ({why}), so its next wake goes back to its last save",
-                rules.unsaved_max_ms / 60_000
-            ));
+            step.note = SaveNote::Says(if self.disk {
+                format!("it slept with writes its disk could not ship in {} minutes ({why}): those are lost, the rest is on its disk", rules.unsaved_max_ms / 60_000)
+            } else {
+                format!("it slept unsaved: its saves failed for {} minutes ({why}), so its next wake goes back to its last save", rules.unsaved_max_ms / 60_000)
+            });
         }
     }
 
@@ -156,6 +161,10 @@ impl Lifecycle {
         self.saving = None;
         self.save_failed(why, now_ms);
         self.save_due_ms = Some(now_ms + self.retry_pause_ms());
+        // a disk's export's save, after the same pause
+        if self.export_due_ms.is_some() {
+            self.export_due_ms = self.save_due_ms;
+        }
         step.actions.push(Action::Unhold { generation });
     }
 

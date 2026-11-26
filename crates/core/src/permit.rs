@@ -30,11 +30,11 @@
 //!    talking to my agent and he asks it to do something with a fragment
 //!    he's shared as an editor on"). An app is never told its owner with a
 //!    role its owner does not hold. The same key reaches that much signing
-//!    as itself, so this reaches no further; and as nothing yet says who
-//!    asked the agent, whoever talks to it reaches it, as they reach its
-//!    owner's access (`TRUST_WARNING`). Once a request proves who asked
-//!    (FIN-615's mandates), an asker other than its owner reaches it only
-//!    through the place's lend.
+//!    as itself, so this reaches no further. This is for a bare `for`
+//!    alone: a request that proves who asked (a mandate) acts for that
+//!    asker, its owner or anyone else, held to their own role, and an
+//!    asker other than its owner reaches nothing of its owner's but the
+//!    place's lend (FIN-720; `mandate::Lend`).
 //! 4. **A hold** (decision 36): an agent its owner holds below them acts
 //!    with at most its hold with its owner's access, whomever it acts for,
 //!    and as itself where its person is a guest (decision 64: the whole
@@ -373,21 +373,21 @@ pub const AGENT_ROLE_MAX: Role = Role::Editor;
 // authority shares, and only where `agent_shares` lends it
 const _: () = assert!((AGENT_ROLE_MAX as u8) < (Role::Owner as u8));
 
-/// What its owner is told as they invite someone to a chat an agent of
-/// theirs is in: whoever is in a chat can talk to the agents in it (an
-/// agent hears only chats: the bridge follows chats, never an app or a
-/// doc), and an agent acts for its owner whoever asks it. Paul, 2026-10-23:
-/// "this is the design. The solution is a warning when inviting someone to
-/// your chat"; 2026-10-24: only on a chat, and short. The share sheet shows
-/// it by the invite, the CLI prints it after one, and the apps skill has an
-/// agent pass it on.
-pub const TRUST_WARNING: &str = "People in this chat can talk to your agent.";
+/// What an agent's owner is told of it in a chat with other people: the
+/// lend card's words (FIN-720), beside its two switches in the share sheet,
+/// and after the CLI's invite to a chat it is in. Whoever is in a chat can
+/// ask the agents in it (an agent hears only chats), and an agent does
+/// what they ask as them, with no more than their own role. Paul,
+/// 2026-10-24: only on a chat, and short.
+pub fn asked_here(agent: &str) -> String {
+    format!("People here can ask {agent} for things. It does them as that person, and anyone here can see what it finds.")
+}
 
-/// Whether whoever a fragment's owner lets in can talk to an agent of
-/// theirs: it is a chat, and one of the owner's agents is in it (a chat's
-/// own agent is its owner's). Where it is, inviting someone warns
-/// (`TRUST_WARNING`); an app or a doc an agent of theirs is in never does,
-/// as no agent hears it.
+/// Whether whoever a fragment's owner lets in can ask an agent of theirs:
+/// it is a chat, and one of the owner's agents is in it (a chat's own agent
+/// is its owner's). Where it is, inviting someone says so (`asked_here`);
+/// an app or a doc an agent of theirs is in never does, as no agent hears
+/// it.
 pub fn talks_to_owners_agent(kind: FragmentKind, members: &[Member]) -> bool {
     if kind != FragmentKind::Chat {
         return false;
@@ -943,10 +943,9 @@ mod tests {
             // whom else acting as itself reaches
             (
                 "Carol, in Ana's chat and not in Ben's fragment, asks Juniper to edit it",
-                // the same request as Ben's: until a mandate says who asked
-                // (PR 6), whoever talks to Juniper reaches what it does, as
-                // with all of Ana's own access today (`TRUST_WARNING`); then
-                // the place's lend asks Ana (PR 9)
+                // the same request as Ben's, unproven: a bare `for`; with
+                // Carol's mandate it acts as Carol, who holds nothing there
+                // (FIN-720), and is refused
                 bens,
                 Verdict::Allow(Editor),
                 Verdict::Allow(Editor),
@@ -1058,6 +1057,7 @@ mod tests {
             owner: owner.map(str::to_string),
             email: None,
             door: None,
+            lend: None,
         };
         let alone = vec![m("npub1paul", Owner, None), m("npub1bea", Editor, None)];
         assert!(!talks_to_owners_agent(Chat, &alone), "no agent in it: nothing to warn of");

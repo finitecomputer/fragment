@@ -101,6 +101,15 @@ A signer's search over their own list.
 
 Who is in a fragment.
 
+#### `members.lend`
+
+`PUT /api/f/{name}/members/{agent}/lend`: What of theirs an agent member's owner lends it here for someone else's ask (the share sheet's lend card); its owner's alone, in person.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`Lend`](#lend)
+- Answer: [`Lend`](#lend)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
 #### `members.list`
 
 `GET /api/f/{name}/members`: A fragment's members, the first added first.
@@ -390,12 +399,13 @@ out. One record in a channel. Records are appended by the platform (`events`, `o
 
 | field | type | | |
 | --- | --- | --- | --- |
+| `asker` | `string` or `null` | optional | Whose ask the platform wrote it for, when it wrote it for someone: a schedule's fire, its maker's (FIN-720). Absent on any other record. |
 | `at` | `integer` | required |  |
 | `author` | [`Author`](#author) or `null` | optional | Who wrote it, as the platform stamped it as it appended it. Absent on a record stored before the stamp, which reads as it did. |
 | `body` | `any` | required | The JSON text the cell stored, passed through as it is: the cell neither parses a body it just wrote nor one it reads back. |
 | `channel` | `string` | required |  |
 | `kind` | `string` | required |  |
-| `mandate` | `string` or `null` | optional | Proof that the agent reading it was asked by its owner (docs/api.md, "Who asked: mandates"): on a channel read by an agent member as itself, a record its owner wrote (or a door relayed for them) carries one, which its calls carry in place of `for`. Absent elsewhere. |
+| `mandate` | `string` or `null` | optional | Proof that its asker asked the agent reading it (docs/api.md, "Who asked: mandates"): on a channel read by an agent member as itself, a record a person wrote to it (or a door relayed for them, or a schedule fired for them) carries one, which its calls carry in place of `for`. Absent elsewhere. |
 | `principal` | `string` | required | npub, `anon:…`, or `platform` |
 | `seq` | `integer` | required |  |
 
@@ -566,6 +576,15 @@ both.
 | `bytes` | `integer` | required |  |
 | `path` | `string` | required |  |
 | `why` | `string` | required | `cache`, `runtime`, `secret`, … (the classifier's class). |
+
+### `Lend`
+
+both, closed. What an agent's owner lends it for someone else's ask in one place (the lend card, FIN-720): working there as the one who asked, with no more than their own role, is always lent; these two are the owner's to choose. A place keeps each agent member's on its row, set by the agent's owner; one never set is `Lend::DEFAULT`. `PUT /api/f/{name}/members/{agent}/lend` sets it.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `accounts` | `boolean` | required | The owner's accounts and keys: their connections, their own keys, their Vault's secrets. |
+| `spend` | `boolean` | required | The owner's credit, for paid tools (an operator's keys). |
 
 ### `ListWatchFrame`
 
@@ -766,6 +785,7 @@ out.
 | `door` | `string` or `null` | optional | On a connector bound as an agent's door, that agent's row alone: the door it is (`telegram`), while it is open (docs/api.md, "An agent's doors"). Its records relaying that agent's owner come through it, so the agent's bridge and its pages take them as its owner's words (docs/chat-records.md). Add-only: absent from an older platform. |
 | `email` | `string` or `null` | optional | A person member's email, as the share sheet shows it (decision 48): in `GET members` to the owner and their agent for them, and in no other list (add-only: absent from an older platform). |
 | `kind` | [`IdentityKind`](#identitykind) or `null` | optional | `person` or `agent`. |
+| `lend` | [`Lend`](#lend) or `null` | optional | An agent member's lend here (the lend card), to its owner alone: what of theirs it may use for someone else's ask. Add-only: absent from an older platform. |
 | `owner` | `string` or `null` | optional | An agent member's owner, who reads what it reads. |
 | `principal` | `string` | required | The member's identity (an npub). |
 | `role` | [`Role`](#role) | required |  |

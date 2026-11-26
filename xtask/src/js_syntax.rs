@@ -327,12 +327,12 @@ mod tests {
         let found = files(&devstack::repo_root()).expect("the repo's walk");
         let kind = |path: &str| found.iter().find(|(p, _)| p == path).map(|(_, k)| *k);
         assert_eq!(kind("cell/shell/shell.js"), Some(InputType::Module));
-        // the Worker's restore reads, a SimpleX door's object and its rules, and a computer's intercepts (each beside
+        // the Worker's backups' checks, a SimpleX door's object and its rules, a computer's disk route and its intercepts (each beside
         // the module it tests), the shell's tests, and the board's, brain's
         // and the SimpleX, Slack and Telegram connectors' apps' and their question's
         // and SimpleX's setup page's, and the slides' build's and presenter's (beside the
         // templates crate: a file under templates/ would ship with its template)
-        assert_eq!(tests(&found), [&["cell/backup-reads.test.mjs", "cell/door-rules.test.mjs", "cell/door.test.mjs", "cell/intercepts.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/door_question.test.mjs", "crates/templates/tests/simplex_connector.test.mjs", "crates/templates/tests/simplex_setup_page.test.mjs", "crates/templates/tests/slack_connector.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
+        assert_eq!(tests(&found), [&["cell/backups.test.mjs", "cell/door-rules.test.mjs", "cell/door.test.mjs", "cell/fpac.test.mjs", "cell/intercepts.test.mjs"], SHELL_TESTS, &["crates/templates/tests/board_app.test.mjs", "crates/templates/tests/brain_app.test.mjs", "crates/templates/tests/door_question.test.mjs", "crates/templates/tests/simplex_connector.test.mjs", "crates/templates/tests/simplex_setup_page.test.mjs", "crates/templates/tests/slack_connector.test.mjs", "crates/templates/tests/slides_build.test.mjs", "crates/templates/tests/slides_present.test.mjs", "crates/templates/tests/telegram_connect.test.mjs"]].concat());
         // sorted, each once, so two changes conflict only where they add
         // beside each other (no count to bump)
         assert!(SHELL_TESTS.windows(2).all(|w| w[0] < w[1]), "SHELL_TESTS is sorted, each once");

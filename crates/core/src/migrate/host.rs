@@ -318,4 +318,54 @@ mod tests {
         let fine: &'static [Step] = Box::leak(vec![Step { name: "baseline", sql: LEDGER.steps[0].sql }, Step { name: "caps_note", sql: "ALTER TABLE caps ADD COLUMN note TEXT;\n" }].into_boxed_slice());
         assert!(lock(&[&Class { steps: fine, ..LEDGER }]).is_ok(), "a step it takes locks");
     }
+
+    /// Goal (FIN-720): a schedule's replay is the same one asked by the
+    /// same one (`schedule::SAME_SCHEDULE`). Valid: Ben adding his again
+    /// finds his (a retry); a row from before askers is its maker's, found
+    /// by its maker's add, for whomever it asks. Invalid: Ana's identical
+    /// add, after Ben (its asker) left, finds none: hers is a schedule of
+    /// her own, which fires. Method: the steps as checked in, on the host's
+    /// SQLite, the clause as the cell runs it.
+    #[test]
+    fn a_schedules_replay_is_its_askers_own() {
+        let db = Lite::new();
+        super::super::migrate(&db, &FRAGMENT, 1).expect("the Fragment's steps apply");
+        let keep = |body: &str, by: &str, asker: &str| format!("INSERT INTO record_schedules (cron, channel, body, created_by, created_at, asker) VALUES ('0 9 * * *', 'pings', '{body}', '{by}', 1, {asker})");
+        db.exec(&keep("water", "npub1ben", "'npub1ben'")).expect("Ben's");
+        db.exec(&keep("legacy", "npub1juniper", "NULL")).expect("one from before askers, its agent's");
+        let same = |body: &str, asker: &str, by: &str| -> Option<String> {
+            let clause = crate::schedule::SAME_SCHEDULE.replacen('?', "'0 9 * * *'", 1).replacen('?', "'pings'", 1).replacen('?', &format!("'{body}'"), 1).replacen('?', &format!("'{asker}'"), 1).replacen('?', &format!("'{by}'"), 1);
+            let rows = db.rows(&format!("SELECT created_by, asker FROM record_schedules WHERE {clause} ORDER BY id LIMIT 1")).expect("the clause");
+            rows.first().map(|r| format!("{} {}", r["created_by"].as_str().unwrap_or(""), r["asker"].as_str().unwrap_or("-")))
+        };
+        assert_eq!(same("water", "npub1ben", "npub1ben"), Some("npub1ben npub1ben".into()), "Ben's retry: his");
+        assert_eq!(same("water", "npub1ana", "npub1ana"), None, "Ana's identical one is hers, not Ben's");
+        assert_eq!(same("water", "npub1ana", "npub1juniper"), None, "nor her agent's for her");
+        assert_eq!(same("legacy", "npub1ana", "npub1juniper"), Some("npub1juniper -".into()), "one from before askers: its maker's add finds it");
+        assert_eq!(same("legacy", "npub1ana", "npub1ana"), None, "and no one else's");
+        assert_eq!(same("legacy", "npub1ben", ""), None, "nor its maker's add on someone else's ask, which binds no maker");
+    }
+
+    /// Goal (FIN-720, Fragment step 15): a run's call id is its caller's,
+    /// and an agent's for someone else than its owner is theirs: Juniper's
+    /// `sync` for Ana (no asker) and for Ben are two runs; the same again
+    /// for either is refused, so a replay finds the one there, as a run
+    /// from before the step does. Method: the steps as checked in, on the
+    /// host's SQLite.
+    #[test]
+    fn a_runs_call_id_is_its_askers_own() {
+        let db = Lite::new();
+        super::super::migrate(&db, &FRAGMENT, 1).expect("the Fragment's steps apply");
+        let run = |asker: &str| format!("INSERT INTO runs (op, via, principal, role, depth, call_id, input, status, attempt, created_at, asker) VALUES ('sync', 'call', 'npub1juniper', 'editor', 0, 'sync', '{{}}', 'queued', 0, 1, {asker})");
+        assert_eq!(db.exec(&run("NULL")), Ok(()), "for its owner");
+        assert_eq!(db.exec(&run("'npub1ben'")), Ok(()), "the same id, for Ben: his own");
+        for again in ["NULL", "'npub1ben'"] {
+            assert!(db.exec(&run(again)).is_err_and(|e| e.contains("UNIQUE")), "the same call again ({again}) is the one there");
+        }
+        assert_eq!(db.count("SELECT COUNT(*) FROM runs"), 2);
+        // a replay's lookup (cell jobs.rs `start_run`) seeks by its key, never walks a caller's ids
+        let plan = db.rows("EXPLAIN QUERY PLAN SELECT id FROM runs WHERE principal = 'npub1juniper' AND call_id = 'sync' AND asker IS NULL").expect("a plan");
+        let plan = serde_json::Value::Array(plan).to_string();
+        assert!(plan.contains("USING INDEX runs_asked (principal=? AND call_id=?"), "{plan}");
+    }
 }

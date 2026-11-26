@@ -32,15 +32,20 @@ function swapped(c, egress, hosts) {
 // Registers every egress intercept of a computer's guest on container `c`,
 // all at once (one round trip, not one each): the platform's hosts, a
 // local fleet's code.storage (`codestorage`: at a loopback address the
-// container cannot reach), each of `swapHosts` (`swapped`), each
-// `ComputerEgress` with its route as `egress(route)` makes it. None
+// container cannot reach), a disk's route (`disk`: a start on one), each of
+// `swapHosts` (`swapped`), each `ComputerEgress` with its route as
+// `egress(route)` makes it (`egress("fpac", disk)` for the disk's). None
 // survives a stop: each start registers them again.
-export function intercept(c, egress, swapHosts, codestorage) {
+export function intercept(c, egress, swapHosts, codestorage, disk) {
   const each = [
-    () => c.interceptOutboundHttp("api.fragment.internal", egress("api")),
+    // a disk's too: its guest's reads name its life (`epoch`), so one in
+    // flight from a start that ended counts for none after it
+    () => c.interceptOutboundHttp("api.fragment.internal", egress("api", disk)),
     () => c.interceptOutboundHttp("model.fragment.internal", egress("model")),
   ];
   if (codestorage) each.push(() => c.interceptOutboundHttp("codestorage.fragment.internal", egress("codestorage")));
+  // a start on a disk: its daemon's route (fpac.mjs), the disk in its props
+  if (disk) each.push(() => c.interceptOutboundHttp("fpac.fragment.internal", egress("fpac", disk)));
   each.push(...swapped(c, egress, swapHosts));
   return landed(each);
 }
