@@ -8,15 +8,12 @@
 // intercept in parts R2 checks for length alone; a restore streams it back
 // in, and the shim checks its size and SHA-256 before it swaps anything in.
 // Bytes on either way can come the right length with the wrong contents
-// (FIN-775). So (FIN-784) each record a save takes is read back from R2
-// and kept once R2's copy hashes to it (computer.rs `save`,
-// fragment_core::computer::after_check), and a restore whose bytes came
-// damaged (the SDK's BACKUP_INTEGRITY, a corrupt archive to a wrong
-// SHA-256) is asked again unless R2's own copy is found not to hash to its
-// record, on two reads that agree on what it holds instead: only then is a
-// save unusable. A check that cannot be made condemns nothing. Damage
-// before the shim's hash (in the container's own reading of its files) is
-// out of reach.
+// (FIN-775). So (FIN-784) a restore whose bytes came damaged (the SDK's
+// BACKUP_INTEGRITY, a corrupt archive to a wrong SHA-256) is asked again
+// unless R2's own copy is found not to hash to its record, on two reads
+// that agree on what it holds instead: only then is a save unusable. A
+// check that cannot be made condemns nothing. A save is still checked for
+// length alone as it reaches R2 (FIN-784's other half).
 
 // Tries of one record's restore in all while its bytes come in damaged and
 // R2's copy is not found bad: each moves a whole archive again, within the
@@ -100,7 +97,7 @@ async function badCopy(record, stored) {
 // nothing again: on production one R2 "internal error, please try again
 // (10001)" failed a computer's start (2026-10-30). A read is a GET with no
 // body, so asking it again is safe; a part's upload is a body streamed
-// once, never asked again (its backup is, whole: computer.rs `save`).
+// once, never asked again (its save fails, and is tried again whole).
 
 // Tries of one read in all, and the pause before the second (doubled
 // before each after it): 1.75 s of pauses at most, well inside a restore's

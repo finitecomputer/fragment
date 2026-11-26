@@ -37,17 +37,13 @@ export class DoorEgress extends DoorCalls {
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
-// (backups.mjs); every other request is the SDK's own, once. A grant the
-// levers' damage marks (`ContainerHost`'s `#damage`) has one byte of its
-// first part, or of its first range, flipped on its way, its length kept.
+// (backups.mjs); every other request is the SDK's own, once. A read grant
+// the lever `damage-restores` marks (`ContainerHost`'s `#damage`) has one
+// byte of its first range flipped on its way, its length kept.
 export class DirectoryBackupGateway extends SandboxGateway {
   fetch(request) {
+    if (request.method !== "GET") return super.fetch(request);
     const damage = this.ctx.props?.damage === true;
-    if (request.method !== "GET") {
-      // (its Content-Length header kept: the SDK reads the part's length there)
-      const first = damage && new URL(request.url).pathname === "/parts/1" && request.body;
-      return super.fetch(first ? new Request(request, { body: flipped(request.body) }) : request);
-    }
     const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
     const read = async () => {
       const answer = await super.fetch(request);
@@ -106,8 +102,8 @@ export class DirectoryBackupGateway extends SandboxGateway {
 const STORED_READ_BYTES = 8 << 20;
 
 // `body` with one byte of its first chunk flipped, its length kept: the
-// levers' damage (`damage-saves`, `damage-restores`), as FIN-775's
-// transfers came. The chunk is copied, never written in place.
+// lever `damage-restores`, as FIN-775's transfers came. The chunk is
+// copied, never written in place.
 function flipped(body) {
   let done = false;
   const flip = new TransformStream({
@@ -404,10 +400,9 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
-  // The e2e's levers `damage-saves` and `damage-restores` (computer.rs):
-  // how many of the next backups' (`write`) and restores' (`read`) grants
-  // the gateway damages, one each.
-  #damage = { write: 0, read: 0 };
+  // The e2e's lever `damage-restores` (computer.rs): how many of the next
+  // restores' grants the gateway damages, one each.
+  #damage = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
@@ -430,11 +425,11 @@ class ContainerHost {
     return `${this.#prefix}${record.id}.tar.zst`;
   }
 
-  // `props` of a grant, marked for the gateway to damage while the levers
-  // ask for it (one grant is one backup, or one restore, tried)
+  // `props` of a grant, a restore's marked for the gateway to damage while
+  // the lever asks for it (one grant is one restore tried)
   #damaged(props) {
-    if (!(this.#damage[props.mode] > 0)) return props;
-    this.#damage[props.mode]--;
+    if (props.mode !== "read" || !(this.#damage > 0)) return props;
+    this.#damage--;
     return { ...props, damage: true };
   }
 
@@ -626,13 +621,6 @@ class ContainerHost {
     return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
   }
 
-  // What R2 holds of `record` (the gateway's `stored`), within `ms`: the
-  // size and SHA-256 of the bytes read, or null when nothing is there. The
-  // Rust side checks each record of a save so (computer.rs `save`).
-  stored(record, ms) {
-    return this.#stored(record, ms);
-  }
-
   // Restores `record` into its directory within `ms` (`Overdue` past it),
   // asked again while its bytes come damaged and R2's copy is not found bad
   // (backups.mjs `restoreChecked`; `readFirst`: R2's copy read beside its
@@ -678,12 +666,11 @@ class ContainerHost {
     await bounded(`the delete of record ${record.id}`, ms, (signal) => this.#backups.delete(record, { signal }));
   }
 
-  // The levers `damage-saves` (`write`) and `damage-restores` (`read`):
-  // the next `times` backups, or restores, each come damaged once. Answers
-  // how many the last pull left unspent.
-  damage(way, times) {
-    const unspent = this.#damage[way];
-    this.#damage[way] = times;
+  // The lever `damage-restores`: the next `times` restores each come
+  // damaged once. Answers how many the last pull left unspent.
+  damage(times) {
+    const unspent = this.#damage;
+    this.#damage = times;
     return unspent;
   }
 

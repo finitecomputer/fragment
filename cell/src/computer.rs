@@ -55,7 +55,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Checked, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -243,9 +243,6 @@ const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 const TAKE_OVER_RETRY_MS: i64 = 60_000;
 /// The lever's `fail-starts` and `fail-takeover-destroys` count at most this.
 const LEVER_FAILS_MAX: u32 = 10;
-/// A save's check of R2's copy looks this often at its lifecycle
-/// (`stored_while_asked`): whether its guest may go, or its read is given up.
-const CHECK_LOOK_MS: u64 = 1_000;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -801,7 +798,7 @@ struct RelayClosed {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`' and the damages', `on` is `always-on`'s and `hold-saves`', `ms`
+/// `times` is `fail-saves`' and `damage-restores`', `on` is `always-on`'s and `hold-saves`', `ms`
 /// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
 /// `total` and `free` are `disk`'s.
 #[derive(Deserialize)]
@@ -1384,7 +1381,7 @@ impl ComputerCell {
                 Action::Start { generation } => reported.push(self.start(generation).await),
                 Action::Sleep { generation } => reported.extend(self.hold(generation, true).await),
                 Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
-                Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq, until_ms).await),
+                Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation, after_held).await,
                 Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
@@ -2289,9 +2286,8 @@ impl ComputerCell {
     /// answered the hold), and keeps it: the newest of the saves kept, the
     /// oldest past `SAVES_KEPT` let go of (`forget`). Any record of it
     /// already taken when a later one fails is let go of too. The test
-    /// lever's failed saves (`fail-saves`) fail here first. `sleep_until`:
-    /// when the steps of a sleep it is for end (`snapshot_ms`).
-    async fn save(&self, generation: u64, held: bool, seq: u64, sleep_until: i64) -> Event {
+    /// lever's failed saves (`fail-saves`) fail here first.
+    async fn save(&self, generation: u64, held: bool, seq: u64) -> Event {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         let t0 = js::now_ms();
@@ -2370,112 +2366,12 @@ impl ComputerCell {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
                 console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"] }));
-                match self.check_kept(&save, generation, seq, until, sleep_until).await {
-                    None => Event::Saved { generation, seq },
-                    Some(why) => Event::SaveFailed { generation, seq, why },
-                }
+                Event::Saved { generation, seq }
             }
             Err(e) => {
                 console_error!("{}", json!({ "computer": id, "save": seq, "generation": generation, "unkept": e.message }));
                 Event::SaveFailed { generation, seq, why: e.message }
             }
-        }
-    }
-
-    /// Save `save`, save `seq` of start `generation` just kept as master
-    /// keeps every save, checked against R2's own copy (FIN-784) while
-    /// nobody waits on it (`stored_while_asked`), within what its backups
-    /// left (`until`) and, a sleep's, before what its snapshot is given at
-    /// most (`sleep_until`, `snapshot_ms`). A record whose copy in R2 is
-    /// not it makes the save unusable, its own copy wrong (its next start
-    /// restores the one before, as a restore that found it would), and
-    /// fails the save, which its lifecycle tries again (a sleep keeps its
-    /// container, the save tried again a minute later): answers why. A
-    /// record whose check could not be made, or was given up, is kept
-    /// unchecked, as master keeps every one.
-    async fn check_kept(&self, save: &Save, generation: u64, seq: u64, until: i64, sleep_until: i64) -> Option<String> {
-        let id = self.meta(MetaKey::Id).ok().flatten();
-        let snapshot_after = self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { .. })) && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
-        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS) } else { until };
-        for record in &save.records {
-            let dir = record["dir"].as_str().unwrap_or("?");
-            match self.stored_while_asked(record, checks_until, generation, seq).await {
-                Checked::Whole => {}
-                Checked::Unread(why) => console_log!("{}", json!({ "computer": id, "saved": save.number, "generation": generation, "backup": "unchecked", "dir": dir, "why": why })),
-                Checked::Damaged(why) => {
-                    let older = self.update_saves(|s| s.unusable(&save.id)).unwrap_or(false);
-                    console_log!("{}", json!({ "computer": id, "saved": save.number, "generation": generation, "backup": "damaged", "dir": dir, "why": why, "older": older }));
-                    return Some(format!("save {}'s {dir} came out damaged: {why}", save.number));
-                }
-            }
-        }
-        None
-    }
-
-    /// `stored`, never a wait for anyone, its lifecycle looked at every
-    /// `CHECK_LOOK_MS` as it reads: given up (`Unread`) once save `seq` of
-    /// start `generation` is no longer the one its lifecycle asks (a newer
-    /// save was asked), or someone waits on it (an owner's sleep or
-    /// restart, or a start owed after it); and its guest let go once a wake
-    /// cancelled its sleep (`HomeSaved`, as an awake save's home does),
-    /// that unhold carried through before the read is watched again.
-    async fn stored_while_asked(&self, record: &Value, until: i64, generation: u64, seq: u64) -> Checked {
-        let given_up = || match self.lifecycle() {
-            Err(e) => Some(e.message),
-            Ok(l) if l.generation() != generation || !matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq) => Some("a newer save was asked".to_string()),
-            Ok(l) if matches!(l.phase, Phase::Sleeping { owner: true, .. } | Phase::Sleeping { owes_start: true, .. }) => Some("someone waits on its sleep".to_string()),
-            Ok(_) => None,
-        };
-        let woken = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, unheld: false, .. }) if s == seq));
-        let mut read = Box::pin(self.stored(record, until));
-        // whether its unhold was asked (once, whatever it answered)
-        let mut released = false;
-        let (given_up, woken) = (&given_up, &woken);
-        // bounded: a pass ends at the read, given up, or the one unhold, and
-        // the read ends by `until`
-        loop {
-            if let Some(why) = given_up() {
-                return Checked::Unread(why);
-            }
-            if !released && woken() {
-                released = true;
-                self.home_saved(generation, seq).await;
-            }
-            let watched = async move {
-                loop {
-                    Delay::from(std::time::Duration::from_millis(CHECK_LOOK_MS)).await;
-                    if given_up().is_some() || (!released && woken()) {
-                        break;
-                    }
-                }
-            };
-            match futures_util::future::select(read, Box::pin(watched)).await {
-                futures_util::future::Either::Left((checked, _)) => return checked,
-                futures_util::future::Either::Right(((), still)) => read = still,
-            }
-        }
-    }
-
-    /// What R2 holds of `record` against it (entry.mjs `stored`, read
-    /// within what is left until `until`): a read that failed or ran out
-    /// is `Unread`.
-    async fn stored(&self, record: &Value, until: i64) -> Checked {
-        let left = until - js::now_ms();
-        if left <= 0 {
-            return Checked::Unread("the save's time for its checks ran out".into());
-        }
-        let left = JsValue::from_f64(left as f64);
-        let (Some(size), Some(sha256)) = (record["size"].as_u64(), record["sha256"].as_str()) else {
-            return Checked::Unread("the record names no size or SHA-256".into());
-        };
-        // its answer: null (nothing there), or the size and SHA-256 it read
-        match self.call("stored", &[js::to_js(record), left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
-            Ok(held) if held.is_null() => fragment_core::computer::checked(size, sha256, None),
-            Ok(held) => match (held["size"].as_u64(), held["sha256"].as_str()) {
-                (Some(n), Some(sha)) => fragment_core::computer::checked(size, sha256, Some((n, sha))),
-                _ => Checked::Unread(format!("stored answered {held}")),
-            },
-            Err(e) => Checked::Unread(e.message),
         }
     }
 
@@ -3166,9 +3062,9 @@ impl ComputerCell {
     /// `fail-restore {save}` stops the restore of each start from save
     /// `save` (its number; 0: none) for want of room, a failed start as
     /// the sandbox runtime's guard makes one on a disk too small for it;
-    /// `damage-saves {times}` and `damage-restores {times}` damage the next
-    /// backups or restores on their way, one byte each, and `damage-stored
-    /// {save}` R2's copy of save `save` (cell/backups.mjs);
+    /// `damage-restores {times}` damages the next restores on their way, one
+    /// byte each, and `damage-stored {save}` R2's copy of save `save`
+    /// (cell/backups.mjs);
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
@@ -3370,14 +3266,13 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
-            "damage-saves" | "damage-restores" => {
-                // the next `times` backups of its saves, or restores, each
-                // come with one byte flipped on its way through the gateway,
-                // its length kept, as FIN-775's transfers came (0: none);
-                // answers how many the lever's last pull left unspent
+            "damage-restores" => {
+                // the next `times` restores of its saves each come with one
+                // byte flipped on their way through the gateway, their length
+                // kept, as FIN-775's transfers came (0: none); answers how
+                // many the lever's last pull left unspent
                 let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
-                let way = if b.op == "damage-saves" { "write" } else { "read" };
-                let unspent = self.call("damage", &[JsValue::from_str(way), JsValue::from_f64(f64::from(times))]).await?.as_f64().map_or(0, |n| n as u32);
+                let unspent = self.call("damage", &[JsValue::from_f64(f64::from(times))]).await?.as_f64().map_or(0, |n| n as u32);
                 console_log!("{}", json!({ "computer": id, "lever": b.op, "times": times, "unspent": unspent }));
                 Ok(json!({ "computer": id, "unspent": unspent }))
             }
@@ -3477,7 +3372,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "owed": months }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, damage-saves, damage-restores, damage-stored, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, damage-restores, damage-stored, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
         }
     }
 
