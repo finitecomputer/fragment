@@ -62,6 +62,10 @@ class Node {
 }
 
 const walk = (n) => (n && typeof n === "object" ? [n, ...(n.children ?? []).flatMap(walk)] : []);
+// the section's line for `name` ("" for Add), or ""
+const line = (page, name) => walk(page).find((x) => x.dataset?.secretSaid === name)?.textContent ?? "";
+// what a sheet says, or ""
+const sheetSays = (sheet) => walk(sheet).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "";
 
 // `vault`: what `GET /api/vault` answers (the secret as it is now); `vaultApi`,
 // in its place, a Vault of the test's own
@@ -227,8 +231,10 @@ test("a write queued behind one that redrew the page says what went wrong in the
   walk(hostsForm).find((x) => x.tag === "input").value = Array.from({ length: 9 }, (_, i) => `h${i}.example.com`).join(", ");
   await Promise.all([walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick(), hostsForm.onsubmit({ preventDefault() {} })]);
   assert.equal(drawn.length, 1, "the toggle landed and drew the page again");
-  const newest = walk(drawn[0]).find((x) => x.dataset?.secret === "github");
-  assert.match(walk(newest).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+  const newest = walk(drawn[0]).find((x) => x.dataset?.secretSheet === "github");
+  assert.equal(newest.open, true, "the sheet its edit was made in, drawn again");
+  assert.match(sheetSays(newest), /at most 8 hosts/);
+  assert.equal(line(drawn[0], "github"), "");
 });
 
 test("a failure while the page is drawn again waits for the sheet drawn next", async () => {
@@ -254,8 +260,11 @@ test("a failure while the page is drawn again waits for the sheet drawn next", a
   const hostsForm = walk(card).find((x) => x.className.includes("secret-hosts-form"));
   walk(hostsForm).find((x) => x.tag === "input").value = Array.from({ length: 9 }, (_, i) => `h${i}.example.com`).join(", ");
   await Promise.all([walk(card).find((x) => x.dataset?.agent === "bea--k3x9").onclick(), hostsForm.onsubmit({ preventDefault() {} })]);
-  const newest = walk(drawn[0]).find((x) => x.dataset?.secret === "github");
-  assert.match(walk(newest).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+  await new Promise((r) => setTimeout(r, 0));
+  const newest = walk(drawn[0]).find((x) => x.dataset?.secretSheet === "github");
+  assert.equal(newest.open, true);
+  assert.match(sheetSays(newest), /at most 8 hosts/);
+  assert.equal(line(drawn[0], "github"), "", "said once: in the sheet");
 });
 
 test("a write refused for a secret removed elsewhere says so in the section, with no sheet to say it", async () => {
@@ -300,56 +309,72 @@ test("a refusal that comes after Settings was left says nothing, and opens nothi
   }
 });
 
-test("Add's failure as the page is drawn again is said in the Add form drawn next", async () => {
+// Add's form, with a secret typed in, that fails once `fail()` is called
+function failingAdd() {
   let fail;
   const vaultApi = async (method) => {
     if (method === "GET") return { secrets: [] };
     await new Promise((r) => (fail = r));
     throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
   };
-  const { secretsSection } = setup(null, undefined, vaultApi);
-  const first = secretsSection({ secrets: [] });
+  const ui = setup(null, undefined, vaultApi);
+  const first = ui.secretsSection({ secrets: [] });
   const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
   walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
   walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
-  const added = form.onsubmit({ preventDefault() {} });
+  return { ...ui, first, submit: () => form.onsubmit({ preventDefault() {} }), fail: async () => {
+    while (!fail) await new Promise((r) => setTimeout(r, 1));
+    fail();
+  } };
+}
+const addOf = (page) => walk(page).find((x) => x.dataset?.addSecret === "1");
+const openAdd = (page) => walk(page).find((x) => x.dataset?.action === "add-secret").onclick();
+
+test("Add's failure in its open form is said there", async () => {
+  const { first, submit, fail } = failingAdd();
+  openAdd(first);
+  const added = submit();
+  await fail();
+  await added;
+  assert.match(sheetSays(addOf(first)), /at most 8 hosts/);
+  assert.equal(line(first, ""), "");
+});
+
+test("Add's failure as the page is drawn again is said in the page drawn next", async () => {
+  const { secretsSection, first, submit, fail } = failingAdd();
+  openAdd(first);
+  const added = submit();
   // another write's redraw takes the page away before Add's answer comes
   for (const x of walk(first)) x.isConnected = false;
-  fail();
+  await fail();
   await added;
-  const next = walk(secretsSection({ secrets: [] })).find((x) => x.dataset?.addSecret === "1");
-  assert.match(walk(next).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+  const next = secretsSection({ secrets: [] });
+  assert.match(line(next, ""), /at most 8 hosts/);
 });
 
-test("Add's failure after the page was drawn again opens the Add form drawn since, saying it", async () => {
-  let fail;
-  const vaultApi = async (method) => {
-    if (method === "GET") return { secrets: [] };
-    await new Promise((r) => (fail = r));
-    throw new ApiError(400, "your vault sends secrets to at most 8 hosts, and this would make 9");
-  };
-  const { secretsSection } = setup(null, undefined, vaultApi);
-  const first = secretsSection({ secrets: [] });
-  const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
-  walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
-  walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
-  const added = form.onsubmit({ preventDefault() {} });
-  while (!fail) await new Promise((r) => setTimeout(r, 1));
-  // another write's redraw is done before Add's answer comes
+test("Add's failure after the page was drawn again is a line that stays through redraws until Add opens", async () => {
+  const { secretsSection, first, submit, fail } = failingAdd();
+  openAdd(first);
+  const added = submit();
   for (const x of walk(first)) x.isConnected = false;
   const next = secretsSection({ secrets: [] });
-  fail();
+  await fail();
   await added;
-  const dialog = walk(next).find((x) => x.dataset?.addSecret === "1");
-  const said = () => walk(dialog).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "";
-  assert.equal(dialog.open, true, "the Add form drawn since opens to say it");
-  assert.match(said(), /at most 8 hosts/);
-  dialog.close();
-  walk(next).find((x) => x.dataset?.action === "add-secret").onclick();
-  assert.equal(said(), "", "said once: closing it puts it away");
+  assert.equal(addOf(next).open, false, "nothing opens by itself");
+  assert.match(line(next, ""), /at most 8 hosts/);
+  // another redraw (an edit saved elsewhere on the page) keeps it
+  for (const x of walk(next)) x.isConnected = false;
+  const again = secretsSection({ secrets: [] });
+  assert.match(line(again, ""), /at most 8 hosts/);
+  openAdd(again);
+  assert.match(sheetSays(addOf(again)), /at most 8 hosts/, "it moves into the form as it opens");
+  assert.equal(line(again, ""), "");
+  addOf(again).close();
+  openAdd(again);
+  assert.equal(sheetSays(addOf(again)), "", "said once");
 });
 
-test("a failure that comes after Settings was left says nothing on a later visit, and a sheet's message goes when it closes", async () => {
+test("a failure that comes after Settings was left says nothing on a later visit; in its own, its sheet says it", async () => {
   let visit = 1;
   const asks = { now: () => visit, current: (v) => v === visit };
   let answer;
@@ -366,24 +391,36 @@ test("a failure that comes after Settings was left says nothing on a later visit
   const later = secretsSection({ secrets: [github()] });
   answer();
   await toggled;
-  assert.equal(walk(later).some((x) => x.className.includes("secret-said") && !x.hidden), false);
+  assert.equal(walk(later).some((x) => x.className.includes("secret-said") && !x.hidden && x.textContent), false);
   assert.equal(walk(later).some((x) => x.open), false);
 
-  // in its own visit, the sheet says it until it closes
+  // in its own visit, with the sheet open, the sheet says it
   const now = walk(later).find((x) => x.dataset?.secret === "github");
-  const toggledNow = walk(now).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
+  const sheet = walk(now).find((x) => x.dataset?.secretSheet === "github");
+  walk(now).find((x) => x.dataset?.action === "open").onclick();
   answer = null;
+  const toggledNow = walk(now).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
   while (!answer) await new Promise((r) => setTimeout(r, 1));
   answer();
   await toggledNow;
-  const sheet = walk(now).find((x) => x.dataset?.secretSheet === "github");
-  const said = () => walk(sheet).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "";
-  assert.match(said(), /could not be reached/);
+  assert.match(sheetSays(sheet), /could not be reached/);
+  assert.equal(line(later, "github"), "");
+
+  // the sheet closed before the answer came: the section says it, and it is
+  // the sheet's again when it opens
+  answer = null;
+  const toggledShut = walk(now).find((x) => x.dataset?.agent === "bea--k3x9").onclick();
   sheet.close();
-  assert.equal(said(), "");
+  while (!answer) await new Promise((r) => setTimeout(r, 1));
+  answer();
+  await toggledShut;
+  assert.match(line(later, "github"), /could not be reached/);
+  walk(now).find((x) => x.dataset?.action === "open").onclick();
+  assert.match(sheetSays(sheet), /could not be reached/);
+  assert.equal(line(later, "github"), "");
 });
 
-test("a secret's refusal and Add's failure in one redraw open one sheet, and Add's waits in its form", async () => {
+test("a secret's refusal and Add's failure in one redraw open one sheet, and Add's is a line", async () => {
   let held = github();
   let gone;
   const away = new Promise((r) => (gone = r));
@@ -408,7 +445,7 @@ test("a secret's refusal and Add's failure in one redraw open one sheet, and Add
     await new Promise((r) => setTimeout(r, 0));
   });
   first = secretsSection({ secrets: [github()] });
-  const form = walk(walk(first).find((x) => x.dataset?.addSecret === "1")).find((x) => x.tag === "form");
+  const form = walk(addOf(first)).find((x) => x.tag === "form");
   walk(form).find((x) => x.dataset?.field === "name").value = "stripe";
   walk(form).find((x) => x.dataset?.field === "value").value = "sk_test_123";
   const card = walk(first).find((x) => x.dataset?.secret === "github");
@@ -417,10 +454,10 @@ test("a secret's refusal and Add's failure in one redraw open one sheet, and Add
   await toggled;
   const page = drawn[0];
   const sheet = walk(page).find((x) => x.dataset?.secretSheet === "github");
-  const dialog = walk(page).find((x) => x.dataset?.addSecret === "1");
   assert.equal(sheet.open, true, "the refused secret's sheet opens");
-  assert.equal(dialog.open, false, "Add's form waits beneath no other sheet");
-  assert.match(walk(dialog).find((x) => x.className.includes("secret-said") && !x.hidden)?.textContent ?? "", /at most 8 hosts/);
+  assert.match(sheetSays(sheet), /changed since you read it/);
+  assert.equal(addOf(page).open, false);
+  assert.match(line(page, ""), /at most 8 hosts/);
 });
 
 test("two edits at once go one after the other, each onto what the last left", async () => {
