@@ -146,6 +146,12 @@ struct Kept {
     /// is adopted as it is restored, once.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     adopt: Option<run::Adoption>,
+    /// The messages its computer's chat holds past the cursor it handed
+    /// over (`run::Saved::ahead`), each by its item and its sender's id:
+    /// never delivered here, as a message reaches a chat once, by its own
+    /// id, however far back that cursor stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ahead: Vec<(i64, String)>,
 }
 
 /// A reply's file the core is uploading: its copy's folder (under
@@ -1195,6 +1201,8 @@ impl Runner {
         for item in items {
             let theirs = item.received && Some(item.contact) == contact && item.id > delivered;
             // a message has its sender's id; one without is no message to carry
+            // nor one its computer's chat holds already (`ahead`)
+            let theirs = theirs && !item.shared.as_ref().is_some_and(|id| self.kept.ahead.iter().any(|(_, a)| a == id));
             if let (true, Content::Message { kind, text }, Some(id)) = (theirs, &item.content, &item.shared) {
                 self.page.push_back(Inbound { id: id.clone(), kind: kind.clone(), text: text.clone(), at: item.at.clone(), item: item.id, file: item.file.clone() });
             }
@@ -1778,6 +1786,23 @@ mod tests {
         assert!(line.contains("before=41"), "{line}");
         r.frame(&refused(c, "chatItemNotFound").replace("errorAgent", "errorStore").replace("agentError", "storeError"));
         assert_eq!((r.anchor, r.seek, r.held.len(), r.poked), (None, None, 0, true), "begins again");
+    }
+
+    /// Goal: a message its computer's chat holds already is never delivered
+    /// again here, though the cursor it handed over stands before it (a post
+    /// refused there, later ones posted: Codex's rounds on #1541). Invalid:
+    /// 42 posted there, `ahead`. Valid: 41, never posted there, and 43.
+    #[tokio::test]
+    async fn what_its_computers_chat_holds_is_never_delivered_again() {
+        let (mut r, mut writes) = scripted("ahead", true);
+        r.kept.link.delivered = 40;
+        r.kept.ahead = vec![(42, "s42".into())];
+        r.deliver(Instant::now());
+        let (c, _) = asked_of(&mut writes).pop().unwrap();
+        r.frame(&page_of(c, &[41, 42, 43]));
+        assert_eq!(r.page.iter().map(|i| i.item).collect::<Vec<_>>(), vec![41, 43]);
+        let kept: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+        assert_eq!(kept.ahead, r.kept.ahead, "kept in its saves");
     }
 
     /// Goal: a planned stop saves only once the core's process has ended

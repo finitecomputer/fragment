@@ -123,6 +123,10 @@ const TITLE_EVERY_MS: u64 = 10_000;
 const POSTS_MAX: usize = 64;
 /// Files a link waits to receive at once, at most.
 const FILES_MAX: usize = 32;
+/// Messages its chat holds past what was delivered (`Saved::ahead`) kept
+/// by their own ids, at most: past it a handover waits for its computer's
+/// restart, whose catch-up moves what was delivered on.
+const AHEAD_MAX: usize = 512;
 /// A file not received this long after its message is given up on: the
 /// message is posted with a note that it did not arrive. The core retries
 /// a server it cannot reach for good, and says nothing (a computer on
@@ -921,6 +925,14 @@ pub struct Saved {
     /// stay with that door): sent once its core is next up, then let go.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carried: Vec<String>,
+    /// The messages its chat holds past what was delivered, each by its
+    /// item and its sender's id: a post refused holds what was delivered
+    /// before it (`gap`) while later ones post, and a start reads back past
+    /// those. A handover hands them to its door, which never delivers one
+    /// of them again: a message reaches a chat once, by its own id, however
+    /// far back its cursor stands (Codex's rounds on #1541).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ahead: Vec<(i64, String)>,
 }
 
 /// A link handed over to its door; or its staged identity, never kept here
@@ -1232,6 +1244,8 @@ struct Slot {
     /// their file, queued, or being posted. What was delivered never moves
     /// past the oldest of them.
     outstanding: std::collections::BTreeSet<i64>,
+    /// Their senders' ids, by item, while outstanding.
+    posting: BTreeMap<i64, String>,
     /// The newest message acknowledged as posted.
     acked: i64,
     /// Its link's door key (`door.key`): what it relays is signed by it.
@@ -1305,7 +1319,7 @@ impl Slot {
             self.broken.clone().or_else(|| self.note.clone())
         };
         let staged = self.staged.is_some() && self.saved.link.phase == Phase::Off && self.saved.moved.is_none();
-        View { agent: self.agent.fragment.clone(), phase, staged, link, short, name, hidden, always_on, running: self.core.is_some() && self.up && !self.saved.link.scan.running, why }
+        View { agent: self.agent.fragment.clone(), phase, staged, link, short, name, hidden, always_on, running: self.core.is_some() && self.up, why }
     }
 }
 
@@ -1528,14 +1542,8 @@ impl Manager {
                     Some("files are on their way")
                 } else if !s.outstanding.is_empty() || !s.pending.is_empty() {
                     Some("messages are on their way")
-                } else if !staged && (!s.up || s.saved.link.scan.running || s.gap) {
-                    // settled first: its core up this life, its start's
-                    // catch-up done, and no message of this life unposted
-                    // (`gap`). Till then what was delivered can stand before
-                    // messages its chat holds, which a door would post again
-                    // into a chat of its own (Codex's fix-checks of
-                    // c55a7ae64, f3e6a1a8d and e97e5e480)
-                    Some("its SimpleX is starting or catching up, or holds a message it couldn't post (its computer's restart carries it)")
+                } else if s.saved.ahead.len() >= AHEAD_MAX {
+                    Some("more of its messages are posted past its cursor than it keeps by their ids (its computer's restart moves it on)")
                 } else {
                     None
                 };
@@ -1560,7 +1568,7 @@ impl Manager {
         let adopt = s.saved.moved.as_ref().and_then(|m| m.staged.clone());
         let (dir, contact, state) = match (&adopt, &s.saved.link.phase) {
             (Some(a), _) => (s.dir.join(stage::STAGED_DIR), a.owner, serde_json::json!({ "link": Link::default(), "adopt": a })),
-            (None, Phase::Linked { contact, .. }) => (s.dir.clone(), *contact, serde_json::json!({ "link": s.saved.link })),
+            (None, Phase::Linked { contact, .. }) => (s.dir.clone(), *contact, serde_json::json!({ "link": s.saved.link, "ahead": s.saved.ahead })),
             // a mark a release before this one left with nothing to pack:
             // its way back unmarks it
             // the platform's mark kept (`moved`), so its way back reaches here
@@ -1654,6 +1662,7 @@ impl Manager {
                 link.forced = true;
             }
             s.saved.link = link;
+            s.saved.ahead.clear();
             s.saved.moved = None;
             // what its door took and had not sent goes on from here, in
             // order, once its core is up (`up`); placed again (a way back
@@ -1978,7 +1987,7 @@ impl Manager {
                 continue;
             }
             let dir = self.cfg.dir.join(&a.fragment);
-            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] });
+            let saved = load(&dir, a).unwrap_or_else(|| Saved { identity: a.identity.clone(), generation: 0, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] });
             let door = Key::load(&dir);
             let staged = stage::ready(&dir);
             let resume = stage::pending(&dir);
@@ -2017,6 +2026,7 @@ impl Manager {
                 poster: None,
                 gap: false,
                 outstanding: Default::default(),
+                posting: Default::default(),
                 acked: 0,
                 door,
                 session: None,
@@ -2765,8 +2775,18 @@ impl Manager {
     fn delivered(&mut self, f: &str, item: i64, ok: bool) {
         let Some(s) = self.slots.get_mut(f) else { return };
         s.outstanding.remove(&item);
+        let id = s.posting.remove(&item);
         if !ok {
             s.gap = true;
+        }
+        // posted: kept by its own id while what was delivered stands before it
+        if let (true, Some(id)) = (ok, id) {
+            if item > s.saved.link.delivered && s.saved.ahead.len() < AHEAD_MAX && !s.saved.ahead.iter().any(|(_, a)| *a == id) {
+                s.saved.ahead.push((item, id));
+                if let Err(e) = store(&s.dir, &s.saved) {
+                    crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+                }
+            }
         }
         if s.gap || item <= 0 {
             return;
@@ -2774,6 +2794,17 @@ impl Manager {
         s.acked = s.acked.max(item);
         let upto = s.outstanding.first().map_or(s.acked, |oldest| s.acked.min(oldest - 1));
         self.apply(f, Input::Delivered(upto));
+        // what was delivered passed them: a start reads back no further
+        if let Some(s) = self.slots.get_mut(f) {
+            let before = s.saved.ahead.len();
+            let delivered = s.saved.link.delivered;
+            s.saved.ahead.retain(|(i, _)| *i > delivered);
+            if s.saved.ahead.len() != before {
+                if let Err(e) = store(&s.dir, &s.saved) {
+                    crate::ev!("simplex.store_failed", { "agent": f, "error": e.to_string() });
+                }
+            }
+        }
     }
 
     /// A message forwarded that will not be posted this life (dropped past
@@ -2781,6 +2812,7 @@ impl Manager {
     fn dropped(&mut self, f: &str, item: i64) {
         if let Some(s) = self.slots.get_mut(f) {
             s.outstanding.remove(&item);
+            s.posting.remove(&item);
             s.gap = true;
         }
     }
@@ -2913,6 +2945,10 @@ impl Manager {
         if s.up && s.core.is_some() {
             actions.extend(s.saved.link.react(&s.working));
         }
+        // a link let go holds no messages ahead of its cursor
+        if s.saved.link.phase == Phase::Off {
+            s.saved.ahead.clear();
+        }
         // a link let go sends nothing more: its uploads' copies go with it
         if s.saved.link.phase == Phase::Off && !s.saved.sending.is_empty() {
             for sending in std::mem::take(&mut s.saved.sending).into_values() {
@@ -2984,6 +3020,7 @@ impl Manager {
                 crate::ev!("simplex.forward", { "agent": f, "kind": i.kind, "bytes": i.text.len(), "file": i.file.is_some() });
                 if i.item > 0 {
                     s.outstanding.insert(i.item);
+                    s.posting.insert(i.item, i.id.clone());
                 }
                 self.forward(f, i);
             }
@@ -4222,7 +4259,7 @@ mod tests {
     /// says nothing (an old one) forces nothing.
     #[test]
     fn a_rollback_is_this_starts_and_once() {
-        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
+        let saved = |generation| Saved { identity: "npub1juniper".into(), generation, link: Link::default(), used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] };
         assert!(rolled_back(&computer(true, 5, Some((5, true))), &saved(4)));
         assert!(!rolled_back(&computer(true, 5, Some((5, true))), &saved(5)), "this start's, handled already");
         assert!(!rolled_back(&computer(true, 5, Some((4, true))), &saved(3)), "an older start's restore");
@@ -4238,7 +4275,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("juniper--k3x9");
         assert_eq!(load(&dir, &agent()), None, "none yet");
-        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 7, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::from([("0f".repeat(16), 5)]), abandoned: BTreeMap::from([(7, Abandoned::Cancelling)]), receiving: BTreeSet::from([9]), sending: BTreeMap::from([(11, Sending { folder: "1-0".into(), kind: Kind::Voice { secs: 3 } })]), chat: Some("juniper-simplex--w9x2".into()), moved: None, carried: vec![], ahead: vec![] };
         store(&dir, &saved).expect("written");
         assert_eq!(load(&dir, &agent()), Some(saved.clone()));
         assert_eq!(linked_on_disk(&root, &[agent()]), vec![("juniper--k3x9".to_string(), Some("juniper-simplex--w9x2".to_string()))]);
@@ -4312,7 +4349,7 @@ mod tests {
         Slot {
             agent: agent(),
             dir,
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] },
             name: None,
             named_at: None,
             naming: false,
@@ -4338,6 +4375,7 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
+            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,
@@ -4443,11 +4481,7 @@ mod tests {
         assert_eq!((r.status, r.code), (409, Some("not_linked")));
         unmarked("not bound");
         m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
-        m.slots.get_mut(f).expect("its slot").up = true;
-        // busy, and not settled: its core down, its catch-up under way, or a
-        // message of this life unposted (Codex's fix-checks of c55a7ae64,
-        // f3e6a1a8d and e97e5e480)
-        for (n, busy) in ["working", "receiving", "outstanding", "down", "catching up", "gap"].into_iter().enumerate() {
+        for (n, busy) in ["working", "receiving", "outstanding"].into_iter().enumerate() {
             let s = m.slots.get_mut(f).expect("its slot");
             match busy {
                 "working" => {
@@ -4456,9 +4490,6 @@ mod tests {
                 "receiving" => {
                     s.saved.receiving.insert(9);
                 }
-                "down" => s.up = false,
-                "catching up" => s.saved.link.scan.running = true,
-                "gap" => s.gap = true,
                 _ => {
                     s.outstanding.insert(40);
                 }
@@ -4470,7 +4501,6 @@ mod tests {
             s.working.clear();
             s.saved.receiving.clear();
             s.outstanding.clear();
-            (s.up, s.saved.link.scan.running, s.gap) = (true, false, false);
         }
         let mut forged = signed("handover", &"02".repeat(16));
         forged.sig = "ab".repeat(64);
@@ -4533,7 +4563,6 @@ mod tests {
         let key = agent_key(&dir.join("key"));
         let f = "juniper--k3x9";
         let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
-        m.slots.get_mut(f).expect("its slot").up = true;
         let link_dir = m.slots[f].dir.clone();
         core_dbs(&link_dir, 4);
         let h = m.handover(f, &signed("handover", &"0a".repeat(16))).await.expect("taken");
@@ -4661,7 +4690,6 @@ mod tests {
         let key = agent_key(&dir.join("key"));
         let f = "juniper--k3x9";
         let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
-        m.slots.get_mut(f).expect("its slot").up = true;
         m.slots.get_mut(f).expect("its slot").door = Some(key.clone());
         core_dbs(&m.slots[f].dir.clone(), 3);
         m.slots.get_mut(f).expect("its slot").saved.link.delivered = 41;
@@ -4673,6 +4701,47 @@ mod tests {
         let read = load(&m.slots[f].dir, &agent()).expect("its file");
         assert!(read.moved.is_none() && !m.moved(f), "moved no more");
         assert_eq!(read.link, before, "its own link");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Goal: a message reaches a chat once, by its own id, however far back
+    /// its cursor stands (Codex's rounds on #1541). A post refused (41),
+    /// two posted after it: what was delivered stays at 40, and its chat
+    /// holds 42 and 43, which its handover hands its door by their ids
+    /// (`ahead`). Its next life posts 41, what was delivered passes them,
+    /// and none is kept; an unlink keeps none either.
+    #[tokio::test]
+    async fn a_handover_names_what_its_chat_holds_past_its_cursor() {
+        let dir = std::env::temp_dir().join(format!("simplex-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let key = agent_key(&dir.join("key"));
+        let f = "juniper--k3x9";
+        let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
+        let link_dir = m.slots[f].dir.clone();
+        core_dbs(&link_dir, 3);
+        let s = m.slots.get_mut(f).expect("its slot");
+        s.saved.link.delivered = 40;
+        for item in [41, 42, 43] {
+            s.outstanding.insert(item);
+            s.posting.insert(item, format!("m{item}"));
+        }
+        m.delivered(f, 41, false);
+        m.delivered(f, 42, true);
+        m.delivered(f, 43, true);
+        let ahead = vec![(42, "m42".to_string()), (43, "m43".to_string())];
+        assert_eq!((m.slots[f].saved.link.delivered, &m.slots[f].saved.ahead), (40, &ahead));
+        assert_eq!(load(&link_dir, &agent()).expect("its file").ahead, ahead, "on disk");
+        let h = m.handover(f, &signed("handover", &"31".repeat(16))).await.expect("handed over");
+        let state: serde_json::Value = serde_json::from_slice(&h.state).expect("its state");
+        assert_eq!(state["ahead"], serde_json::json!([[42, "m42"], [43, "m43"]]), "handed to its door by their ids");
+        // a next life: no gap, 41 posted at last, what was delivered passes them
+        let s = m.slots.get_mut(f).expect("its slot");
+        (s.saved.moved, s.gap, s.acked) = (None, false, 43);
+        s.outstanding.insert(41);
+        s.posting.insert(41, "m41".into());
+        m.delivered(f, 41, true);
+        assert_eq!(m.slots[f].saved.link.delivered, 43);
+        assert!(m.slots[f].saved.ahead.is_empty(), "behind what was delivered: kept no more");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -4689,7 +4758,6 @@ mod tests {
         let key = agent_key(&dir.join("key"));
         let f = "juniper--k3x9";
         let mut m = manager(&dir, &key, Phase::Linked { contact: 3, name: "paul".into() });
-        m.slots.get_mut(f).expect("its slot").up = true;
         m.slots.get_mut(f).expect("its slot").door = Some(key.clone());
         let link_dir = m.slots[f].dir.clone();
         core_dbs(&link_dir, 3);
@@ -5002,7 +5070,7 @@ mod tests {
         let (writer, _writes) = mpsc::channel(1);
         let (tx, _rx) = mpsc::channel(4);
         let (pulse, _) = watch::channel(false);
-        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] };
+        let saved = Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] };
         let slot = Slot {
             agent: agent(),
             dir: PathBuf::from("/nowhere"),
@@ -5032,6 +5100,7 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
+            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,
@@ -5164,7 +5233,7 @@ mod tests {
         let slot = Slot {
             agent: agent(),
             dir: std::env::temp_dir().join(format!("simplex-ack-{}", std::process::id())),
-            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![] },
+            saved: Saved { identity: "npub1juniper".into(), generation: 1, link: Link { phase: Phase::Linked { contact: 3, name: "paul".into() }, ..Link::default() }, used: BTreeMap::new(), abandoned: BTreeMap::new(), receiving: BTreeSet::new(), sending: BTreeMap::new(), chat: None, moved: None, carried: vec![], ahead: vec![] },
             name: None,
             named_at: None,
             naming: false,
@@ -5190,6 +5259,7 @@ mod tests {
             poster: None,
             gap: false,
             outstanding: Default::default(),
+            posting: Default::default(),
             acked: 0,
             door: None,
             session: None,
