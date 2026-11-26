@@ -374,10 +374,13 @@ enum Place<'a> {
     Basic(&'a str),
 }
 
+/// What a `fetch` sends: its method and its JSON body.
+type Sent<'a> = (&'static str, &'a str);
+
 /// `fetch`'s words: the URL, the value (`$NAME` or a literal), where it
 /// goes, and the method and JSON body it sends, if any (all after
 /// ` posting `, ` putting ` or ` deleting `).
-fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>, Option<(&'static str, &str)>), String> {
+fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>, Option<Sent<'_>>), String> {
     let sent = [(" posting ", "POST"), (" putting ", "PUT"), (" deleting ", "DELETE")].into_iter().find_map(|(word, method)| text.split_once(word).map(|(t, b)| (t, (method, b))));
     let (text, posted) = sent.map_or((text, None), |(t, sent)| (t, Some(sent)));
     let words: Vec<&str> = text.split_whitespace().collect();
