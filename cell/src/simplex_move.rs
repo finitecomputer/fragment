@@ -209,12 +209,14 @@ impl Move<'_> {
             };
         }
         if text(&rec, "step") == "connecting" {
+            // its connect over (held: given up), read before its door, which
+            // then never started (refused, or its job failed): its link runs
+            // at neither end, so it goes back (Codex's round on b898dcf13
+            // and its fix-check)
+            let over = !self.unfinished(text(&rec, "connector"), "connect", &["queued", "running", "blocked"]).await?;
             let state = self.door_state(text(&rec, "door")).await?;
             if state["runner"]["phase"] != "linked" {
-                // its connect over, its door never started (refused, or its
-                // job failed): its link runs at neither end, so it goes back
-                // (Codex's round on b898dcf13)
-                if state["door"]["started"] == 0 && !self.unfinished(text(&rec, "connector"), "connect").await? {
+                if over && state["door"]["started"] == 0 {
                     return Err(self.went_back(CellError::new(ErrorCode::Conflict, "its connector's connect ended, its door never started")).await);
                 }
                 return Ok(json!({ "agent": self.agent, "record": rec, "next": "wait for its door to link, then ask again", "door": { "running": state["running"], "runner": state["runner"]["phase"] } }));
@@ -432,7 +434,7 @@ impl Move<'_> {
         // its connector kept, its chat's history with it: unbound (its door
         // ends) once it has taken what its door delivered, and archived
         if let Some(connector) = rec["connector"].as_str() {
-            if self.unfinished(connector, "intake").await? {
+            if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
                 return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has delivered messages not yet published (an intake run queued, running, held or blocked): ask again, or replay them")));
             }
             match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
@@ -446,11 +448,11 @@ impl Move<'_> {
         Ok(json!({ "agent": self.agent, "back": true, "connector": rec["connector"] }))
     }
 
-    /// Whether `connector` has a run of its `intake` that has not published
-    /// what its door delivered: queued or under way, or held (failed, kept
-    /// for a replay) or blocked (paused), whose file its door must keep
-    /// until it is replayed or let go.
-    async fn unfinished(&self, connector: &str, op: &str) -> CellResult<bool> {
+    /// Whether `connector` has a run of `op` in one of the `live` statuses:
+    /// for its `intake`, one that has not published what its door
+    /// delivered (queued or under way, held for a replay, or blocked),
+    /// whose file its door must keep until it is replayed or let go.
+    async fn unfinished(&self, connector: &str, op: &str, live: &[&str]) -> CellResult<bool> {
         // its op's runs counted by status, every one of them (never a
         // page: one held behind many newer is counted), in one read, so a
         // run replayed meanwhile is seen in one status or another
@@ -460,7 +462,7 @@ impl Move<'_> {
         let routed = Routed { name: connector.into(), url, signed: Some(self.person.clone()), credential: None };
         let mut r = crate::forward(self.env, &bare, None, crate::Forward { routed, inner: "/api/runs".into(), extra: vec![] }).await?;
         let runs = answer(&mut r, &format!("{connector}'s runs")).await?;
-        Ok(["queued", "running", "held", "blocked"].iter().any(|s| runs["counts"][s].as_u64().unwrap_or(0) > 0))
+        Ok(live.iter().any(|s| runs["counts"][s].as_u64().unwrap_or(0) > 0))
     }
 }
 

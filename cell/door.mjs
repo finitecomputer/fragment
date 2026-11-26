@@ -137,6 +137,10 @@ export class SimplexDoor extends DurableObject {
   #incoming = new Map();
   // its deliveries going on to its connector's inbox, one drain at a time
   #draining = null;
+  // its ways back, one at a time: one that fails lets go of the fence it
+  // set only while none other could hand its save back meanwhile (Codex's
+  // fix-check of f9a7b3cb3)
+  #handbacks = Promise.resolve();
   #again = false;
   // its storage gone whole by its end, until a connect starts it again;
   // `#ends` counts its ends, so an upload under way across one lets go of
@@ -432,7 +436,13 @@ export class SimplexDoor extends DurableObject {
   // tries again), never a save whose cursor is past a message no one has.
   // `x-door-started`: whether it ever started (a save of a door that never
   // ran is the one it was given).
-  async #handback(body) {
+  #handback(body) {
+    const one = this.#handbacks.then(() => this.#handbackOne(body));
+    this.#handbacks = one.catch(() => {});
+    return one;
+  }
+
+  async #handbackOne(body) {
     if (!nameOk(body.door)) throw Object.assign(new Error("a way back names its door"), { status: 400 });
     // ended (its connector unbound, or its life over): its link went with
     // it, and no save of nothing is handed back, which would have its

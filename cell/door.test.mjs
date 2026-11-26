@@ -1111,6 +1111,35 @@ test("a way back whose save can't be read, its runner stopped for it: refused, i
   assert.deepEqual([r.status, await r.text(), d.row().stopped], [200, "its last", "handed back"]);
 });
 
+test("two ways back at once, the first's save unreadable: the second waits for it, then hands its save back, its runner stopped, never started again after (Codex's fix-check of f9a7b3cb3)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its last");
+  d.c.signal = async () => void (d.c.running = false);
+  const get = d.blobs.get;
+  let [fail, reading] = [];
+  const failing = new Promise((r) => (fail = r));
+  const read = new Promise((r) => (reading = r));
+  d.blobs.get = async () => {
+    d.blobs.get = get;
+    reading();
+    await failing;
+    throw new Error("the bucket's read failed");
+  };
+  const back = () => d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  // the first fences and stops its runner, and is reading its save as the second is asked
+  const a = back();
+  await read;
+  const b = back();
+  await new Promise((r) => setTimeout(r, 20));
+  fail();
+  const [ra, rb] = await Promise.all([a, b]);
+  assert.deepEqual([ra.status, rb.status, await rb.text()], [500, 200, "its last"]);
+  assert.deepEqual([d.row().stopped, d.c.running], ["handed back", false], "its save handed back, its runner stopped: its link at one end");
+});
+
 test("a delivery to its connector's inbox is signed over its body by the inbox's secret: one its inbox refuses (a body changed on its way fails its check) is sent again at its next watch", async () => {
   const d = door();
   await d.connect();
