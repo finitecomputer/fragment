@@ -218,9 +218,11 @@ impl FragmentCell {
     /// bridge before them (`PLACE_OPENED`), not yet past
     /// `limits::TURN_HELD_MS`.
     fn turn_rows(&self, now: i64) -> CellResult<Vec<TurnRow>> {
+        // a place's row holds until its `until`; a bridge's, past its
+        // mandate's day too (held unproven), as it always did
         self.typed(
-            "SELECT place, asker, mandate FROM turns WHERE at >= ? AND until > ? ORDER BY turn LIMIT ?",
-            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
+            "SELECT place, asker, mandate FROM turns WHERE at >= ? AND (until > ? OR life != ?) ORDER BY turn LIMIT ?",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), PLACE_OPENED.into(), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
         )
     }
 
@@ -246,7 +248,10 @@ impl FragmentCell {
             return Ok(());
         }
         let now = js::now_ms();
-        self.exec("DELETE FROM turns WHERE at < ? OR until <= ?", vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now)])?;
+        self.exec(
+            "DELETE FROM turns WHERE at < ? OR (until <= ? AND life = ?)",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), PLACE_OPENED.into()],
+        )?;
         self.exec("DELETE FROM turns WHERE place = ? AND life = ?", vec![t.place.as_str().into(), PLACE_OPENED.into()])?;
         let others = self.count_of("SELECT COUNT(*) AS n FROM turns", vec![])?;
         let mut turns = t.turns;
@@ -294,9 +299,10 @@ impl FragmentCell {
     /// URL and the mandate it carries.
     fn asked(&self, method: &str, at: &str, fragment: Option<&str>) -> CellResult<(String, Option<String>)> {
         let url = url::Url::parse(at).map_err(|e| CellError::invalid(format!("url: {e}")))?;
-        // a fragment's site is signed at its own origin: its path as the
-        // guest asked for it, `/f/<fragment>/…`, is what the rules read
-        let site = fragment.filter(|_| !url.path().starts_with("/api/"));
+        // a fragment's site is signed at its own origin (its app's `/api/…`
+        // too): its path as the guest asked for it, `/f/<fragment>/…`, is
+        // what the rules read
+        let site = fragment.filter(|_| !url.host_str().is_some_and(|h| self.cfg.is_platform_host(h)));
         let path = site.map_or_else(|| url.path().to_string(), |f| format!("/f/{f}{}", url.path()));
         let owner = self.must(MetaKey::Owner)?;
         let for_owner = url.query_pairs().any(|(k, v)| k == "for" && npub::display(&v) == npub::display(&owner));

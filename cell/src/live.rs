@@ -500,9 +500,14 @@ impl FragmentCell {
     /// was handed someone else's ask, told next).
     pub(crate) fn hold_live(&self, agents: &[String]) {
         for a in agents {
+            let had = self.live.borrow().held.contains_key(a);
             self.live.borrow_mut().held.entry(a.clone()).or_default();
             for ws in self.state.get_websockets_with_tag(&format!("who:{a}")) {
-                if let Some(mut st) = state_of(&ws).filter(|st| !st.held) {
+                let Some(mut st) = state_of(&ws) else { continue };
+                if st.held && !had {
+                    // what it held went with an activation: it catches up
+                    let _ = ws.close(Some(ROLE_CHANGED), Some("a turn of yours here is being opened: reconnect"));
+                } else if !st.held {
                     st.held = true;
                     let _ = ws.serialize_attachment(&st);
                 }

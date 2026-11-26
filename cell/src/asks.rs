@@ -52,10 +52,10 @@ const CHAT: &str = "chat";
 const WORK: &str = "work";
 /// Agents one flush tells, the rest at the next.
 const ASKS_FLUSH_MAX: i64 = 16;
-/// How long an ended ask is kept for the hand-offs said in its turn (an
-/// agent's last words, read after it ended), as its agent's bridge keeps
-/// an ended turn's (`ENDED_HOPS_MS`).
-const ENDED_KEPT_MS: i64 = 10 * 60 * 1000;
+/// How long an ended ask is kept: as long as its words could still be
+/// handed (`MANDATE_LIFE_MS`), so another agent's catch-up knows it was
+/// claimed, and a hand-off said in its turn after it ended carries it on.
+const ENDED_KEPT_MS: i64 = limits::MANDATE_LIFE_MS;
 
 #[derive(Deserialize)]
 struct Member {
@@ -230,10 +230,10 @@ impl FragmentCell {
         let agent = npub::display(agent);
         let members = self.agent_members()?;
         let Some(m) = members.iter().find(|m| npub::display(&m.principal) == agent) else { return Ok(()) };
-        let said: Vec<Said> = self.typed("SELECT principal, author, asker, at, body FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?;
-        // one gone (trimmed): nothing to open
-        let Some(s) = said.into_iter().next() else { return Ok(()) };
-        let named = mandate::named(&s.body);
+        // the record it claims, which may be trimmed since it was handed:
+        // its ask, kept, opens all the same
+        let said: Option<Said> = self.typed("SELECT principal, author, asker, at, body FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?.into_iter().next();
+        let named = said.as_ref().map(|s| mandate::named(&s.body)).unwrap_or_default();
         let rows: Vec<Claimed> = self.typed("SELECT asker, turn, until FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(seq)])?;
         let (asker, changed) = match rows.into_iter().next() {
             Some(c) if c.turn.as_deref() == Some(turn) && c.until.is_none() => (c.asker, false),
@@ -245,10 +245,9 @@ impl FragmentCell {
                 (c.asker, true)
             }
             None => {
-                // said before it joined, or no one's (app code's): nothing to open
-                if s.at < m.added_at {
-                    return Ok(());
-                }
+                // gone with no ask kept, said before it joined, or no one's
+                // (app code's): nothing to open
+                let Some(s) = said.filter(|s| s.at >= m.added_at) else { return Ok(()) };
                 let author = s.author.as_deref().and_then(Author::parse);
                 let Some(asked) = mandate::asked_of(&npub::display(&s.principal), author, s.asker.as_deref(), &s.body) else { return Ok(()) };
                 let (asker, proven) = self.ask_of(&asked, m, &members)?;
@@ -399,7 +398,7 @@ impl FragmentCell {
             Ok(version) => {
                 let _ = self.exec("UPDATE asks_told SET told = MAX(told, ?), attempts = 0 WHERE agent = ?", vec![SqlStorageValue::Integer(version), agent.as_str().into()]);
                 let _ = self.exec(
-                    "DELETE FROM asks WHERE agent = ? AND (until < ? OR at < ?)",
+                    "DELETE FROM asks WHERE agent = ? AND ((until IS NOT NULL AND at < ?) OR at < ?)",
                     vec![agent.as_str().into(), SqlStorageValue::Integer(js::now_ms() - ENDED_KEPT_MS), SqlStorageValue::Integer(js::now_ms() - limits::TURN_HELD_MS)],
                 );
             }
