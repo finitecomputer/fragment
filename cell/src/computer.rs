@@ -87,6 +87,9 @@ pub const INTERNAL_HEADER: &str = "x-fragment-computer-internal";
 /// What an egress or a port request asks the cell (set by Rust inside the
 /// Worker only: the router drops every client `x-fragment-*`).
 const KIND_HEADER: &str = "x-fragment-computer";
+/// A SimpleX move record's set refused as another `go` moved it on: the
+/// one failure the operators' move never goes back from (simplex_move.rs).
+pub(crate) const MOVED_ON: &str = "another `go` moved it on";
 const PORT_HEADER: &str = "x-fragment-computer-port";
 const SESSION_HEADER: &str = "x-fragment-computer-session";
 const SIGNER_HEADER: &str = "x-fragment-computer-signer";
@@ -4259,7 +4262,7 @@ impl ComputerCell {
                 let from = b["from"].as_str().ok_or_else(|| CellError::invalid("a set names the step it moves on from (from)"))?;
                 let at = moves.get(agent).map(|r| r["step"].as_str().unwrap_or("").to_string());
                 if at.as_deref().unwrap_or("") != from || (at.is_some() && from.is_empty()) {
-                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is at {:?}, not {from:?}: another `go` moved it on; ask again", at.unwrap_or_default())));
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is at {:?}, not {from:?}: {MOVED_ON}; ask again", at.unwrap_or_default())));
                 }
                 // a `go`'s own claim, when it names one: another's claim
                 // (this one let go by a `back`, then claimed again) is not it

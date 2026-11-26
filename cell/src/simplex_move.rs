@@ -196,18 +196,14 @@ impl Move<'_> {
         if text(&rec, "step") == "making" {
             return Err(CellError::new(ErrorCode::Conflict, "a `go` is making its connector: ask again (one that stopped: `back`)"));
         }
-        if text(&rec, "step") == "made" {
-            rec = self.hand_over(&rec).await?;
-        }
-        // its link in its door, its computer's core stopped, its door not
-        // yet connected: any failure but another `go`'s (a conflict: it
-        // moved the move on) goes back (Codex's round on f434be3bb)
-        if matches!(text(&rec, "step"), "imported" | "bound") {
-            rec = match self.connect(rec).await {
-                Err(e) if e.code != ErrorCode::Conflict => return Err(self.went_back(e).await),
-                r => r?,
-            };
-        }
+        // one failure handler (Rule B): from its handover until its door is
+        // connected, any failure while its computer's own moved mark stands
+        // (its core may have stopped), but another `go`'s moving it on, goes
+        // back, so its link runs at one end, never none
+        rec = match self.onward(rec).await {
+            Err(e) if !e.message.contains(crate::computer::MOVED_ON) && self.read().await.is_ok_and(|r| r["record"]["moved"] == true) => return Err(self.went_back(e).await),
+            r => r?,
+        };
         if text(&rec, "step") == "connecting" {
             // its connect over (held: given up), read before its door, which
             // then never started (refused, or its job failed): its link runs
@@ -238,9 +234,13 @@ impl Move<'_> {
         Ok(json!({ "agent": self.agent, "record": rec, "next": next }))
     }
 
-    /// Its connector bound, then its door connected (a staged chat offered
-    /// instead, waiting for its person's word).
-    async fn connect(&self, mut rec: Value) -> CellResult<Value> {
+    /// Its link handed over and imported, its connector bound, then its
+    /// door connected (a staged chat offered instead, waiting for its
+    /// person's word).
+    async fn onward(&self, mut rec: Value) -> CellResult<Value> {
+        if text(&rec, "step") == "made" {
+            rec = self.hand_over(&rec).await?;
+        }
         if text(&rec, "step") == "imported" {
             rec = self.bind(&rec).await?;
         }
@@ -305,10 +305,7 @@ impl Move<'_> {
 
     /// Its computer's link handed over and its save given to its door, then
     /// the agent's computer door closed: what its computer signs relays no
-    /// one now. A handover that fails once its core may have stopped (its
-    /// computer's own moved mark stands, whatever the failure), or an import
-    /// that fails, goes back (`went_back`), so its link runs at one end,
-    /// never none.
+    /// one now. A failure goes back once its core may have stopped (`go`).
     async fn hand_over(&self, rec: &Value) -> CellResult<Value> {
         // its save, streamed out of its computer's container into its door,
         // whose bucket checks its SHA-256 as it stores it: a copy damaged on
@@ -318,13 +315,7 @@ impl Move<'_> {
         let mut asks = 0;
         let (sha, length, staged) = loop {
             asks += 1;
-            let save: worker::worker_sys::web_sys::Response = match self.hand("handover", None, false, "").await {
-                Ok(save) => save.into(),
-                // a pack that failed, an answer lost: its mark, its computer's
-                // own, says whether its core may have stopped
-                Err(e) if self.read().await.is_ok_and(|r| r["record"]["moved"] == true) => return Err(self.went_back(e).await),
-                Err(e) => return Err(e),
-            };
+            let save: worker::worker_sys::web_sys::Response = self.hand("handover", None, false, "").await?.into();
             let head = |k: &str| save.headers().get(k).ok().flatten().unwrap_or_default();
             let (sha, length, staged) = (head("x-door-sha256"), head("x-door-length"), head("x-simplex-staged") == "1");
             let body = save.body().map(Into::into);
@@ -335,24 +326,17 @@ impl Move<'_> {
             };
             match put {
                 Err(e) if e.message.contains(" 422 not_its_sha:") && asks < HAND_ASKS => continue,
-                // its computer's core stopped, its door holding no link it runs
-                Err(e) => return Err(self.went_back(e).await),
-                Ok(_) => break (sha, length, staged),
+                r => {
+                    r?;
+                    break (sha, length, staged);
+                }
             }
         };
-        // imported: until its door is connected, any failure but another
-        // `go`'s goes back (`go`), these first
-        let recorded = async {
-            crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
-            self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
-            // a staged chat waits for its person's word once bound, never
-            // connected for them
-            self.set("made", None, json!({ "step": "imported", "staged": staged })).await
-        };
-        match recorded.await {
-            Err(e) if e.code != ErrorCode::Conflict => Err(self.went_back(e).await),
-            r => r,
-        }
+        crate::fragment::ask(self.env, &self.agent, "computer/simplex-move", &json!({ "computer": self.computer, "act": "closed" })).await?;
+        self.note(format!("{}'s SimpleX {} handed over to {}'s door ({sha}, {length} bytes)", self.agent, if staged { "staged chat" } else { "link" }, text(rec, "connector"))).await?;
+        // a staged chat waits for its person's word once bound, never
+        // connected for them
+        self.set("made", None, json!({ "step": "imported", "staged": staged })).await
     }
 
     /// The one way out of a handover that failed after its core may have

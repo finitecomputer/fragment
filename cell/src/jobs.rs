@@ -1109,7 +1109,7 @@ impl FragmentCell {
             // to its door, another object, through a stream of its own
             // (`js::passed_on`, Cloudflare's reorder)
             let body = match door {
-                Some(_) => js::passed_on(body.into()).map_err(|e| StepFail::Retry(e.message))?,
+                Some(_) => js::passed_on(body.into()),
                 None => body.into(),
             };
             init.with_body(Some(body));

@@ -523,18 +523,28 @@ pub async fn object_size(env: &Env, bucket: &str, key: &str) -> CellResult<Optio
     Ok(env.bucket(bucket)?.head(key).await?.map(|o| o.size()))
 }
 
-/// A body one object passes on to another, piped through a fresh
-/// `TransformStream` of its own. On Cloudflare, a Durable Object's answer's
-/// body passed as it is into a request to a third object arrives with one
-/// 4 KiB chunk moved ahead of the one to three before it, within its first
-/// 28 KiB, in 7 to 17% of such transfers: Cloudflare's reorder (FIN-775).
-/// A stream between them stops it (0 of 565). The SHA-256 each such body
-/// carries, checked where it lands, and its bounded re-asks stay as the net.
-pub fn passed_on(body: JsValue) -> CellResult<JsValue> {
-    let host = |what: &str, e: JsValue| CellError::host(format!("{what}: {}", js_message(&e)));
-    let ctor: Function = get(&js_sys::global(), "TransformStream")?.dyn_into().map_err(|e| host("TransformStream", e))?;
-    let stream = Reflect::construct(&ctor, &Array::new()).map_err(|e| host("TransformStream", e))?;
-    call(&body, "pipeThrough", &[stream]).map_err(|e| host("pipeThrough", e))
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = TransformStream)]
+    type PassThrough;
+    #[wasm_bindgen(constructor, js_class = "TransformStream")]
+    fn new() -> PassThrough;
+    #[wasm_bindgen(js_name = ReadableStream)]
+    type Passed;
+    #[wasm_bindgen(method, js_name = pipeThrough)]
+    fn pipe_through(this: &Passed, through: &PassThrough) -> JsValue;
+}
+
+/// A body one object passes on to another (a `ReadableStream`), piped
+/// through a fresh `TransformStream` of its own. On Cloudflare, a Durable
+/// Object's answer's body passed as it is into a request to a third object
+/// arrives with one 4 KiB chunk moved ahead of the one to three before it,
+/// within its first 28 KiB, in 7 to 17% of such transfers: Cloudflare's
+/// reorder (FIN-775). A stream between them stops it (0 of 565). The
+/// SHA-256 each such body carries, checked where it lands, and its bounded
+/// re-asks stay as the net.
+pub fn passed_on(body: JsValue) -> JsValue {
+    body.unchecked_ref::<Passed>().pipe_through(&PassThrough::new())
 }
 
 /// The SHA-256 (hex) and CRC-32 of a stream's bytes, read to its end:
