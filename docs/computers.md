@@ -533,12 +533,28 @@ the DO removes them from one started from a snapshot.
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not set aside nor found
   unusable. A
-  start whose save will never restore (its archive gone or altered)
-  marks it unusable and starts again at once from the one before, with no
-  strike against the computer. A read of its archive that storage failed
-  (R2 answered an error) is asked again a few times within the restore
-  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
-  start on one.
+  start whose save will never restore (its archive gone, or R2's own copy
+  not its record) marks it unusable and starts again at once from the one
+  before, with no strike against the computer. A read of its archive that
+  storage failed (R2 answered an error) is asked again a few times within
+  the restore (`cell/backups.mjs`), since the SDK's shim would fail the
+  whole start on one.
+- **Every save and restore is checked end to end** (FIN-784): bytes have
+  come the right length with the wrong contents on their way into or out
+  of a container (FIN-775). The SDK's shim hashes each archive as it makes
+  it (its record's SHA-256), but R2 checks a part's length alone. So a
+  record is kept only once R2's own copy hashes to it: one that came out
+  damaged is deleted and backed up again, three tries in all, within the
+  save's own bound (a failure after them fails the save, tried again as
+  any). A restore whose bytes came damaged (the SDK's `BACKUP_INTEGRITY`)
+  reads R2's copy: when two reads agree it is not its record, the save is
+  unusable, as above; otherwise the restore is asked again, three tries in
+  all, within its own bound, and a start whose tries all came damaged
+  fails as one that may pass, its save kept. A restore that works reads
+  nothing more. R2's copy is read and hashed by the backups' gateway
+  (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
+  through the container. Damage before the shim's hash (in the
+  container's own reading of its files) is out of reach.
 - **A save too big for its disk is set aside** (Paul, 2026-11-20:
   "rollback is preferred to being stuck"). A restore can need a little
   more room than the life that saved it used: the sandbox runtime stops
@@ -823,7 +839,9 @@ it fails (the Sandbox SDK times out nothing): the consts beside
 deadline for its phase, checked as the cell compiles. A save's steps run
 in the Durable Object alarm whose events asked for them, which Cloudflare
 ends at 15 minutes: a sleep's hold, save and stop fit one alarm, and its
-backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds).
+backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds),
+each record's read back from R2 and hashed within it (above, "Every save
+and restore is checked end to end").
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but

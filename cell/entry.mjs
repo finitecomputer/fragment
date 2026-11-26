@@ -7,7 +7,7 @@
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
-import { readAgain } from "./backup-reads.mjs";
+import { backupChecked, readAgain, restoreChecked } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
 import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
@@ -37,13 +37,62 @@ export class DoorEgress extends DoorCalls {
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
-// (backup-reads.mjs); every other request is the SDK's own, once.
+// (backups.mjs); every other request is the SDK's own, once. A grant the
+// levers' damage marks (`ContainerHost`'s `#damage`) has one byte of its
+// first part, or of its first range, flipped on its way, its length kept.
 export class DirectoryBackupGateway extends SandboxGateway {
   fetch(request) {
-    if (request.method !== "GET") return super.fetch(request);
+    const damage = this.ctx.props?.damage === true;
+    if (request.method !== "GET") {
+      // (its Content-Length header kept: the SDK reads the part's length there)
+      const first = damage && new URL(request.url).pathname === "/parts/1" && request.body;
+      return super.fetch(first ? new Request(request, { body: flipped(request.body) }) : request);
+    }
     const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
-    return readAgain(() => super.fetch(request), again);
+    const read = async () => {
+      const answer = await super.fetch(request);
+      const range = damage && answer.status === 206 && /^bytes 0-([0-9]+)\//.exec(answer.headers.get("content-range") ?? "");
+      if (!range || !answer.body) return answer;
+      // answered at its length, as the SDK's own answer is
+      const fixed = new FixedLengthStream(Number(range[1]) + 1);
+      flipped(answer.body).pipeTo(fixed.writable).catch(() => {});
+      return new Response(fixed.readable, answer);
+    };
+    return readAgain(read, again);
   }
+
+  // What R2 holds at the control props' key (`ContainerHost`'s `#stored`):
+  // its size and the SHA-256 of its bytes as they stream, or null when it
+  // is gone; its read cut off past `ms`. A call of its own, as the SDK's
+  // other control calls are, so its hashing is not the computer's alarm's.
+  async stored(ms) {
+    const { protocolVersion, mode, binding, key } = this.ctx.props ?? {};
+    if (protocolVersion !== 1 || mode !== "control") throw new Error("a stored copy is read with control props alone");
+    const object = await this.env[binding].get(key);
+    if (object === null) return null;
+    const digest = new crypto.DigestStream("SHA-256");
+    await object.body.pipeTo(digest, { signal: AbortSignal.timeout(ms) });
+    const sha256 = [...new Uint8Array(await digest.digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    return { size: object.size, sha256 };
+  }
+}
+
+// `body` with one byte of its first chunk flipped, its length kept: the
+// levers' damage (`damage-saves`, `damage-restores`), as FIN-775's
+// transfers came. The chunk is copied, never written in place.
+function flipped(body) {
+  let done = false;
+  const flip = new TransformStream({
+    transform(chunk, out) {
+      if (!done && chunk.byteLength > 0) {
+        chunk = new Uint8Array(chunk);
+        chunk[chunk.byteLength >> 1] ^= 0xff;
+        done = true;
+      }
+      out.enqueue(chunk);
+    },
+  });
+  return body.pipeThrough(flip);
 }
 
 export default rs.default;
@@ -249,6 +298,9 @@ async function tail(stream, keep) {
   return new TextDecoder().decode(last);
 }
 
+// The bucket a computer's saves are in (computer.rs's `js::BLOBS`).
+const BACKUPS_BINDING = "BLOBS";
+
 // A container step that answered nothing within its bound: its name
 // (`step`) and the bound (`ms`) say which, in its message too, so the
 // Rust side's failure (a save's, a start's, a stop's) says it.
@@ -324,15 +376,44 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The e2e's levers `damage-saves` and `damage-restores` (computer.rs):
+  // how many of the next backups' (`write`) and restores' (`read`) grants
+  // the gateway damages, one each.
+  #damage = { write: 0, read: 0 };
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
-      binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+    const gateway = ctx.exports.DirectoryBackupGateway;
+    this.#backups = new DirectoryBackup(ctx.container, ({ props }) => gateway({ props: this.#damaged(props) }), {
+      binding: BACKUPS_BINDING,
+      prefix: this.#prefix,
     });
+  }
+
+  get #prefix() {
+    return `computers/${this.#ctx.id}/backups/`;
+  }
+
+  // Where R2 keeps `record`'s archive: the SDK's own name for it
+  // (`DirectoryBackup`'s key; computer.rs's export reads it so too).
+  #key(record) {
+    return `${this.#prefix}${record.id}.tar.zst`;
+  }
+
+  // `props` of a grant, marked for the gateway to damage while the levers
+  // ask for it (one grant is one backup, or one restore, tried)
+  #damaged(props) {
+    if (!(this.#damage[props.mode] > 0)) return props;
+    this.#damage[props.mode]--;
+    return { ...props, damage: true };
+  }
+
+  // What R2 holds of `record` (the gateway's `stored`), within `ms`.
+  #stored(record, ms) {
+    const control = this.#ctx.exports.DirectoryBackupGateway({ props: { protocolVersion: 1, mode: "control", binding: BACKUPS_BINDING, key: this.#key(record) } });
+    return bounded(`the check of record ${record.id}`, ms, () => control.stored(ms));
   }
 
   get #c() {
@@ -510,26 +591,57 @@ class ContainerHost {
   }
 
   // Saves `dir`, leaving out what `exclude` names (gitignore patterns,
-  // relative to `dir`): its record, within `ms` (`Overdue` past it).
+  // relative to `dir`): its record, once R2's copy hashes to it, backed up
+  // again while it came out damaged (backups.mjs `backupChecked`); all
+  // within `ms` (`Overdue` past it).
   async backup(generation, dir, exclude, ms) {
-    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
     const options = { dir, name: `generation ${generation}`, exclude: exclude || [] };
-    return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
+    const until = Date.now() + ms;
+    const left = () => Math.max(1, until - Date.now());
+    return backupChecked({
+      backup: () => {
+        if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+        return bounded(`the backup of ${dir}`, left(), (signal) => this.#backups.backup({ ...options, signal }));
+      },
+      stored: (record) => this.#stored(record, left()),
+      // a copy left behind is its prefix's, which a wipe deletes
+      forget: (record) =>
+        bounded(`the delete of record ${record.id}`, left(), (signal) => this.#backups.delete(record, { signal })).catch((e) =>
+          console.error(JSON.stringify({ backup: "unforgotten", key: this.#key(record), error: String(e?.message ?? e) })),
+        ),
+      again: (tried, why) => console.log(JSON.stringify({ backup: "saved again", tried, dir, why, key: this.#prefix })),
+    });
   }
 
-  // Restores `record` into its directory within `ms` (`Overdue` past it):
-  // null once it is in place, `{unusable}` when the save itself will never
-  // restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND and
-  // BACKUP_INTEGRITY), or `{noRoom}` when it found no room on the disk (a
-  // restore's SandboxFileError ENOSPC), which the Rust side tells from a
-  // failure that may pass (it throws).
+  // Restores `record` into its directory within `ms` (`Overdue` past it),
+  // asked again while its bytes come damaged and R2's copy is not found bad
+  // (backups.mjs `restoreChecked`): null once it is in place, `{unusable}`
+  // when the save itself will never restore (its archive gone, the SDK's
+  // BACKUP_NOT_FOUND, or R2's own copy not its record), or `{noRoom}` when
+  // it found no room on the disk (a restore's SandboxFileError ENOSPC),
+  // which the Rust side tells from a failure that may pass (it throws).
   async restore(generation, record, ms) {
-    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const until = Date.now() + ms;
+    const left = () => Math.max(1, until - Date.now());
+    const restore = async () => {
+      if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+      try {
+        await bounded(`the restore of ${record.dir}`, left(), (signal) => this.#backups.restore(record, { signal }));
+        return null;
+      } catch (e) {
+        if (SandboxBackupError.is(e) && e.code === "BACKUP_INTEGRITY") return `${e.code}: ${e.detail || e.message}`;
+        throw e;
+      }
+    };
     try {
-      await bounded(`the restore of ${record.dir}`, ms, (signal) => this.#backups.restore(record, { signal }));
-      return null;
+      return await restoreChecked({
+        record,
+        restore,
+        stored: () => this.#stored(record, left()),
+        again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),
+      });
     } catch (e) {
-      if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
+      if (SandboxBackupError.is(e) && e.code === "BACKUP_NOT_FOUND") {
         return { unusable: `${e.code}: ${e.detail || e.message}` };
       }
       if (SandboxFileError.is(e) && e.operation === "restore" && e.code === "ENOSPC") {
@@ -542,6 +654,24 @@ class ContainerHost {
   // Deletes `record`'s archive within `ms` (`Overdue` past it).
   async forget(record, ms) {
     await bounded(`the delete of record ${record.id}`, ms, (signal) => this.#backups.delete(record, { signal }));
+  }
+
+  // The levers `damage-saves` (`write`) and `damage-restores` (`read`):
+  // the next `times` backups, or restores, each come damaged once.
+  damage(way, times) {
+    this.#damage[way] = times;
+  }
+
+  // The lever `damage-stored`: R2's copy of `record` with one byte flipped,
+  // its length kept, a stored copy really bad (a test fleet's saves are
+  // small, so read whole).
+  async damageStored(record) {
+    const bucket = this.#env[BACKUPS_BINDING];
+    const object = await bucket.get(this.#key(record));
+    if (object === null) throw new Error(`record ${record.id} is not in R2`);
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    bytes[bytes.length >> 1] ^= 0xff;
+    await bucket.put(this.#key(record), bytes, { httpMetadata: object.httpMetadata, customMetadata: object.customMetadata });
   }
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
