@@ -79,18 +79,19 @@ test("a save whose copy in R2 is not its record, on two reads that agree, is unu
   assert.equal(slow.seen.restores, RESTORE_TRIES);
 });
 
-test("a copy found bad is heard whatever else a try failed by: its time (awaited), or a transfer (once it is in)", async () => {
+test("a copy found bad is heard whatever else a try failed by: its time, or a transfer, the read under way awaited", async () => {
   const overdue = Object.assign(new Error("the restore of /data: no answer within 1 ms"), { name: "Overdue" });
   const late = restores([DAMAGED, overdue], [{ late: bad }]);
   assert.match((await late.run()).unusable, /^the restore of \/data: no answer within 1 ms; R2's copy holds 100 bytes/);
   const transfer = new Error("BACKUP_TRANSFER: gateway connection failed");
   const known = restores([DAMAGED, transfer], [bad]);
   assert.match((await known.run()).unusable, /^BACKUP_TRANSFER: gateway connection failed; R2's copy holds 100 bytes/);
-  // a transfer's failure is never held for a read that has not answered
-  const pending = restores([DAMAGED, transfer], ["never"]);
-  await assert.rejects(pending.run(), /BACKUP_TRANSFER/);
-  const whole_late = restores([DAMAGED, overdue], [whole]);
-  await assert.rejects(whole_late.run(), /no answer within 1 ms/);
+  // its reads still under way as the transfer failed: awaited, so the start goes back at once
+  const pending = restores([DAMAGED, transfer], [{ late: bad }]);
+  assert.match((await pending.run()).unusable, /^BACKUP_TRANSFER: gateway connection failed; R2's copy holds 100 bytes/);
+  // a copy not found bad: the failure as it came
+  await assert.rejects(restores([DAMAGED, transfer], [{ late: whole }]).run(), /BACKUP_TRANSFER/);
+  await assert.rejects(restores([DAMAGED, overdue], [whole]).run(), /no answer within 1 ms/);
 });
 
 test("a read of R2's copy damaged on its own way condemns nothing: the restore is asked again", async () => {

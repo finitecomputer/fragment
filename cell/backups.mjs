@@ -38,8 +38,8 @@ function against(held, record) {
 // why its bytes came damaged; `stored()` reads what R2 holds of `record`;
 // `again(tried, why)` is told of each asked again. R2's copy is read beside
 // the tries after one that came damaged, and no try ever waits for it: its
-// verdict is used once it is in, and awaited only after the last try, or a
-// try its time cut off (`Overdue`). Answers null once restored, or
+// verdict is used once it is in, and awaited only once no try is left (the
+// last came damaged, or one failed otherwise). Answers null once restored, or
 // `{unusable}` when R2's own copy is not its record: the save never will
 // restore. Throws once `RESTORE_TRIES` came in damaged while R2's copy was
 // not found bad (a failed start, which may pass: the save is kept), and
@@ -61,10 +61,11 @@ export async function restoreChecked({ record, restore, stored, again = () => {}
     try {
       damaged = await restore();
     } catch (e) {
-      // a copy found bad is heard whatever else failed: awaited once the
-      // try's time ran out (the read's ends with it), else only if in
-      const v = e?.name === "Overdue" && checking !== null ? await checking : verdict;
-      if (v?.bad) return { unusable: `${e.message}; ${v.bad}` };
+      // a try that failed otherwise ends the start: a read under way is
+      // awaited (within the start's own bound, as the try was), and a copy
+      // found bad heard, so the start goes back at once, no strike
+      const v = checking !== null ? await checking : verdict;
+      if (v?.bad) return { unusable: `${e?.message ?? e}; ${v.bad}` };
       throw e;
     }
     if (damaged === null) return null;

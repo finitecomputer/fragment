@@ -2342,17 +2342,22 @@ impl ComputerCell {
         }
         // each record checked against R2's own copy (FIN-784), once all are
         // taken, within what their backups left: a check never takes the
-        // time a later backup needs, nor a sleep's snapshot's most after it
-        // (one that runs out keeps its record unchecked, as before). One
-        // that came out damaged is let go of (this save's forget pass
-        // deletes it) and backed up again while its guest is held as it was
-        // then; else the save fails, tried again
+        // time a later backup needs, nor a sleep's forget pass and its
+        // snapshot's most after it (one that runs out keeps its record
+        // unchecked, as before). One that came out damaged is let go of
+        // (this save's forget pass deletes it) and backed up again while its
+        // guest is held as it was then and this is still the save its
+        // lifecycle asked for (an owner's sleep or restart asks its own, and
+        // a backup of this one would hold that one's up); else the save
+        // fails, tried again
         let snapshot_after = self.cfg.computer_snapshots && matches!(self.lifecycle().map(|l| l.phase), Ok(Phase::Sleeping { .. }));
-        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS) } else { until };
+        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
             // bounded: at its last try `after_check` answers no Again
             for tried in 1..=fragment_core::computer::SAVE_TRIES {
-                let next = fragment_core::computer::after_check(self.stored(&records[at], checks_until).await, tried, dir != "/data" || !let_go);
+                let checked = self.stored(&records[at], checks_until).await;
+                let asked = matches!(self.lifecycle().map(|l| l.saving()), Ok(Some(Saving::Save { seq: s, .. })) if s == seq);
+                let next = fragment_core::computer::after_check(checked, tried, asked && (dir != "/data" || !let_go));
                 let why = match next {
                     AfterCheck::Keep => break,
                     AfterCheck::Unchecked(why) => {
@@ -2371,7 +2376,7 @@ impl ComputerCell {
                             Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
                         }
                         let t = js::now_ms();
-                        match self.backup_dir(&g, dir, &left_out, until).await {
+                        match self.backup_dir(&g, dir, &left_out, checks_until).await {
                             Ok(record) => {
                                 took[if dir == "/data" { "home" } else { "work" }] = json!({ "bytes": record["size"], "ms": js::now_ms() - t, "tried": tried + 1 });
                                 records[at] = record;
@@ -2438,7 +2443,11 @@ impl ComputerCell {
     /// within what is left until `until`): a read that failed or ran out
     /// is `Unread`.
     async fn stored(&self, record: &Value, until: i64) -> Checked {
-        let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
+        let left = until - js::now_ms();
+        if left <= 0 {
+            return Checked::Unread("the save's time for its checks ran out".into());
+        }
+        let left = JsValue::from_f64(left as f64);
         let (Some(size), Some(sha256)) = (record["size"].as_u64(), record["sha256"].as_str()) else {
             return Checked::Unread("the record names no size or SHA-256".into());
         };

@@ -52,13 +52,14 @@ pub enum AfterCheck {
 /// directory may be backed up again as it was taken, its guest held as it
 /// was then (a save's home is taken under the hold, which an awake save
 /// lets go of before its work's: a home backed up after that could hold a
-/// copy torn as its guest writes).
+/// copy torn as its guest writes), and its save is still the one its
+/// lifecycle asked for (an owner's sleep or restart asks its own).
 pub fn after_check(checked: Checked, tried: u32, again: bool) -> AfterCheck {
     assert!(tried >= 1, "a record checked was backed up once at least");
     match checked {
         Checked::Whole => AfterCheck::Keep,
         Checked::Unread(why) => AfterCheck::Unchecked(why),
-        Checked::Damaged(why) if !again => AfterCheck::Fail(format!("{why}; its guest was let go since, so it is not backed up again")),
+        Checked::Damaged(why) if !again => AfterCheck::Fail(format!("{why}; not backed up again: its guest was let go since, or a newer save was asked")),
         Checked::Damaged(why) if tried >= SAVE_TRIES => AfterCheck::Fail(format!("{why} (it came out damaged {tried} times)")),
         Checked::Damaged(why) => AfterCheck::Again(why),
     }
@@ -96,7 +97,7 @@ mod tests {
             assert_eq!(after_check(damaged(), tried, true), AfterCheck::Again("R2's copy holds …".into()), "try {tried}");
         }
         assert!(matches!(after_check(damaged(), SAVE_TRIES, true), AfterCheck::Fail(why) if why.ends_with(&format!("(it came out damaged {SAVE_TRIES} times)"))));
-        assert!(matches!(after_check(damaged(), 1, false), AfterCheck::Fail(why) if why.contains("its guest was let go since")));
+        assert!(matches!(after_check(damaged(), 1, false), AfterCheck::Fail(why) if why.contains("its guest was let go since, or a newer save was asked")));
         for tried in 1..=SAVE_TRIES {
             assert_eq!(after_check(Checked::Unread("no answer within 10 ms".into()), tried, false), AfterCheck::Unchecked("no answer within 10 ms".into()));
         }
