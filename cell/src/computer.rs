@@ -243,6 +243,9 @@ const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 const TAKE_OVER_RETRY_MS: i64 = 60_000;
 /// The lever's `fail-starts` and `fail-takeover-destroys` count at most this.
 const LEVER_FAILS_MAX: u32 = 10;
+/// A save's check of R2's copy looks this often whether its save is still
+/// the one its lifecycle asks (`stored_while_asked`): a lifecycle read.
+const CHECK_LOOK_MS: u64 = 1_000;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
 /// the next save's, as a delete that failed is.
@@ -2354,12 +2357,19 @@ impl ComputerCell {
         // still a sleep's own save, its lifecycle read as it is asked (a wake
         // during its checks makes it an awake save, which goes on)
         let sleeps = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
+        // every record is taken: a sleep a wake cancelled as it saved holds
+        // its guest no longer (`HomeSaved` lets an awake save's go, once)
+        // than a save that is not a sleep's would, its checks never a
+        // wait for turns
+        if self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, unheld: false, .. }) if s == seq)) {
+            until += self.home_saved(generation, seq).await;
+        }
         let snapshot_after = sleeps() && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
         let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
             // bounded: at its last try `after_check` answers no Again
             for tried in 1..=fragment_core::computer::SAVE_TRIES {
-                let checked = self.stored(&records[at], checks_until).await;
+                let checked = self.stored_while_asked(&records[at], checks_until, generation, seq).await;
                 let next = fragment_core::computer::after_check(checked, tried, sleeps());
                 let why = match next {
                     AfterCheck::Keep => break,
@@ -2440,6 +2450,29 @@ impl ComputerCell {
         let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
         let record = self.call("backup", &[g.clone(), dir.into(), js::to_js(&json!(exclude)), left]).await?;
         js::from_js(&record).map_err(CellError::host)
+    }
+
+    /// `stored`, given up (`Unread`, its record kept unchecked, as master
+    /// keeps every one) once save `seq` of start `generation` is no longer
+    /// the one its lifecycle asks (an owner's sleep or restart asked its
+    /// own), looked at every `CHECK_LOOK_MS`: its alarm ends then, so that
+    /// one's owed start is never held up by this one's read.
+    async fn stored_while_asked(&self, record: &Value, until: i64, generation: u64, seq: u64) -> Checked {
+        let asked = || self.lifecycle().is_ok_and(|l| l.generation() == generation && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
+        if !asked() {
+            return Checked::Unread("a newer save was asked".into());
+        }
+        let given_up = async {
+            // bounded: by the read it races, which ends by `until`
+            while asked() {
+                Delay::from(std::time::Duration::from_millis(CHECK_LOOK_MS)).await;
+            }
+        };
+        let checked = match futures_util::future::select(Box::pin(self.stored(record, until)), Box::pin(given_up)).await {
+            futures_util::future::Either::Left((checked, _)) => checked,
+            futures_util::future::Either::Right(_) => Checked::Unread("a newer save was asked as it was checked".into()),
+        };
+        checked
     }
 
     /// What R2 holds of `record` against it (entry.mjs `stored`, read
