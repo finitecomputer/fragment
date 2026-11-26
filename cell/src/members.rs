@@ -1243,6 +1243,10 @@ impl FragmentCell {
         for agent in agents {
             let current = self.member_role(agent)?;
             if current == Some(role) {
+                // in already at that role, its person beside it here now: what
+                // its owner holds it at may apply where it did not (permit.rs
+                // `beside_person`), so its sockets are decided again
+                self.reopen_sockets(&format!("p:{agent}"), "your person is in here with you now");
                 continue;
             }
             self.exec(

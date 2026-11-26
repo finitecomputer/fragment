@@ -208,6 +208,9 @@ impl FragmentCell {
             caller
         };
         laps.lap("identity");
+        if path == "__live" && self.cfg.test_hooks {
+            self.held_live().await?;
+        }
         let resp = if let Some(op) = path.strip_prefix("__op/") {
             if req.method() != Method::Post {
                 return Err(CellError::invalid("call an operation with POST"));
@@ -359,6 +362,10 @@ impl FragmentCell {
             // router took only this fragment's own, lib.rs `own_page_socket`);
             // the CLI's and a computer's sign, and read a refusal's status
             let page = req.headers().get("origin")?.is_some() && !matches!(credential, Some(Credential::Key(_)));
+            // the share link it came by as it holds now, in the step that
+            // accepts the socket: one rotated while who it is was asked
+            // (the await above) opens nothing by it
+            let link = link && self.facts()?.view_token == facts.view_token;
             match self.live(&req, caller, credential, &principal, link) {
                 Ok(resp) => {
                     laps.lap("accept");

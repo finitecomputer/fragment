@@ -647,6 +647,18 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("advance-held") => json!({ "run": self.meta(MetaKey::TestAdvanceHeld)?.and_then(|r| r.parse::<i64>().ok()) }),
+            Some("hold-live") => {
+                // while on, a live socket's upgrade waits after who it is
+                // was asked (live.rs `held_live`), at most 20 s
+                if body["on"] == true {
+                    self.del_meta(MetaKey::TestLiveHeld)?;
+                    self.set_meta(MetaKey::TestHoldLive, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestHoldLive)?;
+                }
+                json!({ "ok": true })
+            }
+            Some("live-held") => json!({ "held": self.meta(MetaKey::TestLiveHeld)?.is_some() }),
             Some("hold-woke") => {
                 // while on, a wake with something due waits before it reads
                 // the ledger (jobs.rs `held_woke`), at most 20 s
