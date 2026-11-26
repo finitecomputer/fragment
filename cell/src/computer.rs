@@ -55,7 +55,7 @@ use std::collections::BTreeMap;
 
 use fragment_core::catalog::{self, AccountHost, Kind, Takes};
 use fragment_core::computer::{
-    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, AfterCheck, Checked, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
+    alive, awake_batch, disk_of_df, disk_of_sizes, sizes_read, unplanned_start, reads_disk_after, restore_found_no_room, does_simplex, image_running, notices, said, valid_version, version_running, Action, Checked, Alive, Event, Images, Lifecycle, NotChosen, Phase, Plan as Restore, Rules, VaultAsked, Save, SaveNote, Saves, Saving, Socket, Step, Wake, ALARM_LATE_MS, ALIVE_MS, DISK_READ, HOLD_DEADLINE_MS, HOLD_WAIT_MS, SAVE_DEADLINE_MS,
     SAVED_DIRS, SLEEP_DEADLINE_MS, START_DEADLINE_MS, STARTS_OWED_MAX,
 };
 use fragment_core::computer::start_line::{self, Facts, Starts, Woke};
@@ -2321,10 +2321,20 @@ impl ComputerCell {
         // each record's stored bytes and time, by what it holds
         let mut took = json!({});
         for dir in SAVED_DIRS {
+            // the guest's own state (its home) leaves its work out (a record
+            // of its own) and what it copied or named; its work leaves out
+            // only the caches it named in it
+            let (name, exclude) = match dir {
+                "/data" => ("home", std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>()),
+                // what it named in its work (its agents' caches), relative to it
+                _ => ("work", fragment_core::computer::work_left_out(&left_out)),
+            };
+            let exclude = js::to_js(&json!(exclude));
             let t = js::now_ms();
-            match self.backup_dir(&g, dir, &left_out, until).await {
+            let left = JsValue::from_f64((until - t).max(1) as f64);
+            match self.call("backup", &[g.clone(), dir.into(), exclude, left]).await.and_then(|r| js::from_js(&r).map_err(CellError::host)) {
                 Ok(record) => {
-                    took[if dir == "/data" { "home" } else { "work" }] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
+                    took[name] = json!({ "bytes": record["size"], "ms": js::now_ms() - t });
                     records.push(record);
                     // its home is in, the copies its guest made under the
                     // hold with it: an awake save lets go of its hold before
@@ -2344,66 +2354,6 @@ impl ComputerCell {
                 }
             }
         }
-        // each record checked against R2's own copy (FIN-784), once all are
-        // taken, within what their backups left: a check never takes the
-        // time a later backup needs, nor a sleep's forget pass and the most
-        // its snapshot is given after it (one that runs out keeps its record
-        // unchecked, as before). One that came out damaged is let go of
-        // (this save's forget pass deletes it) and, in a sleep's own save
-        // (its guest held to its end), backed up again; else the save
-        // fails, tried again: an awake save's backup could hold up the one
-        // an owner's sleep or restart asks meanwhile (the container takes
-        // one backup at a time), which an awake save's failure costs nothing
-        // still a sleep's own save, its lifecycle read as it is asked (a wake
-        // during its checks makes it an awake save, which goes on)
-        let sleeps = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
-        let snapshot_after = sleeps() && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
-        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
-        for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
-            // bounded: at its last try `after_check` answers no Again
-            for tried in 1..=fragment_core::computer::SAVE_TRIES {
-                let checked = self.stored_while_asked(&records[at], checks_until, generation, seq).await;
-                let next = fragment_core::computer::after_check(checked, tried, sleeps());
-                let why = match next {
-                    AfterCheck::Keep => break,
-                    AfterCheck::Unchecked(why) => {
-                        console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "backup": "unchecked", "dir": dir, "why": why }));
-                        break;
-                    }
-                    AfterCheck::Again(why) => {
-                        console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "backup": "saved again", "dir": dir, "tried": tried, "why": why }));
-                        let damaged = records[at].clone();
-                        match self.update_saves(|s| s.let_go(vec![damaged])) {
-                            Ok(lost) => {
-                                for record in lost {
-                                    console_error!("{}", json!({ "computer": id, "unforgotten": record["id"] }));
-                                }
-                            }
-                            Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
-                        }
-                        let t = js::now_ms();
-                        match self.backup_dir(&g, dir, &left_out, checks_until).await {
-                            Ok(record) => {
-                                took[if dir == "/data" { "home" } else { "work" }] = json!({ "bytes": record["size"], "ms": js::now_ms() - t, "tried": tried + 1 });
-                                records[at] = record;
-                                continue;
-                            }
-                            Err(e) => {
-                                records.remove(at);
-                                e.message
-                            }
-                        }
-                    }
-                    AfterCheck::Fail(why) => why,
-                };
-                console_log!("{}", json!({ "computer": id, "save": seq, "generation": generation, "dir": dir, "failed": why, "ms": js::now_ms() - t0 }));
-                match self.update_saves(|s| s.let_go(std::mem::take(&mut records))) {
-                    Ok(lost) => self.forget(lost).await,
-                    Err(kept) => console_error!("{}", json!({ "computer": id, "save": seq, "unforgotten": kept.message })),
-                }
-                return Event::SaveFailed { generation, seq, why };
-            }
-        }
         let bytes: u64 = records.iter().filter_map(|r| r["size"].as_u64()).sum();
         // a newer save of its start was kept as this one ran (its owner's
         // sleep, once its guest went on): never kept ahead of it
@@ -2420,7 +2370,10 @@ impl ComputerCell {
                 // one line per save (lesson 14): which, how big, how long,
                 // and its home's and its work's apart
                 console_log!("{}", json!({ "computer": id, "saved": save.number, "id": save.id, "generation": generation, "held": held, "leftOut": left_out, "bytes": bytes, "ms": js::now_ms() - t0, "home": took["home"], "work": took["work"] }));
-                Event::Saved { generation, seq }
+                match self.check_kept(&save, generation, seq, until, sleep_until).await {
+                    None => Event::Saved { generation, seq },
+                    Some(why) => Event::SaveFailed { generation, seq, why },
+                }
             }
             Err(e) => {
                 console_error!("{}", json!({ "computer": id, "save": seq, "generation": generation, "unkept": e.message }));
@@ -2429,61 +2382,78 @@ impl ComputerCell {
         }
     }
 
-    /// Backs up `dir` for start `g` within what is left until `until`,
-    /// leaving out what its held guest named (`left_out`): its record. The
-    /// guest's own state (its home) leaves its work out (a record of its
-    /// own) and what it copied or named; its work leaves out only the
-    /// caches it named in it.
-    async fn backup_dir(&self, g: &JsValue, dir: &str, left_out: &[String], until: i64) -> CellResult<Value> {
-        let exclude = match dir {
-            "/data" => std::iter::once(WORK_LEFT_OUT.to_string()).chain(left_out.iter().cloned()).collect::<Vec<_>>(),
-            // what it named in its work (its agents' caches), relative to it
-            _ => fragment_core::computer::work_left_out(left_out),
-        };
-        let left = JsValue::from_f64((until - js::now_ms()).max(1) as f64);
-        let record = self.call("backup", &[g.clone(), dir.into(), js::to_js(&json!(exclude)), left]).await?;
-        js::from_js(&record).map_err(CellError::host)
+    /// Save `save`, save `seq` of start `generation` just kept as master
+    /// keeps every save, checked against R2's own copy (FIN-784) while
+    /// nobody waits on it (`stored_while_asked`), within what its backups
+    /// left (`until`) and, a sleep's, before what its snapshot is given at
+    /// most (`sleep_until`, `snapshot_ms`). A record whose copy in R2 is
+    /// not it makes the save unusable, its own copy wrong (its next start
+    /// restores the one before, as a restore that found it would), and
+    /// fails the save, which its lifecycle tries again (a sleep keeps its
+    /// container, the save tried again a minute later): answers why. A
+    /// record whose check could not be made, or was given up, is kept
+    /// unchecked, as master keeps every one.
+    async fn check_kept(&self, save: &Save, generation: u64, seq: u64, until: i64, sleep_until: i64) -> Option<String> {
+        let id = self.meta(MetaKey::Id).ok().flatten();
+        let snapshot_after = self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { .. })) && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
+        let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS) } else { until };
+        for record in &save.records {
+            let dir = record["dir"].as_str().unwrap_or("?");
+            match self.stored_while_asked(record, checks_until, generation, seq).await {
+                Checked::Whole => {}
+                Checked::Unread(why) => console_log!("{}", json!({ "computer": id, "saved": save.number, "generation": generation, "backup": "unchecked", "dir": dir, "why": why })),
+                Checked::Damaged(why) => {
+                    let older = self.update_saves(|s| s.unusable(&save.id)).unwrap_or(false);
+                    console_log!("{}", json!({ "computer": id, "saved": save.number, "generation": generation, "backup": "damaged", "dir": dir, "why": why, "older": older }));
+                    return Some(format!("save {}'s {dir} came out damaged: {why}", save.number));
+                }
+            }
+        }
+        None
     }
 
-    /// `stored`, with its records all taken, never a wait for anyone: it
-    /// lets its guest go once a wake cancelled its sleep (`HomeSaved`, as
-    /// an awake save's home does), and is given up (`Unread`, its record
-    /// kept unchecked, as master keeps every one) once its save is no
-    /// longer the one its lifecycle asks (an owner's sleep or restart asked
-    /// its own) or a start is owed after it (an owner's restart, or a wake
-    /// after an owner's sleep, waits for its stop), looked at every
-    /// `CHECK_LOOK_MS`. A sleep's own save, nothing waiting, is read whole.
+    /// `stored`, never a wait for anyone, its lifecycle looked at every
+    /// `CHECK_LOOK_MS` as it reads: given up (`Unread`) once save `seq` of
+    /// start `generation` is no longer the one its lifecycle asks (a newer
+    /// save was asked), or someone waits on it (an owner's sleep or
+    /// restart, or a start owed after it); and its guest let go once a wake
+    /// cancelled its sleep (`HomeSaved`, as an awake save's home does),
+    /// that unhold carried through before the read is watched again.
     async fn stored_while_asked(&self, record: &Value, until: i64, generation: u64, seq: u64) -> Checked {
         let given_up = || match self.lifecycle() {
             Err(e) => Some(e.message),
-            Ok(l) if l.generation() != generation || !matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq) => Some("a newer save was asked".into()),
-            Ok(l) if matches!(l.phase, Phase::Sleeping { owes_start: true, .. }) => Some("a start is owed after it".into()),
+            Ok(l) if l.generation() != generation || !matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq) => Some("a newer save was asked".to_string()),
+            Ok(l) if matches!(l.phase, Phase::Sleeping { owner: true, .. } | Phase::Sleeping { owes_start: true, .. }) => Some("someone waits on its sleep".to_string()),
             Ok(_) => None,
         };
         let woken = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, unheld: false, .. }) if s == seq));
-        if let Some(why) = given_up() {
-            return Checked::Unread(why);
-        }
-        if woken() {
-            self.home_saved(generation, seq).await;
-        }
-        let watched = async {
-            // bounded: by the read it races, which ends by `until`
-            loop {
-                Delay::from(std::time::Duration::from_millis(CHECK_LOOK_MS)).await;
-                if let Some(why) = given_up() {
-                    break why;
-                }
-                if woken() {
-                    self.home_saved(generation, seq).await;
-                }
+        let mut read = Box::pin(self.stored(record, until));
+        // whether its unhold was asked (once, whatever it answered)
+        let mut released = false;
+        let (given_up, woken) = (&given_up, &woken);
+        // bounded: a pass ends at the read, given up, or the one unhold, and
+        // the read ends by `until`
+        loop {
+            if let Some(why) = given_up() {
+                return Checked::Unread(why);
             }
-        };
-        let checked = match futures_util::future::select(Box::pin(self.stored(record, until)), Box::pin(watched)).await {
-            futures_util::future::Either::Left((checked, _)) => checked,
-            futures_util::future::Either::Right((why, _)) => Checked::Unread(format!("{why} as it was checked")),
-        };
-        checked
+            if !released && woken() {
+                released = true;
+                self.home_saved(generation, seq).await;
+            }
+            let watched = async move {
+                loop {
+                    Delay::from(std::time::Duration::from_millis(CHECK_LOOK_MS)).await;
+                    if given_up().is_some() || (!released && woken()) {
+                        break;
+                    }
+                }
+            };
+            match futures_util::future::select(read, Box::pin(watched)).await {
+                futures_util::future::Either::Left((checked, _)) => return checked,
+                futures_util::future::Either::Right(((), still)) => read = still,
+            }
+        }
     }
 
     /// What R2 holds of `record` against it (entry.mjs `stored`, read

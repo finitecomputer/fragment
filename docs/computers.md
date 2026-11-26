@@ -542,46 +542,35 @@ the DO removes them from one started from a snapshot.
 - **Every save and restore is checked end to end** (FIN-784): bytes have
   come the right length with the wrong contents on their way into or out
   of a container (FIN-775). The SDK's shim hashes each archive as it makes
-  it (its record's SHA-256), but R2 checks a part's length alone. So once
-  a save's records are all taken, each is read back from R2 and kept once
-  R2's own copy hashes to it (`fragment_core::computer::after_check`): a
-  check never takes the time a later backup needs, nor what a sleep's
-  snapshot is given at most after it, nor its forget pass before that
-  (`SNAPSHOT_MAX_MS`, `FORGET_PASS_MS`; a restart, whose start is fresh,
-  takes no snapshot). One that came out damaged is let go of (the save's
-  forget pass deletes it) and, in a sleep's own save (its guest held to its
-  end), backed up again, three tries in all, within the save's own bound;
-  an awake save fails instead, tried again as any at no cost (its computer
-  is awake, its last save kept), as its backup could hold up the one an
-  owner's sleep or restart asks meanwhile (the container takes one backup
-  at a time). A check that
-  cannot be made (R2 failed its read, or the save's time ran out) keeps
-  the record unchecked, as before the check, and logs it: a save that fits
-  its bounds is never failed for want of its check. A restore whose bytes
-  came damaged (the SDK's `BACKUP_INTEGRITY`) is asked again at once, and
-  R2's copy is read beside the tries after it (`cell/backups.mjs`), which
-  never wait for it: when two reads agree it is not its record, the save is
-  unusable, as above, once a try beside them failed too; otherwise (a read
-  that failed too) the restore is asked again, three tries in all, within
-  its own bound, and a start whose tries all came damaged fails as one that
-  may pass, its save kept. A save's checks are never a wait for anyone,
-  looked at every second as they read: a sleep a wake cancelled lets its
-  guest go once its records are all taken, as an awake save does after its
-  home; and a check is given up, its record kept unchecked as before the
-  check, once its save is no longer the one its lifecycle asks (an owner's
-  sleep or restart asked its own) or a start is owed after it (an owner's
-  restart, or a wake that came during an owner's sleep, waits for its
-  stop). So an idle sleep's save, and an owner's sleep's that nothing waits
-  on, are checked; a restart's is kept as before, and its start's restore
-  checks it. A start after a failed one reads R2's copy
-  beside its first try too, so a copy damaged in R2 is found even when a
-  long restore comes damaged with no time left to read it after (an 8 GB
-  save's): the next wake goes back, as it must. A later start's save kept, an earlier start's
-  that lands after it is never kept ahead of it (`Saves::overtaken`). A restore that works reads nothing more. R2's
-  copy is read and hashed by the backups' gateway
-  (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
-  through the container. Damage before the shim's hash (in the
-  container's own reading of its files) is out of reach.
+  it (its record's SHA-256), but R2 checks a part's length alone.
+  - **A save** is taken and kept as before, then, while nobody waits on it
+    (an idle sleep's, an awake save's), each record is read back from R2
+    and hashed (`check_kept`), looked at every second
+    (`CHECK_LOOK_MS`): a check is given up, its record kept unchecked as
+    before, once someone waits (an owner's sleep or restart, a start owed
+    after it) or a newer save is asked, and a sleep a wake cancelled lets
+    its guest go then. It never takes the time a later step needs: it ends
+    by its backups' bound, and a sleep's before what its snapshot is given
+    at most (`SNAPSHOT_MAX_MS`). A record whose copy in R2 is not it makes
+    the save unusable (R2's own copy wrong) and fails it, and its
+    lifecycle takes it again: a sleep keeps its container and tries a
+    minute later, an awake save at its next. A restart's save, which its
+    owner waits on, is kept as before, and its start's restore checks it.
+  - **A restore** whose bytes came damaged (the SDK's `BACKUP_INTEGRITY`)
+    is asked again at once, and R2's copy is read beside the tries after
+    it (`cell/backups.mjs`), which never wait for it: when two reads agree
+    it is not its record, the save is unusable, as above, once a try
+    beside them failed too; otherwise (a read that failed too) the restore
+    is asked again, three tries in all, within its own bound, and a start
+    whose tries all came damaged fails as one that may pass, its save
+    kept. A start after a failed one reads R2's copy beside its first try
+    too, so a copy damaged in R2 is found even when a long restore comes
+    damaged with no time left to read it after (an 8 GB save's). A first
+    start's restore that works reads nothing more.
+  - R2's copy is read and hashed by the backups' gateway
+    (entry.mjs `DirectoryBackupGateway.stored`), a call of its own, never
+    through the container. Damage before the shim's hash (in the
+    container's own reading of its files) is out of reach.
 - **A save too big for its disk is set aside** (Paul, 2026-11-20:
   "rollback is preferred to being stuck"). A restore can need a little
   more room than the life that saved it used: the sandbox runtime stops
@@ -867,8 +856,8 @@ deadline for its phase, checked as the cell compiles. A save's steps run
 in the Durable Object alarm whose events asked for them, which Cloudflare
 ends at 15 minutes: a sleep's hold, save and stop fit one alarm, and its
 backups get what the rest leaves (`BACKUPS_MS`, 11 minutes 10 seconds),
-each record's read back from R2 and hashed within it (above, "Every save
-and restore is checked end to end").
+its records' checks what they leave of it (above, "Every save and restore
+is checked end to end").
 That is the most any save can have, so it is fixed, not one that follows
 a save's progress. Saves over 1 GB moved 9 to 156 MB/s on production
 (2026-10-27 to 11-03), so a full disk's save (about 10.8 GB) fits all but
