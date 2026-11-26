@@ -436,6 +436,7 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
+        assert!(names.contains("team-rooms"), "what a turn in a door's room is told cites it (FIN-508: images/bridge note.rs `place`)");
         // a connection's skill is its docs and its quirks, and no code: the
         // one caller is `fragment connection call` (FIN-509)
         assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");
