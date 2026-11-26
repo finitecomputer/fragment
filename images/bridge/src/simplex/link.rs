@@ -787,13 +787,18 @@ impl Link {
     }
 
     /// The catch-up's end: what it read after what was delivered,
-    /// forwarded oldest first. One that ended short of it (past `SCAN_MAX`,
-    /// or its next page's anchor gone) tells the owner a message may not
-    /// have arrived: what came before it in that gap is not carried.
+    /// forwarded oldest first, but what its chat holds already (`posted`):
+    /// what was delivered stays before a message that wasn't posted, so a
+    /// start reads past ones that were, and a door given this link posts
+    /// into a chat of its own, where no record's id finds them twice
+    /// (Codex's fix-check of c55a7ae64). One that ended short of it (past
+    /// `SCAN_MAX`, or its next page's anchor gone) tells the owner a
+    /// message may not have arrived: what came before it in that gap is
+    /// not carried.
     fn finish_scan(&mut self, reached: bool, out: &mut Vec<Action>) {
         let mut scan = std::mem::take(&mut self.scan.items);
         self.scan.running = false;
-        scan.retain(|i| i.id > self.delivered);
+        scan.retain(|i| i.id > self.delivered && !self.posted.iter().any(|(_, p)| *p == i.id));
         scan.sort_by_key(|i| i.id);
         self.items(&scan, out);
         if !reached {
@@ -1257,6 +1262,15 @@ mod tests {
         assert_eq!(forwarded(&live), vec![52]);
         link.apply(Input::Started { rollback: false });
         assert_eq!(forwarded(&link.apply(Input::Said(&page(21..=52)))), vec![44, 46, 47, 49, 50, 52], "what was never confirmed, again");
+        // 44 never posted (what was delivered stays before it), 46 posted
+        // after it: read back, 44 again, never 46, here or in a door's own
+        // chat given this link (Codex's fix-check of c55a7ae64)
+        link.apply(Input::Posted { seq: 9, item: 46 });
+        let mut moved = Link::from_json(&link.to_json()).expect("it reads back");
+        for l in [&mut link, &mut moved] {
+            l.apply(Input::Started { rollback: false });
+            assert_eq!(forwarded(&l.apply(Input::Said(&page(21..=52)))), vec![44, 47, 49, 50, 52], "what its chat holds, never twice");
+        }
         // its anchor gone (a disappearing message): the scan ends with what it read
         link.apply(Input::Started { rollback: false });
         link.apply(Input::Said(&page(100..=131)));

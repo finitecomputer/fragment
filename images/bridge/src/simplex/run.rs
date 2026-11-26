@@ -1528,13 +1528,6 @@ impl Manager {
                     Some("files are on their way")
                 } else if !s.outstanding.is_empty() || !s.pending.is_empty() {
                     Some("messages are on their way")
-                } else if s.gap {
-                    // a message this life didn't post (`gap`): its cursor stands
-                    // before it, so a door would deliver it and every one after
-                    // it again, into a chat of its own where nothing is
-                    // deduplicated, and its agent answer them twice; its next
-                    // start carries it (Codex's round on 6e6b1e955)
-                    Some("a message waits for its computer's next start (restart it)")
                 } else {
                     None
                 };
@@ -4442,7 +4435,7 @@ mod tests {
         assert_eq!((r.status, r.code), (409, Some("not_linked")));
         unmarked("not bound");
         m.slots.get_mut(f).expect("its slot").saved.link.phase = Phase::Linked { contact: 3, name: "paul".into() };
-        for (n, busy) in ["working", "receiving", "outstanding", "gap"].into_iter().enumerate() {
+        for (n, busy) in ["working", "receiving", "outstanding"].into_iter().enumerate() {
             let s = m.slots.get_mut(f).expect("its slot");
             match busy {
                 "working" => {
@@ -4451,7 +4444,6 @@ mod tests {
                 "receiving" => {
                     s.saved.receiving.insert(9);
                 }
-                "gap" => s.gap = true,
                 _ => {
                     s.outstanding.insert(40);
                 }
@@ -4463,7 +4455,6 @@ mod tests {
             s.working.clear();
             s.saved.receiving.clear();
             s.outstanding.clear();
-            s.gap = false;
         }
         let mut forged = signed("handover", &"02".repeat(16));
         forged.sig = "ab".repeat(64);
