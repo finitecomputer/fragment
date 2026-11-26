@@ -562,7 +562,7 @@ impl FragmentCell {
             return Err(CellError::invalid(format!("{op} is not a query: only queries run over the live socket (call it through __op)")));
         }
         socket_reads(st.role, decl.role)?;
-        let inv = Invocation { principal: &st.principal, asker: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
+        let inv = Invocation { principal: &st.principal, asker: None, other: None, role: st.role, op, decl, id: id.to_string(), input, depth: 0, via: Via::Call, trigger: None };
         self.invoke(inv).await
     }
 

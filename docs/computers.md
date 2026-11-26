@@ -250,7 +250,14 @@ Not built either:
   reaches another), and the door posts its
   owner's messages to the connector's inbox as a webhook does, which
   publishes each to the bound agent; the agent's computer wakes for it as
-  for any message, so it may sleep. Settings makes one for every seat,
+  for any message, so it may sleep. It carries files both ways (S1): its
+  owner's (a voice message, a photo) received by its core and given to the
+  door, which holds each a moment under `doors/<door>/files/` until its
+  connector keeps it as one of the chat's blobs; a reply's, which the bound
+  agent uploads to the connector's chat (a viewer there, it may upload its
+  replies' files), given to the door by its connector and sent after the
+  reply's text; its core's XFTP traffic through the door's relay (below).
+  Settings makes one for every seat,
   its setup page showing the invitation's QR code (D3); an always-on
   computer that does SimpleX keeps each agent's own (decision 32) until
   existing links move to doors.
@@ -526,12 +533,23 @@ the DO removes them from one started from a snapshot.
   saying whether its guest answered (`held`).
 - **A wake restores the current save**, the newest not set aside nor found
   unusable. A
-  start whose save will never restore (its archive gone or altered)
-  marks it unusable and starts again at once from the one before, with no
-  strike against the computer. A read of its archive that storage failed
-  (R2 answered an error) is asked again a few times within the restore
-  (`cell/backup-reads.mjs`), since the SDK's shim would fail the whole
-  start on one.
+  start whose save will never restore (its archive gone, or R2's own copy
+  not its record) marks it unusable and starts again at once from the one
+  before, with no strike against the computer. A read of its archive that
+  storage failed (R2 answered an error) is asked again a few times within
+  the restore (`cell/backups.mjs`), since the SDK's shim would fail the
+  whole start on one.
+- **A restore whose bytes came damaged is asked again** (FIN-784): bytes
+  have come the right length with the wrong contents on their way into a
+  container (FIN-775). The SDK's shim checks what a restore downloads
+  against its record's size and SHA-256 (the shim's own hash of what it
+  made) and reports a mismatch as `BACKUP_INTEGRITY`. Such a restore is
+  asked again at once, three tries in all within its own bound
+  (`cell/backups.mjs`), and a save is found unusable, as above, only once
+  every try came damaged, or a try after a damaged one failed otherwise.
+  Damage on the way in is rare enough that three in a row say the copy
+  itself is bad. A save is still checked for length alone as it reaches
+  R2; FPAC's checksummed blocks replace saves (FIN-744).
 - **A save too big for its disk is set aside** (Paul, 2026-11-20:
   "rollback is preferred to being stuck"). A restore can need a little
   more room than the life that saved it used: the sandbox runtime stops
@@ -849,7 +867,10 @@ sleep answers within 14 minutes.
   sign its hash, at most 32 MiB, but a blob's upload (`PUT
   /api/f/{name}/blobs/{sha256}`): that streams through with its declared
   length and no payload hash, as from the internet (the signature binds
-  the URL, which names the hash), at most `BLOB_MAX_BYTES`.
+  the URL, which names the hash), at most `BLOB_MAX_BYTES`. A request
+  `for` its owner is signed as whose ask the agent's open turns prove
+  (below; docs/api.md, "An agent's computer proves who asked"): its `for`
+  traded for their mandate, or for none where it acts as itself, or 403.
 - Without the header only the computer's own routes answer:
   - `GET /api/computer`: its own view, proto's `ComputerView` without
     `notices` and with what only the guest is given: each agent's
@@ -872,6 +893,25 @@ sleep answers within 14 minutes.
     redeemed with its door's public key (docs/api.md, "An agent's
     doors").
   - `GET /api/computer/relay?host=&port=`: the XFTP relay, below.
+  - `PUT /api/computer/turns {life, generation, turn, place, asker?,
+    mandate?}`, as the agent its header names: a turn it runs, before its
+    runtime hears of it: whose ask it is (none, app code's words) and the
+    mandate its record carried. `DELETE /api/computer/turns {life,
+    generation, turn}` as it ends, and `{life, generation}` at the
+    bridge's start. Each names the bridge life it is and its computer's
+    start (`generation`, as `GET /api/computer` said it when the bridge
+    started; `mandate::heard`): a new life of that start or a later one
+    takes the agent's turns (every other life's forgotten: one computer
+    runs one bridge), and any other is retired, its word refused (409)
+    and changing nothing, a late first word from a container gone among
+    them. Lives are ordered within the computer the agent runs on (another
+    computer's starts are not comparable): run on another, its bridge's
+    first word takes over. The agent's
+    fragment holds at most `TURNS_HELD_MAX`, each for at most
+    `TURN_HELD_MS`; a mandate that does not check holds that turn
+    unproven, never refused. A platform from before sends it on to its
+    API, which has no such route (404): a bridge takes that as nothing to
+    tell.
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.
@@ -899,6 +939,14 @@ relay` says why and holds its bounds). Only the targets the view's
 it); past a bound the socket closes with code 4008. The platform sees the
 host, the port, the byte counts and the times, never what is carried. Any
 process in the computer may use it.
+
+A SimpleX door's container has the same relay (`GET /relay?host=&port=`
+at `door.fragment.internal`: entry.mjs `DoorEgress`, `DoorRelay.target` in
+cell/src/doors.rs, relay.mjs pipes both): the same targets and each
+relay's bounds, its runner opening at most `relay::OPEN_MAX` at once. It
+keeps no day's budget of its own: a door runs no one's code but the
+platform's, and carries only its owner's files and its agent's replies'
+files, each bounded by its runner and the door's holding.
 
 ### Connector policy
 
@@ -1091,6 +1139,13 @@ provider's own hosts.
   (`grants::Owed`): an agent's next ask carries its row, taken whole by a
   fragment holding none of its own and ignored by one that does
   (`grants::answered`), then forgotten.
+- **Someone else's ask** (FIN-720). While a turn of anyone but its owner
+  is open, the agent uses what its owner lends that place (docs/api.md,
+  "An agent's lend"), asked of the place by its agent's fragment with its
+  grants at each request: an operator key by `spend`, a connection or a
+  Vault secret by `accounts`. One not
+  lent is refused before any provider (403, saying the owner hasn't lent
+  it), and a Vault's fill is never asked for.
 - Each call a provider answered is counted as its agent's in the owner's
   ledger (docs/ledger.md, "Usage"), after the answer; an operator key's
   is charged to its agent's owner too. A computer from before kept its

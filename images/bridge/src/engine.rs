@@ -411,6 +411,17 @@ pub struct Turn {
     /// whoever its principal names. A state from before holds none.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_code: bool,
+    /// The proof of whose ask it is, as its cause's record carried it
+    /// (`Record::mandate`), told to its agent's fragment as its claim is
+    /// answered (`Told`). A state from before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate: Option<String>,
+    /// Started by another agent of this computer's words in its chat (a
+    /// hand-off): no ask of that agent's own, but the ask of the turn they
+    /// were said in, carried on as that turn was told it ("" no one's, as
+    /// when that turn is not known). A state from before holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handed_ask: Option<String>,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
     /// Where its attachments' blobs are, when not its chat's: an answer's
@@ -560,7 +571,7 @@ pub enum Input {
     /// held, with the chat's journal read for it (`work` back to the card's
     /// turn, `chat` back to the card, the turn's cause), or why it could
     /// not be, finally (`Engine::card_record`).
-    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, history: Result<crate::history::Journal, crate::history::Unavailable> },
+    CardRecord { agent: String, fragment: String, record: Record, view: Option<ChatView>, since: i64, history: Box<Result<crate::history::Journal, crate::history::Unavailable>> },
     /// What a runtime said, by its name (`with_runtime`).
     Runtime { runtime: String, event: Event },
     /// The platform's answer to a live answer's closure (`Effect::Fence`).
@@ -598,6 +609,22 @@ pub enum Input {
     ComputerAnswer { agent: String, turn: String, prompt: String, option: String, words: String, reply: u64 },
 }
 
+/// A turn as its agent's fragment is told it runs (docs/api.md, "Who
+/// asked: mandates"): where, whose ask (its owner's for its own words, a
+/// routine, or another agent of this computer's answer; `None` for app
+/// code's words, no one's), and its proof. The agent's calls for its owner
+/// then carry whose ask they are.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Told {
+    pub place: String,
+    pub asker: Option<String>,
+    pub mandate: Option<String>,
+    /// Someone else's ask heard with no proof (a record heard live: the
+    /// platform gives a mandate only beside a record read over its API):
+    /// its record, which the driver reads once for it before telling.
+    pub unproven: Option<Cause>,
+}
+
 /// What the engine asks the driver to do, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -606,8 +633,9 @@ pub enum Effect {
     Post { agent: String, fragment: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
     /// A turn's claim: its `turn.start` on `work` as this life, posted in
     /// its fragment's order unless the computer is held, and answered back
-    /// as `Input::Claimed`. The runtime hears of the turn only after.
-    Claim { agent: String, fragment: String, turn: String, id: String, body: Value },
+    /// as `Input::Claimed`; told, before that answer, to its agent's
+    /// fragment (`told`). The runtime hears of the turn only after.
+    Claim { agent: String, fragment: String, turn: String, id: String, body: Value, told: Told },
     /// A live card answer's closure on `work`, posted in its fragment's
     /// order and answered back as `Input::Fenced`: the runtime has the
     /// answer only once the journal holds it, so a life rolled back to
@@ -795,6 +823,9 @@ struct EndedTurn {
     fragment: String,
     hop: u32,
     at: u64,
+    /// Whose ask it was, as it was told (`Told::asker`): a hand-off read
+    /// after it is let go carries it on.
+    asked: Option<String>,
 }
 
 pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
@@ -964,7 +995,7 @@ impl Engine {
             Input::Disk(Some(read)) if self.disk.is_none_or(|newest| read.at >= newest.at) => self.disk = Some(read),
             Input::Disk(_) => {}
             Input::Record { agent, fragment, record, view, since } => self.record(&agent, &fragment, record, view, since),
-            Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, history),
+            Input::CardRecord { agent, fragment, record, view, since, history } => self.card_record(&agent, &fragment, record, view, since, *history),
             Input::Runtime { runtime, event } => self.runtime(&runtime, event),
             Input::Claimed { turn, answer } => self.claimed(&turn, answer),
             Input::CutRead { turn, waited } => self.cut_read(&turn, waited),
@@ -1170,6 +1201,13 @@ impl Engine {
                 let as_owner = Record { principal: agent.owner.clone(), ..record };
                 self.said(&agent, fragment, &as_owner);
             }
+            // what the platform wrote for someone (a schedule's fire, for
+            // its maker) is their words, as theirs: its turn is their ask,
+            // and they answer and stop it (FIN-720)
+            records::CHAT if record.written_for().is_some_and(|a| a != agent.identity) => {
+                let principal = record.written_for().expect("matched").to_string();
+                self.said(&agent, fragment, &Record { principal, ..record });
+            }
             // the agent's own words are not for it
             records::CHAT if record.principal != agent.identity => self.said(&agent, fragment, &record),
             records::TASKS if fragment == agent.fragment => {
@@ -1216,7 +1254,7 @@ impl Engine {
         let names = self.views.get(fragment).map(|v| v.names.clone()).unwrap_or_default();
         let name = |p: &str| names.get(p).cloned().unwrap_or_else(|| "someone".into());
         let resolved = history.and_then(|j| crate::cards::resolve(&a, &record, &j.work, &j.chat, j.cause.as_ref(), name, self.now));
-        let (seq, at, asker) = (record.seq, record.at, record.principal.clone());
+        let (seq, at, asker, mandate) = (record.seq, record.at, record.principal.clone(), record.mandate.clone());
         self.record(agent, fragment, record, view, since);
         match resolved {
             Ok(None) => {}
@@ -1235,7 +1273,7 @@ impl Engine {
                 let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
                 let id = records::turn_id(agent, fragment, records::CHAT, seq);
                 let m = Message { text: fresh.text, to: vec![a.identity.clone()], attachments: Vec::new(), turn: None, hop: 0, reply_to: None, return_to: None, attachments_in: None };
-                self.admit(&a, fragment, cause, at, &asker, name(&asker), &m, 0, Ask::Message);
+                self.admit(&a, fragment, cause, at, (&asker, mandate), name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
                     t.late = Some(fresh.late);
@@ -1311,7 +1349,7 @@ impl Engine {
                         false => view.names.get(&record.principal).cloned().unwrap_or_else(|| "someone".into()),
                     };
                     let cause = Cause { fragment: fragment.to_string(), channel: record.channel.clone(), seq: record.seq };
-                    self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
+                    self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &m, hop, if code { Ask::Code } else { Ask::Message });
                 }
             }
             Said::Stop { turn } => self.stop(agent, fragment, &record.principal, turn.as_deref()),
@@ -1349,14 +1387,14 @@ impl Engine {
         let has_args = !c.args.is_empty();
         let running = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.active()).map(|t| t.id.clone());
         match item.how {
-            _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default())),
+            _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default())),
             How::Stop => self.stop_all(&agent.fragment, fragment),
             How::Restart => {
                 self.stop_all(&agent.fragment, fragment);
-                self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command);
+                self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_command, 0, Ask::Command);
             }
-            How::Message if has_args => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
-            How::Steer if has_args && running.is_none() => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_message, 0, Ask::Message),
+            How::Message if has_args => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_message, 0, Ask::Message),
+            How::Steer if has_args && running.is_none() => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_message, 0, Ask::Message),
             How::Steer | How::Aside if has_args => {
                 let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
                 let turn = running.filter(|_| item.how == How::Steer);
@@ -1366,7 +1404,7 @@ impl Engine {
                 let runtime = self.runtime_of(&agent.fragment);
                 self.out.push(Effect::Runtime { runtime, command: Command::Aside { agent: agent.fragment.clone(), fragment: fragment.to_string(), chat_name: label(fragment).to_string(), simplex, turn, id, by: record.principal.clone(), by_name: asker_name, text } });
             }
-            _ => self.admit(agent, fragment, cause, record.at, &record.principal, asker_name, &as_command, 0, Ask::Command),
+            _ => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_command, 0, Ask::Command),
         }
     }
 
@@ -1391,7 +1429,7 @@ impl Engine {
                 let cause = Cause { fragment: agent.fragment.clone(), channel: record.channel.clone(), seq: record.seq };
                 let m = Message { text, ..Message::default() };
                 let owner = agent.owner.clone();
-                self.admit(agent, &chat, cause, record.at, &owner, "your routine".into(), &m, 0, Ask::Routine);
+                self.admit(agent, &chat, cause, record.at, (&owner, record.mandate.clone()), "your routine".into(), &m, 0, Ask::Routine);
             }
             Task::Joined { fragment } => self.out.push(Effect::Discover { agent: agent.fragment.clone(), joined: fragment }),
             // Only its own bridge answers it (as itself, `owe_answer`): a
@@ -1413,7 +1451,7 @@ impl Engine {
                 // end saying why: no runtime hears it, so nothing asks again
                 let ask = if refused { Ask::Refused(&text) } else { Ask::Message };
                 let hop = if refused { 0 } else { hop.clamp(1, limits::HOPS_MAX) };
-                self.admit(agent, &chat, cause, record.at, &by, name, &m, hop, ask);
+                self.admit(agent, &chat, cause, record.at, (&by, None), name, &m, hop, ask);
             }
             Task::Answer { .. } => crate::ev!("task.ignored", { "agent": agent.fragment, "seq": record.seq, "why": "only the agent's own bridge posts its answers" }),
             Task::Other => {}
@@ -1516,7 +1554,7 @@ impl Engine {
     /// platform's time); `hop` past zero is a hand-off from another agent,
     /// which the chat's budget counts.
     #[allow(clippy::too_many_arguments)]
-    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, asker: &str, asker_name: String, m: &Message, hop: u32, ask: Ask) {
+    fn admit(&mut self, agent: &Agent, fragment: &str, cause: Cause, at: i64, (asker, mandate): (&str, Option<String>), asker_name: String, m: &Message, hop: u32, ask: Ask) {
         let id = records::turn_id(&agent.fragment, &cause.fragment, &cause.channel, cause.seq);
         if self.state.turns.contains_key(&id) {
             // The cursor makes this impossible; a state that says otherwise
@@ -1549,6 +1587,11 @@ impl Engine {
             Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
+        // another agent of this computer's words in a chat: the ask of the
+        // turn they were said in, carried on (FIN-720), never its owner's
+        // by being theirs
+        let handed_ask = (ask == Ask::Message && cause.channel == records::CHAT && self.agents.iter().any(|a| a.identity == asker))
+            .then(|| self.ask_said_in(asker, fragment, m.turn.as_deref()).unwrap_or_default());
         let turn = Turn {
             id: id.clone(),
             agent: agent.fragment.clone(),
@@ -1557,6 +1600,8 @@ impl Engine {
             asker: asker.to_string(),
             asker_name,
             by_code: ask == Ask::Code,
+            mandate,
+            handed_ask,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
             attachments_in: m.attachments_in.clone(),
@@ -1819,6 +1864,8 @@ impl Engine {
             asker: cut.asker,
             asker_name: CONTINUE_ASKER.into(),
             by_code: cut.by_code,
+            mandate: cut.mandate,
+            handed_ask: cut.handed_ask,
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
             attachments_in: None,
@@ -1885,9 +1932,47 @@ impl Engine {
         let t = &self.state.turns[&id];
         let body = records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life);
         let fragment = t.fragment.clone();
+        let told = self.told_as(t);
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
-        self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body });
+        self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body, told });
+    }
+
+    /// Whose ask the turn `named` was, that agent `poster` (an identity of
+    /// this computer's) said words in, in `fragment`: its own turn there,
+    /// running, or ended a moment ago (its replies read after it is let
+    /// go, as `hop_of` reads its hop); none such, no one's.
+    fn ask_said_in(&self, poster: &str, fragment: &str, named: Option<&str>) -> Option<String> {
+        let (named, poster) = (named?, self.agents.iter().find(|a| a.identity == poster)?);
+        let its_own_here = |agent: &str, place: &str| agent == poster.fragment && place == fragment;
+        if let Some(t) = self.state.turns.get(named).filter(|t| its_own_here(&t.agent, &t.fragment)) {
+            return self.told_as(t).asker;
+        }
+        let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
+        self.ended.iter().rev().filter(fresh).find(|e| e.id == named && its_own_here(&e.agent, &e.fragment)).and_then(|e| e.asked.clone())
+    }
+
+    /// How a turn is told to its agent's fragment (`Told`): its owner's ask
+    /// for what is theirs or one entity's with them (their words, a routine,
+    /// another agent of this computer's answer: they are all its owner's
+    /// agents); a hand-off as the ask it carries on; no one's for app
+    /// code's words; anyone else's as them, with the proof its cause carried.
+    fn told_as(&self, t: &Turn) -> Told {
+        // a hand-off is the ask it carries on, with no proof of its own (a
+        // mandate names the agent it was given to): held unproven
+        if let Some(asker) = &t.handed_ask {
+            return Told { place: t.fragment.clone(), asker: (!asker.is_empty()).then(|| asker.clone()), mandate: None, unproven: None };
+        }
+        let owner = self.agent(&t.agent).map(|a| a.owner.clone()).unwrap_or_default();
+        let ours = t.asker == owner || self.agents.iter().any(|a| a.identity == t.asker);
+        let asker = match (t.by_code, ours) {
+            (true, _) => None,
+            (false, true) => Some(owner),
+            (false, false) => Some(t.asker.clone()),
+        };
+        let mandate = t.mandate.clone().filter(|_| !t.by_code);
+        let unproven = (!t.by_code && !ours && mandate.is_none()).then(|| t.cause.clone());
+        Told { place: t.fragment.clone(), asker, mandate, unproven }
     }
 
     /// Whether a turn of the agent's that a restart cut in the chat is not
@@ -2757,6 +2842,7 @@ impl Engine {
             open.held = false;
         }
         self.seal(id, false);
+        let asked = self.state.turns.get(id).and_then(|t| self.told_as(t).asker);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         // a live answer still held goes with it: the runtime never had it
@@ -2769,7 +2855,7 @@ impl Engine {
         let (agent, fragment, hop) = (t.agent.clone(), t.fragment.clone(), t.hop);
         self.dirty = true;
         // its replies may be read after it is let go: one hop past it
-        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
+        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now, asked });
         while self.ended.len() > limits::ENDED_HOPS_MAX {
             self.ended.pop_front();
         }

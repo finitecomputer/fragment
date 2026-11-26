@@ -72,8 +72,9 @@
 //! - a message quoting another carries Hermes' quoted reply.
 //!
 //! Every inbound is kept until Hermes acks it and handed again on its next
-//! dial (Hermes drops one it saw, by message id). A new dial replaces the
-//! one before.
+//! dial (Hermes drops one it saw, by message id), but a stopped turn's: one
+//! stopped or let go before Hermes took it is never handed again. A new
+//! dial replaces the one before.
 
 pub mod fetch;
 pub mod menu;
@@ -662,7 +663,11 @@ impl Loop {
     async fn command(&mut self, c: Command) {
         match c {
             Command::Start(ts) => self.start(*ts),
-            Command::Stop { turn } => {
+            // A turn let go by the bridge (gone quiet, its agent gone) is
+            // stopped as a Stop stops it, as Claude Code's is: once its
+            // proof is gone it goes on as no one's ask (FIN-720). Its end,
+            // should one come, is stale to the engine, which let it go.
+            Command::Stop { turn } | Command::Forget { turn } => {
                 let Some(f) = self.inflight.get_mut(&turn) else { return };
                 if f.acked || f.sent {
                     // Hermes has it (or may): interrupt it now, and again at
@@ -709,7 +714,6 @@ impl Loop {
                     self.tell(&turn, seq, &by, "owner", &words, &[]);
                 }
             }
-            Command::Forget { turn } => self.forget(&turn),
             Command::Tell { turn, seq, by, by_name, text, files, voice, .. } => self.tell(&turn, seq, &by, &by_name, &text, if voice { &files } else { &[] }),
             Command::Aside { agent, fragment, chat_name, simplex, turn, id, by, by_name, text } => {
                 // in the agent's chat, as it is, kept until Hermes acks it:
@@ -893,8 +897,21 @@ impl Loop {
                 if let Some((_, tx)) = &self.conn {
                     let _ = tx.try_send(Message::text(wire::descriptor()));
                 }
-                // Every inbound not acked, in the order handed, then every
-                // answer, then every Stop: Hermes drops what it already saw.
+                // A stopped turn Hermes never took is never handed again:
+                // its proof may be closed, and another's open (FIN-720). It
+                // ends here, its chat interrupted should Hermes have taken
+                // it and its ack been lost (no other turn of ours is in that
+                // chat: `start` replaces one).
+                let stopped: Vec<(String, String)> = self.inflight.iter().filter(|(_, f)| f.stopped && !f.acked).map(|(id, f)| (id.clone(), wire::interrupt(&f.profile, &f.chat))).collect();
+                for (turn, interrupt) in stopped {
+                    let _ = self.send(interrupt);
+                    self.forget(&turn);
+                    crate::ev!("relay.dropped", { "turn": turn, "why": "stopped before Hermes took it" });
+                    self.emit(Event::End { turn, outcome: Outcome::Stopped }).await;
+                }
+                // Every other inbound not acked, in the order handed, then
+                // every answer, then every Stop: Hermes drops what it
+                // already saw.
                 let mut unacked: BTreeMap<u64, (String, String)> = BTreeMap::new();
                 for (id, f) in self.inflight.iter().filter(|(_, f)| !f.acked) {
                     unacked.insert(f.order, (id.clone(), f.frame.clone()));

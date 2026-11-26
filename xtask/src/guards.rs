@@ -98,7 +98,8 @@ mod tests {
     /// drops a table, an index or a trigger, but the test levers that plant
     /// the shapes the runner must tell apart (schema.rs, its
     /// `schema-unversion` dropping what later steps made, columns too, and
-    /// a list's `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
+    /// putting back step 1's index a later step replaced, and a list's
+    /// `before-searched`). A `CREATE TABLE IF NOT EXISTS` in a module, as
     /// every object's schema was until 2026-10-19, never reaches an object
     /// made before it. Method: the cell's source, read.
     #[test]
@@ -110,7 +111,7 @@ mod tests {
                 *found.entry(file).or_default() += n;
             }
         }
-        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 8)]);
+        let levers = BTreeMap::from([("principal.rs".to_string(), 2), ("schema.rs".to_string(), 9)]);
         assert_eq!(found, levers, "a schema changes by a step of its class's (crates/core/src/migrate.rs says how), not in the cell");
     }
 
@@ -233,6 +234,22 @@ mod tests {
         let bridge = std::fs::read_to_string(crate::devstack::repo_root().join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENT_MAX_BYTES", ": u64 = "), fragment_proto::limits::BLOB_MAX_BYTES as i64);
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENTS_MAX", ": usize = "), i64::from(fragment_proto::limits::FILES_PER_MESSAGE));
+    }
+
+    /// Goal: a SimpleX door carries a reply's files as the platform bounds a
+    /// message's (cell/door-rules.mjs `REPLY_FILES_MAX`, templates/simplex
+    /// `FILES_MAX`: `FILES_PER_MESSAGE`), and its runner opens as many XFTP
+    /// relays at once as a computer may (images/simplex-door `RELAYS_MAX`:
+    /// `fragment_core::relay::OPEN_MAX`; images/ is a workspace of its own).
+    /// Method: each copy, read and evaluated.
+    #[test]
+    fn a_door_carries_files_as_the_platform_bounds_them() {
+        let root = crate::devstack::repo_root();
+        let read = |p: &str| std::fs::read_to_string(root.join(p)).unwrap_or_else(|e| panic!("{p}: {e}"));
+        let files = i64::from(fragment_proto::limits::FILES_PER_MESSAGE);
+        assert_eq!(constant(&read("cell/door-rules.mjs"), "export const", "REPLY_FILES_MAX", " = "), files);
+        assert_eq!(constant(&read("templates/simplex/app.mjs"), "const", "FILES_MAX", " = "), files);
+        assert_eq!(constant(&read("images/simplex-door/src/files.rs"), "pub const", "RELAYS_MAX", ": usize = "), fragment_core::relay::OPEN_MAX as i64);
     }
 
     /// The sizes a file bound has been written as: 25 MiB (the old bound,

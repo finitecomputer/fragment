@@ -67,7 +67,7 @@ use fragment_core::swap::{self, Placeholder, Plan};
 use fragment_core::connection_accounts::{Held, Unchosen};
 use fragment_core::grants::{self, Grants};
 use fragment_proto::computer::{valid_computer_id, valid_port_path, AgentAccount, AgentConnections, AgentCredential, ComputerAgent, ComputerNotice, ComputerPhase, ComputerView, NoticeSeen, PortTicket, PortTicketAsk, ProviderState, RestartAsk, RestoreSource, UpdateLater, PORT_PATH_MAX_BYTES};
-use fragment_proto::{ErrorCode, IdentityKind};
+use fragment_proto::{ErrorCode, IdentityKind, Lend};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -798,7 +798,7 @@ struct RelayClosed {
 }
 
 /// `computer/test`'s body (a test fleet's: `POST /api/test/computer`):
-/// `times` is `fail-saves`', `on` is `always-on`'s and `hold-saves`', `ms`
+/// `times` is `fail-saves`' and `damage-restores`', `on` is `always-on`'s and `hold-saves`', `ms`
 /// is `hang-backups`' and `alive-check`'s, `freeze` is `alive-check`'s,
 /// `total` and `free` are `disk`'s.
 #[derive(Deserialize)]
@@ -842,7 +842,8 @@ struct TestLever {
     free: Option<u64>,
     #[serde(default)]
     data: Option<u64>,
-    /// `fail-restore`'s: the number of the save whose restores fail.
+    /// `fail-restore`'s: the number of the save whose restores fail;
+    /// `damage-stored`'s: the save whose copy in R2 it damages.
     #[serde(default)]
     save: Option<u64>,
 }
@@ -3056,6 +3057,9 @@ impl ComputerCell {
     /// `fail-restore {save}` stops the restore of each start from save
     /// `save` (its number; 0: none) for want of room, a failed start as
     /// the sandbox runtime's guard makes one on a disk too small for it;
+    /// `damage-restores {times}` damages the next restores on their way, one
+    /// byte each, and `damage-stored {save}` R2's copy of save `save`
+    /// (cell/backups.mjs);
     /// `slow-snapshot {ms}` makes its next sleep's snapshot one that takes
     /// `ms` (0: none), taken whether or not the deployment takes snapshots,
     /// holding its container meanwhile as the runtime's does;
@@ -3257,6 +3261,28 @@ impl ComputerCell {
                 console_log!("{}", json!({ "computer": id, "lever": "kill", "generation": generation }));
                 Ok(json!({ "computer": id, "killed": generation }))
             }
+            "damage-restores" => {
+                // the next `times` restores of its saves each come with one
+                // byte flipped on their way through the gateway, their length
+                // kept, as FIN-775's transfers came (0: none); answers how
+                // many the lever's last pull left unspent
+                let times = b.times.filter(|t| *t <= LEVER_FAILS_MAX).ok_or_else(|| CellError::invalid("it names its times, 0 to 10"))?;
+                let unspent = self.call("damage", &[JsValue::from_f64(f64::from(times))]).await?.as_f64().map_or(0, |n| n as u32);
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "times": times, "unspent": unspent }));
+                Ok(json!({ "computer": id, "unspent": unspent }))
+            }
+            "damage-stored" => {
+                // save `save`'s archives in R2, one byte of each flipped: a
+                // stored copy really bad, which a start finds unusable
+                let n = b.save.ok_or_else(|| CellError::invalid("damage-stored names its save's number"))?;
+                let saves = self.saves()?;
+                let save = saves.every_save().into_iter().find(|s| s.number == n).ok_or_else(|| CellError::invalid(format!("no save {n}")))?;
+                for record in &save.records {
+                    self.call("damageStored", &[js::to_js(record)]).await?;
+                }
+                console_log!("{}", json!({ "computer": id, "lever": b.op, "save": n }));
+                Ok(json!({ "computer": id }))
+            }
             "fail-restore" => {
                 // each start that restores save `save` stops its restore for
                 // want of room, as on a disk that save no longer fits (0: none)
@@ -3341,7 +3367,7 @@ impl ComputerCell {
                 }
                 Ok(json!({ "computer": id, "owed": months }))
             }
-            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
+            op => Err(CellError::invalid(format!("no computer lever {op:?}: kill, saves, fail-saves, hang-backups, alive-check, slow-tell, stall-failing-start, stall-takeover, fail-starts, fail-takeover-destroys, fail-restore, damage-restores, damage-stored, alarm-in, always-on, disk, legacy-grants, legacy-own-key, legacy-sign-in or legacy-uses"))),
         }
     }
 
@@ -3949,10 +3975,10 @@ impl ComputerCell {
         let row = rows.iter().find(|r| r["fragment"] == agent).expect("the agent named is one of the rows read");
         let owner = row["owner"].as_str().unwrap_or_default().to_string();
         let identity = row["identity"].as_str().unwrap_or_default().to_string();
-        // asked of its fragment at each use, when a catalog's provider is
-        // asked for: one its owner took away is refused from their next
-        // request on (its time logged)
-        let catalogued = b.placeholders.iter().any(|p| self.cfg.providers.named(&p.provider, p.connection).is_some());
+        // asked of its fragment at each use: one its owner took away is
+        // refused from their next request on (its time logged), and what
+        // someone else's open ask is lent of them (FIN-720), a Vault's
+        // secrets among them
         // its owner's own keys asked for are their Vault's (M16), asked
         // beside its fragment's grants, so the swap waits on no hop more;
         // one this computer kept before the move goes to the Vault first (a
@@ -3962,8 +3988,8 @@ impl ComputerCell {
         own.dedup();
         let asked_at = js::now_ms();
         let grants = async {
-            let grants = if catalogued { self.grants_of(agent, &identity, None).await? } else { Grants::none() };
-            Ok::<_, CellError>((grants, catalogued.then(|| js::now_ms() - asked_at)))
+            let grants = self.grants_of(agent, &identity, None).await?;
+            Ok::<_, CellError>((grants, Some(js::now_ms() - asked_at)))
         };
         // each wait timed from one start (`grantsMs`, `ownMs`): asked side by
         // side, the request waits the longer, never the two added
@@ -3983,6 +4009,12 @@ impl ComputerCell {
         // the agent's person's Vault for, this agent's now that its tag says so
         for p in b.placeholders.iter().filter(|p| self.cfg.providers.named(&p.provider, p.connection).is_some()) {
             let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
+            // someone else's ask uses the owner's paid tools when the place
+            // lends their credit, and their accounts and keys when it lends those
+            let lent = grants.lend.unwrap_or(Lend::OWNER);
+            if !(if provider.kind == Kind::Operator { lent.spend } else { lent.accounts }) {
+                return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if provider.kind == Kind::Operator { "their credit" } else { "their accounts and keys" })));
+            }
             if !grants.may_use(&provider.name) {
                 let list = grants.connections.as_deref().unwrap_or_default();
                 return Err(CellError::new(
@@ -4023,7 +4055,8 @@ impl ComputerCell {
             }
             secrets.push(json!({ "provider": provider.name, "tag": p.tag, "connection": p.connection, "secret": secret }));
         }
-        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "grantsMs": grants_ms, "ownMs": own_ms }))
+        let accounts = grants.lend.is_none_or(|l| l.accounts);
+        Ok(json!({ "agent": agent, "owner": owner, "identity": identity, "secrets": secrets, "accounts": accounts, "grantsMs": grants_ms, "ownMs": own_ms }))
     }
 
     /// `owner`'s token for `provider`: WorkOS Pipes', for the WorkOS user
@@ -4470,6 +4503,25 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let simplex = url.query_pairs().any(|(k, v)| k == "simplex" && v == "1");
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex })).await?);
         }
+        // its bridge tells an agent's fragment which turns it runs, and whose
+        // ask each is (`computer/turns`, FIN-720), as one bridge life: `PUT`
+        // one open, `DELETE` one ended, `DELETE` with none to take them (a
+        // bridge's start: every other life's forgotten)
+        // As the agent (its header): a platform from before sends it on to
+        // its API, which has no such route (404), so a bridge tells it
+        // nothing.
+        "/api/computer/turns" => {
+            let agent = req.headers().get(AGENT_HEADER)?.filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent this acts as (x-fragment-agent)"))?;
+            let v: Value = serde_json::from_slice(&crate::read_body(&mut req, 4_096).await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let op = match (req.method(), v["turn"].is_string()) {
+                (Method::Put, true) => "open",
+                (Method::Delete, true) => "close",
+                (Method::Delete, false) => "take",
+                _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE with none to take its agent's turns")),
+            };
+            let asked = json!({ "computer": computer, "op": op, "life": v["life"], "generation": v["generation"], "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
+            return json_response(&crate::fragment::ask(env, &agent, "computer/turns", &asked).await?);
+        }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
         "/api/computer/door" if req.method() == Method::Post => {
@@ -4567,7 +4619,7 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         env,
         &agent,
         "computer/sign",
-        &json!({ "computer": computer, "method": method.as_ref(), "url": target, "payload": payload }),
+        &json!({ "computer": computer, "method": method.as_ref(), "url": target, "payload": payload, "fragment": target_fragment(&path) }),
     )
     .await {
         // Only the model's signing preflight, before route() can dispatch
@@ -4581,7 +4633,13 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
         other => other?,
     };
     let authorization = signed["header"].as_str().ok_or_else(|| CellError::host("the agent fragment signed nothing"))?;
+    // what it signed: for its owner, the proof of whose ask this is in
+    // place of `for` (runs_on.rs `asked`), which no guest's header names
+    let target = signed["url"].as_str().map_or(target, str::to_string);
     let headers = Headers::new();
+    if let Some(m) = signed["mandate"].as_str() {
+        headers.set(fragment_core::mandate::HEADER, m)?;
+    }
     // the caller's tier, which the model route reads (`Models::named`), and no other of ours
     for k in ["content-type", "accept", "if-none-match", "range", fragment_core::models::TIER_HEADER] {
         if let Some(v) = req.headers().get(k)? {
@@ -4786,6 +4844,9 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         // to this agent, toward this host; a signature over the request as
         // it goes, over https
         let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
+        if !vaulted.is_empty() && answer["accounts"] == false {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here")));
+        }
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {
                 agent: agent.clone(),

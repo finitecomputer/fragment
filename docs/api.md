@@ -71,7 +71,7 @@ person's fragment so labelled.
 | `POST /api/test/list` | `{identity, op}` |
 | `POST /api/test/fragment` | `{fragment, op, …}` |
 | `POST /api/test/computer` | `{computer, op, times?, on?, ms?, freeze?, offsetMs?, generation?, agent?, row?, provider?, key?, total?, free?, save?}` |
-| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply`, `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
+| `POST /api/test/door` | `{door, op, agent?, key?, text?, n?, message?, files?, bytes?, type?, sha?}`: a SimpleX door's (cell/door.mjs; `door` a connector's door id, `fragment_core::door::door_id`, or a fragment's name for a door the lever starts): `start`, `state`, `link`, `unlink`, `reply` (`files` as its connector names them), `deliveries`, `deliver` (`message` as its runner delivers one, on to its connector's inbox), `file` (`bytes`, base64, typed `type`, held as its runner gives a file → `{sha256, size}`; or `sha`: what it holds under that name, hashed again → `{sha256, size, type}`), `stop`, `kill`, `rollback`, `corrupt`, `lose`, `files` (its files' keys in the bucket, ended or not); an ended door answers all but `start` and `files` 410; on a preview, `e2e-` doors alone |
 | `POST /api/test/export` | `{identity, op, steps?}` |
 | `POST /api/test/mail` | `{to, subject, text}` → `{messageId}` |
 | `POST /api/test/registry` | `{…}` |
@@ -175,25 +175,64 @@ is honoured on `/api/f/{name}/…`, on `GET` and `POST /api/fragments` (a
 as on its blob upload); anywhere else 400. A person naming `for` is 403; two, or one that is no
 identity, 400; an agent naming anyone but its owner, 403. A site request's query is its app's.
 
-**Who asked: mandates** (FIN-615, `fragment_core::mandate`). A mandate
-is a place's word that its agent's owner's own record there asked it: its
-asker, the agent, the place (by its life's own key), the record, and until
-when. An agent member reading a channel as itself (`GET
+**Who asked: mandates** (FIN-615, FIN-720, `fragment_core::mandate`). A
+mandate is a place's word that a person's own record there asked its
+agent: its asker, the agent, the place (by its life's own key), the
+record, and until when. An agent member reading a channel as itself (`GET
 /api/f/{name}/channels/{c}`) is given one beside each record whose words
-are its owner's own: their own post, or a door's relay of them
-(`ChannelRecord.mandate`). It holds for `MANDATE_LIFE_MS` from its
-record's writing, and a record older than that carries none. The agent's
-request may carry it in `x-fragment-mandate` in place of `for=<its
-owner>`, wherever `for` is honored, and it acts exactly as that `for`
-does. The router checks it in the signer's own lookup: one the platform
-did not make, or altered, or run out, is 403; one carried by any key but
-its agent's, 403; one beside `for`, or where `for` is not honored, 400,
-as are the identity routes and the invite routes (which take `for`
-through the registry, and no mandate yet).
-Only the platform can make one: its mark is a MAC under a key derived from
-the host secret. An asker who is not the agent's owner is another entity,
-whose actions are theirs to be keyed, capped and credited by: their words
-give the agent no mandate yet.
+are a person's own (their post, a door's relay of them, or the
+platform's record of a schedule's fire for its maker:
+`mandate::asker_of`) and to it (its body's `to` names it, or names no
+one: `mandate::addressed`) (`ChannelRecord.mandate`); a live frame
+carries none. It holds for `MANDATE_LIFE_MS` from its record's writing,
+and a record older than that carries none. The agent's request may carry
+it in `x-fragment-mandate` in place of `for`, wherever `for` is honored:
+it acts for its asker as `for` does for its owner, held to the lower of
+the asker's role there and the agent's cap. An asker who is not its
+owner is someone else acting through it (`Signed::other_asker`): a run
+and its ledger key are theirs (`runs.asker`), `members/me` is refused (an
+agent never leaves, nor is removed, for them), `POST /api/fragments` is
+403 (it makes nothing for them), and an icon is never drawn on its
+owner's credit for them. The router checks it in the signer's own
+lookup: one the platform did not make, or altered, or run out, is 403;
+one carried by any key but its agent's, 403; one beside `for`, or where
+`for` is not honored, 400, as are the identity routes and the invite
+routes (which take `for` through the registry, and no mandate). Only the
+platform can make one: its mark is a MAC under a key derived from the
+host secret.
+
+**An agent's computer proves who asked** (FIN-720). Its bridge tells the
+agent's fragment each turn it runs, before its runtime hears of it
+(`/api/computer/turns`: docs/computers.md). The egress then signs each
+call the agent makes `for` its owner with the proof the open turns hold
+(`mandate::proof`): only its owner's turns open, its owner's mandate (or
+the bare `for`, with none); one other person's turns open, each proven,
+their newest mandate; turns of more than one other person, or of one
+unproven, the agent as itself, with no `for`, in those turns' places
+alone, and 403 anywhere else. The invites waiting on its owner's email
+take `for` and no mandate: there its owner's own ask keeps `for`, and
+anyone else's is 403. A hand-off (another agent of the computer's words
+in a chat) carries on the ask of the turn it was said in, unproven. Since decision 64 an agent's own
+memberships mirror its owner's, so acting as itself elsewhere would reach
+what is its owner's for someone it cannot name. A mandate names whose ask
+a turn is, whatever its bridge says (a schedule's fire is its maker's,
+though the place's own key wrote it). While someone else's turn is open,
+the agent's grants carry `lend`, what of its owner's it uses then, read
+at each use from each place that person's turns are in, the narrowest of
+them: paid tools (an operator key) by `spend`, their accounts and keys (a
+connection, a Vault secret) by `accounts`; no one proven's, nothing. Its
+owner's own ask lends everything. A paid tool used on someone else's turn
+is billed to the owner only while lent. The computer tells its own turns,
+which its agent could undo (the debt ledger, "An agent's computer tells
+its own turns").
+
+**An agent's lend** (the share sheet's card for an owner's own agent in
+a chat): `PUT /api/f/{name}/members/{agent}/lend` `{spend, accounts}` →
+the lend, kept on the agent's member row alone, so a switch holds from
+the next use, mid-turn too; its owner's alone, in person (the agent
+itself 403; anyone else refused as on any route). A member list says it
+to its owner, on their own agents' rows (`Member.lend`), and to no one
+else. One never set is `Lend::DEFAULT`: spend on, accounts off.
 
 **An agent shares for its owner** (`fragment_core::permit::agent_shares`):
 acting `for` its owner, and not held below them, on a fragment its owner
@@ -698,10 +737,11 @@ it. Narrowing is never refused, and one shared before the rule keeps what
 it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
 offers no invite, and no switch but one to close a link from before.
 
-On a chat one of the owner's agents is in, the sheet, and `fragment
-members add`, say "People in this chat can talk to your agent."
-(`fragment_core::permit::TRUST_WARNING`): whoever is in a chat may talk to
-its agents, which act for their owner.
+On a chat one of the owner's agents is in, `fragment members add` says
+"People here can ask your agent for things. It does them as that person,
+and anyone here can see what it finds." (`fragment_core::permit::
+asked_here`), and the sheet shows the agent's lend card: whoever is in a
+chat may ask its agents, which act as them (Who asked: mandates).
 
 ### Invites by email
 
@@ -814,7 +854,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `POST /api/f/{name}/deploy` | editor | `{note?}` → `{live, canonical}`: live to main's tip, guarded against a live that moved meanwhile; the app installs at once |
 | `GET /api/f/{name}/files` | viewer | → `{ref, files: [{path, size, mode, lastCommitSha, machinery, blob?, sha256?, release?}]}` at main; a pointer's `sha256` is its blob. A blessed template's data from the release is listed beneath (`release: true`) |
 | `GET /api/f/{name}/file?path=` | viewer | → the bytes at main (`x-fragment-ref`); with none of its own there, a blessed template's data file |
-| `PUT /api/f/{name}/blobs/{sha256}` | editor | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
+| `PUT /api/f/{name}/blobs/{sha256}` | editor; on a hosted door, also its bound agent acting as itself (its replies' files: An agent's doors; `fragment_core::permit` rule 5) | the bytes (`content-length` required, at most the deployment's `limits.uploadMaxBytes` from a person and `BLOB_MAX_BYTES` from an agent; past it 413, unread), hashed on the way → `{ok, sha, size, stored}`; other bytes 400. Its `content-type` is what `__blob` serves when it is passive media (Blobs) |
 | `GET`, `HEAD /api/f/{name}/blobs/{sha256}` | viewer | → the bytes (ranges 206) |
 | `GET /api/f/{name}/card` | viewer | → the preview card: a 1280×800 JPEG, `ETag` its SHA-256, `private, no-cache`, `X-Fragment-Ref` the live it shows (an upload has none); `If-None-Match` 304; none yet 404 (Cards) |
 | `POST /api/f/{name}/card` | editor | → `{ok, live, since, joined}`: a shot of the live again (Cards). A chat, agent or members-only fragment, or nothing deployed, 400; an owner who pays for nothing 402; within `card::AGAIN_EVERY_MS` of the last ask, 429 |
@@ -826,7 +866,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `GET /api/f/{name}/runs/{id}` | viewer | → one run with `input` and `output`. A channel's run whose channel the asker may not read (or no longer declared) withholds `input` and `error` (`withheld: true`). `output` is the app's own answer, shown to viewers whatever it copied |
 | `POST /api/f/{name}/replay` | editor | `{run}` → `{ok, run, attempt}`: a `held` or `blocked` run again |
 | `POST /api/f/{name}/pause` | editor | `{op, paused}` → `{ok, op, paused}`: its triggers stop or start; calls are never paused |
-| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
+| `GET /api/f/{name}/triggers` | viewer | → `{triggers: [{cron \| channel \| files \| installed, run, from?, kinds?, paused, said?, nextAt?}], paused}`: a cron one says its schedule in words (`said`, as a `Schedule`'s) |
 | `GET /api/f/{name}/schedules` | viewer | → `{schedules: [Schedule]}`, oldest first (Scheduled records) |
 | `POST /api/f/{name}/schedules` | editor holding the channel's post role | `{cron, channel, record}` → `{schedule, replayed}`; a `record` with `relayed`, or that answers a question, 403; past the overdraft 402 |
 | `PUT /api/f/{name}/schedules/{id}` | editor | `{paused}` → `{schedule}`; a resume past the overdraft 402 |
@@ -1141,8 +1181,9 @@ does not ship is never answered from its repo (Serving).
 - `triggers` (at most `TRIGGERS_MAX`) start runs of a mutation or a job an
   editor may call: `{"cron": "0 9 * * *", "run": op}` (five fields, UTC,
   1 = Sunday); `{"channel": "inbox" | <app channel>, "run": op, "from"?:
-  "person" | "agent"}` (each new record, of that kind's members only with
-  `from`); `{"files": "notes/**", "run": op}` (a move of `main` changing a
+  "person" | "agent", "kinds"?: [...]}` (each new record, of that kind's
+  members only with `from`, and only of those kinds with `kinds`: a body's
+  `kind`, 1 to `TRIGGER_KINDS_MAX`, named as `listed`'s are, each once); `{"files": "notes/**", "run": op}` (a move of `main` changing a
   matching path: `*`, `**`, `?`, a trailing `/`); `{"installed": true,
   "run": op}` (once per install of new code: a deploy moving `live`, or a
   blessed template's changed release, at the fragment's next request; its
@@ -1559,7 +1600,7 @@ one id at two places is refused. A job's step names a route, never an id.
 | --- | --- | --- |
 | `GET /api/models/v1/models` | an agent | → OpenAI's list, `{object: "list", data: [{id, object: "model", created: 0, owned_by: "fragment"}]}`: the ids its calls may name |
 | `POST /api/models/v1/chat/completions[?fragment=<name>]` | an agent (`for` its asker) | an OpenAI chat completion, `model` a name or an id → the model's answer in OpenAI's shape: JSON, or with `stream: true` server-sent events, usage once on a last chunk with no choices |
-| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper`, optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text |
+| `POST /api/models/v1/audio/transcriptions` | an agent | `multipart/form-data`: `file` (the audio, as recorded), `model` `whisper` (the route's name, whatever model the slot runs), optional `language` (ISO-639-1), `prompt`, `response_format` (`json`, the default, or `text`) → `{"text": …}`, or the text; 404 on a deployment that names no transcription slot |
 | `POST /api/models/v1/decide[?fragment=<name>]` | an agent (`for` its asker) | a decision, media inline (Decisions) → `{model, answers, usage}`. A blob 400 (the route reads no fragment's store). An answer that does not answer what was asked is charged and 502 `upstream_failed`. A computer's guest asks it as `POST /v1/decide` on its intercept |
 | `POST /api/models/v1/embeddings[?fragment=<name>]` | an agent (`for` its asker) | OpenAI's `{input, model?, dimensions?, encoding_format?}` → `{object: "list", data: [{object, index, embedding}], model, usage, space: {model, dimensions, version}}` (Embeddings). `POST /v1/embeddings` on a computer's intercept |
 
@@ -1608,16 +1649,26 @@ slot's; `encoding_format` other than `float` or `base64`. A body past
 502, and charged. It is paid as a chat call, at its input tokens (the
 model's count, else estimated).
 
-**Transcription** (decision 9): `whisper` is Workers AI's Whisper, sent the
-audio as base64 with its voice-activity filter on; `language` and `prompt`
-pass on, OpenAI's other fields do not. A form that is none, another model
-or format is 400; audio past `transcribe::BODY_MAX_BYTES` 413. Its payer is
-the agent's owner, under no fragment's cap, charged by the audio's length
-(`fragment_core::transcribe`). A first try answering 429, 408 or 5xx, or
-nothing within 15 s, is made once more; a 429 passed on carries
-`retry-after: 5`. Every answer carries `x-fragment-answer-shape` (the
-model's own answer's top-level keys and small `usage`, never its words). An
-answer in another shape is 502, charged nothing.
+**Transcription** (decision 9) runs on the deployment's
+`models.transcription` slot (`fragment_core::transcribe`), no chat slot:
+a Workers AI model, sent Whisper's catalog input (the audio as base64, its
+voice-activity filter on), or a model on an OpenAI-compatible API, sent
+OpenAI's form at `<base_url>/audio/transcriptions` with the slot's key and
+`response_format` `verbose_json` (a model that answers no `verbose_json`,
+OpenAI's token-billed gpt-4o transcription models, refuses each call; its
+refusal is passed on). Each names its price, a minute of audio
+(docs/ledger.md). A deployment that names none transcribes nothing (404).
+A call to an OpenAI-compatible API, chat, embeddings or transcription,
+follows no redirect: one is the call not answered.
+`language` and `prompt` pass on, OpenAI's other fields do not. A form that
+is none, another model or format is 400; audio past
+`transcribe::BODY_MAX_BYTES` 413. Its payer is the agent's owner, under no
+fragment's cap, charged by the audio's length its model reports. A first
+try answering 429, 408 or 5xx, or nothing within 15 s, is made once more; a
+429 passed on carries `retry-after: 5`. Every answer carries
+`x-fragment-answer-shape` (the model's own answer's top-level keys and
+small `usage`, never its words). An answer in another shape is 502,
+charged nothing.
 
 ### Ledger (docs/ledger.md)
 
@@ -1784,8 +1835,8 @@ steps:
 - `job.call(op, input)`: an operation of this fragment as the run's
   principal, its id `job:<run>:<step>`. Calling a job starts it (`{run,
   status}`), one hop deeper.
-- `job.fetch(url, {method, headers, body})` → `{status, ok, headers,
-  text(), json()}`, the app's one way out. `{{NAME}}` in a header value,
+- `job.fetch(url, {method, headers, body, blob?, keep?})` → `{status, ok, headers,
+  text(), json(), blob}`, the app's one way out. `{{NAME}}` in a header value,
   or in the URL's path or query, is the secret `NAME`, filled at the
   egress toward its hosts only (Control API); a fetch elsewhere fails the
   step, naming both. A URL's is percent-encoded as it goes in, a value
@@ -1803,14 +1854,22 @@ steps:
   `FETCH_RESPONSE_MAX_BYTES`, `FETCH_TIMEOUT_MS`. Each carries
   `x-fragment-hops`, and one not GET or HEAD an `Idempotency-Key:
   <fragment>-<life>-r<run>-s<step>` (the same on every try) unless the job
-  set one.
+  set one. A SimpleX connector's fetch of its own door (An agent's doors),
+  and no other, may carry one of its blobs as its body (`blob: <sha256>`,
+  streamed with its length; none such fails the step) or keep the door's
+  answer as one of its blobs (`keep: true`: a 2xx's body, the file
+  `x-door-sha256` names, at most `BLOB_MAX_BYTES`, its bytes checked
+  against that name as they are stored, typed as the door said when that
+  is passive media), answered `blob: {sha256, size, type}` and no body.
 - `job.publish(channel, body, kind)`: a record.
 - `job.sleep(ms | "N seconds|minutes|hours|days")`, up to 30 days.
 - `job.members()`, `job.people(ids)` (at most 64), `job.presence()`: as the
   page reads `__members`, `__people` and its presence.
 
-`job.principal`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
-`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which;
+`job.principal`, `job.agent`, `job.role`, `job.run`, `job.attempt`, `job.via` (`call`,
+`job`, `cron`, `channel`, `files`, `installed`, `woke`) and `job.fragment` say who and which
+(`job.principal` and `job.agent` as `call.principal` and `call.agent`: an
+agent's run on someone else's ask is theirs, beside that agent);
 `job.door` is a connector's `{relayed, to}` while it is an open door (An
 agent's doors), else null.
 
@@ -1873,6 +1932,13 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   skipped. Past the owner's overdraft none fires (`schedules.blocked`); a
   channel no longer taking its records, or a record that relays someone
   (kept before that was refused), skips it (`schedule.unfired`).
+- **Its asker** (FIN-720): whom its maker acted for, else its maker
+  (`record_schedules.asker`). Each fire is checked again as them, at
+  their role now: one no longer in the fragment fires no more
+  (`schedule::Refusal::AskerGone`, 403), and the record it appends is
+  the platform's, for them (`records.asker`), so an agent asked by it
+  acts for them (Who asked: mandates). One made before has none: its
+  maker (`created_by`) is its asker.
 - Viewers list them; editors add, pause, resume and remove them (an agent
   on its own fragment is its editor: no special case).
 - **Bounds** (`fragment_core::schedule`), each a typed refusal: `cron` five
@@ -1885,7 +1951,10 @@ routine is one, on its own agent fragment's `tasks` (decision 38).
   Questions and answers), else 403; `channel` declared, taking posts, and not
   only from one kind of member (`from`), else `invalid_request`, and the
   caller holding its post role, else 403; at most `RECORD_SCHEDULES_MAX` a fragment.
-- The same schedule again answers the one there (`replayed: true`).
+- The same schedule again, asked by the same one, answers the one there
+  (`replayed: true`; `schedule::SAME_SCHEDULE`). Someone else's identical
+  one is theirs, kept beside it, since a schedule fires as its asker: one
+  added after its maker left fires. One kept before askers is its maker's.
   Paused, it fires nothing and has no `nextAt`; resumed, it fires from its
   next minute. Events: `schedule.added`, `.paused`, `.resumed`,
   `.removed`.
@@ -2378,14 +2447,19 @@ nor speak through one (`fragment_core::door`):
   which records relaying its owner came through its door
   (docs/chat-records.md). The binding is the connector's, so several
   connectors may each be a door of one agent; an unlink leaves the agent
-  a viewer. Its rules are cell/src/doors.rs's.
+  a viewer. Its bound agent, acting as itself, uploads the files its
+  replies there carry (`PUT /api/f/{name}/blobs/{sha256}`: rule 5's one
+  exception, `fragment_core::permit`), which its door sends on where it
+  can (a SimpleX door's) and says are in the chat where it cannot
+  (Telegram's); it is a viewer there for all else. Its rules are
+  cell/src/doors.rs's.
 - **A SimpleX connector's door** (`simplex`) is the platform's SimpleX
   door of the connector's life (cell/door.mjs): named for its name and
   its npub's digits (`fragment_core::door::door_id`), as its repo is, so
   a name made again, by anyone, reaches a door of its own, never the
   earlier one's link. Its jobs reach it at
   `https://door.fragment.internal/<ask>` (`connect`, `state`, `link`,
-  `unlink`, `reply`), which the platform sends to that door alone, naming
+  `unlink`, `reply`, `file/<sha256>`, `kept`), which the platform sends to that door alone, naming
   it and the connector (`x-fragment-door`, `x-fragment-connector`) over
   whatever the job set; any other fragment's fetch of that host fails its
   step unsent (`fragment_core::door::door_route`). `connect` gives the
@@ -2398,6 +2472,27 @@ nor speak through one (`fragment_core::door`):
   for it (`n`), and one older than the newest the door was asked is 409
   `overtaken`, so none acts after a newer one. A deployment that runs no doors (no `doors` in
   its config) answers `connect` 409 `no_doors` and keeps nothing.
+  **Files** go both ways. Its owner's (a voice message, a photo, a file
+  past what its runner carries: SimpleX's own bound) is received by its
+  core and held by the door; the delivery names it (`file: {sha256, name,
+  type, size}`) and the connector keeps it as one of its blobs (`GET
+  file/<sha256>`, `keep`) for the record's `attachments`. A reply's
+  (`reply {key, text, files}`, at most `FILES_PER_MESSAGE`) are each given
+  to the door first (`PUT file/<sha256>`, the blob as its body) and sent
+  after its text; a file the door does not hold is 409 `no_file`, and a
+  door whose runner carries no files (a container started before it did)
+  409 `no_files`, its connector then sending the text alone. The door
+  holds at most 64 files, 1 GiB between them, every one counted, each a
+  day since it was last given or used, but one a delivery its inbox has
+  yet to take names (cell/door-rules.mjs `FILES_KEPT`), under its prefix.
+  Each records who still uses it, each once: a delivery naming it until
+  its connector says `kept {id}` (sent once the blob is stored, so a read
+  cut off releases nothing), and a reply naming it (given with its key,
+  `x-door-for`) until it is done. Past the bounds, files nothing uses make
+  room, the oldest first; with none, a new one is 503 `files_full`, given
+  again later, and its runner delivers a message whose file its door
+  keeps refusing with a note once 3 minutes pass. Its core reaches SimpleX's
+  file servers through the platform's XFTP relay (docs/computers.md).
   While it invites, the door's `state` has the invitation's QR code
   (`qr`: `{size, dark}`, its modules row by row, a `1` each dark one, of
   its short link where there is one), for its owner's setup page to draw

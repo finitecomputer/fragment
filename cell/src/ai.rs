@@ -22,8 +22,9 @@
 //!
 //! Who pays (docs/cloudflare-v1.md, decision 26): every paid step bills the
 //! fragment's owner, on their ledger, capped when the run's principal is
-//! not that owner nor an agent of theirs (a run does not record whom an
-//! agent asked for, so an agent of the owner's counts as the owner).
+//! not that owner nor an agent of theirs asked by them: an agent and its
+//! owner are one, and a run another person asked for names them
+//! (`runs.asker`, FIN-720), whose ask is capped as theirs would be.
 //!
 //! A paid step asks the gate first (ledger.rs `may`: the owner's standing,
 //! and the fragment's cap when it is capped, as this isolate heard them
@@ -135,7 +136,7 @@ impl FragmentCell {
         }
         let agents: Vec<Agent> =
             self.typed("SELECT owner FROM members WHERE principal = ? AND kind = 'agent'", vec![run.principal.as_str().into()]).map_err(retry)?;
-        let by_owner = run.principal == owner || agents.first().is_some_and(|a| a.owner.as_deref() == Some(owner.as_str()));
+        let by_owner = run.asker.is_none() && (run.principal == owner || agents.first().is_some_and(|a| a.owner.as_deref() == Some(owner.as_str())));
         let key = self.step_ref(run, index)?;
         debug_assert!(key.starts_with(&format!("{fragment}@{created}/")), "a step's key is its fragment's life's");
         Ok(Paying {

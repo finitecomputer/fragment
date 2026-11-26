@@ -64,6 +64,165 @@ const WAKE: Duration = Duration::from_secs(90);
 /// owner's sleeps.
 pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
+/// The app `asker_checks` asks: it tells whom it was told (`whoami`), and
+/// has an op for editors and up (`backstage`).
+const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
+
+/// Whose ask a turn is (FIN-720; docs/api.md, "An agent's computer proves
+/// who asked"): the checks `asker_checks` makes, as a run without the stub
+/// or the fakes skips them.
+const ASKER_CHECKS: &[&str] = &[
+    "someone else in its owner's chat asks the agent, and its call for its owner goes as them, proven by their mandate: the app is told them, at their own role; its owner's same ask is its owner's",
+    "held to their role: what only editors may do (they a viewer) is refused, though its owner's same ask goes",
+    "each asks it to post under one id: each post is their own record, keyed by whom it posts for, as a call's id is",
+    "each asks it to run a job (Calories' summary of their day): the job is told whose ask it runs, as an op is, reads their own entries, and answers them, its owner's own ask too",
+    "a schedule they make in the chat is their ask each time it fires: the chat's own record, written for them, and the agent's call goes as them",
+    "on their ask it spends its owner's credit on a paid tool (spend on until its owner says), and uses none of its owner's accounts (accounts off until they say): refused, saying so, reaching no provider",
+    "its owner switches spend off and accounts on in that chat: their next ask is refused the paid tool, reaching no provider, and given the account; switched back, as it was",
+    "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
+];
+
+/// Ben, a person in its owner's chat, asks the agent there for things
+/// (each a `fetch` through its guest's egress, `for` its owner as its
+/// terminal signs one), and its owner the same: each call goes as whose ask
+/// it is, held to their role, using what its owner lends that chat.
+/// Answers how many of the agent's turns in the chat they took.
+fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Duration) -> Result<usize> {
+    let turns = std::cell::Cell::new(0);
+    let owner_id = api.identity(w.owner)?;
+    let ben = api.person()?;
+    let ben_id = api.identity(&ben)?;
+    let r = api.share(chat, &ben_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Ben in the chat: {r}");
+    // its owner's app, Ben a viewer there: `whoami` tells who the app is
+    // told, at what role; `backstage` is for editors and up
+    let board = s.named(api, w.owner, "board")?;
+    let c = s.create(api, w.owner, &board)?;
+    s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+    // and a channel its viewers post to
+    let mut manifest: Value = serde_json::from_slice(WHOAMI_JSON)?;
+    manifest["channels"]["said"] = json!({ "read": "viewer", "post": "viewer" });
+    super::app::ship(s, &c, WHOAMI_APP, &serde_json::to_vec(&manifest)?);
+    let r = api.share(&board, &ben_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Ben on the board: {r}");
+    let op = |name: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{board}/ops/{name}?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    // each ask's own id, apart from the lane's numbered `m<n>` ones
+    let asked_by = |s: &Suite, who: &crate::Keys, id: &str, text: &str| -> Result<String> {
+        turns.set(turns.get() + 1);
+        let r = api.signed(who, "POST", &format!("/api/f/{chat}/channels/chat"), Some(&json!({ "id": format!("asker-{id}"), "body": { "text": text } })))?;
+        anyhow::ensure!(r.status == 200, "{id} asks: {r}");
+        let turn = turn_of(w.agent, chat, "chat", r.body["record"]["seq"].as_i64().unwrap_or(0));
+        let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+        s.eventually(wake, || reply().is_some());
+        Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
+    };
+    let asked_by_ben = |s: &Suite, n: u32, text: &str| asked_by(s, &ben, &format!("ben{n}"), text);
+    // who the app was told, and at what role (`whoami`'s answer)
+    let whose = |said: &str| -> Value {
+        let body = said.strip_prefix("fetched 200: ").unwrap_or("");
+        serde_json::from_str::<Value>(body).map(|v| v["result"].clone()).unwrap_or(Value::Null)
+    };
+
+    let bens = asked_by_ben(s, 1, &op("whoami", "who-ben"))?;
+    let owners = asked_by(s, w.owner, "owner1", &op("whoami", "who-owner"))?;
+    s.ok(
+        ASKER_CHECKS[0],
+        whose(&bens) == json!({ "principal": ben_id, "role": "viewer" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
+        json!({ "ben": bens, "owner": owners }),
+    );
+    let bens = asked_by_ben(s, 2, &op("backstage", "back-ben"))?;
+    let owners = asked_by(s, w.owner, "owner2", &op("backstage", "back-owner"))?;
+    s.ok(ASKER_CHECKS[1], bens.starts_with("fetched 403") && whose(&owners) == json!({ "role": "editor" }), json!({ "ben": bens, "owner": owners }));
+    let post = |text: &str| format!("fetch http://api.fragment.internal/api/f/{board}/channels/said?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"said\",\"body\":{{\"text\":\"{text}\"}}}}", w.agent);
+    let owners = asked_by(s, w.owner, "owner-post", &post("its owner's"))?;
+    let bens = asked_by_ben(s, 9, &post("theirs"))?;
+    let said = records(api, w.owner, &board, "said");
+    let texts: Vec<&str> = said.iter().filter_map(|r| r["body"]["text"].as_str()).collect();
+    s.ok(ASKER_CHECKS[2], owners.starts_with("fetched 200") && bens.starts_with("fetched 200") && texts == ["its owner's", "theirs"], json!({ "owner": owners, "ben": bens, "said": said }));
+    // its owner's Calories, Ben a viewer there: his summary is his
+    let calories = s.named(api, w.owner, "asker-calories")?;
+    let r = api.create_with(w.owner, json!({ "name": calories, "template": "calories" }))?;
+    anyhow::ensure!(r.status == 200, "the calories app: {r}");
+    s.owned(&r.body, w.owner);
+    let r = api.share(&calories, &ben_id, "viewer")?;
+    anyhow::ensure!(r.status == 200, "Ben on calories: {r}");
+    // each one's day: Ana's porridge, Ben's toast (she logs both: an editor's)
+    for (id, who, food) in [("ana-1", owner_id.as_str(), "porridge"), ("ben-1", ben_id.as_str(), "toast")] {
+        let r = api.op(w.owner, &calories, "log_food", id, json!({ "who": who, "food": food, "calories": 300 }))?;
+        anyhow::ensure!(r.status == 200, "{food} logged: {r}");
+    }
+    let summary = |id: &str| format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    let reply_for = |who: &str| records(api, w.owner, &calories, "replies").into_iter().find(|r| r["body"]["for"] == who && r["body"]["text"].is_string());
+    let bens = asked_by_ben(s, 10, &summary("sum-ben"))?;
+    s.eventually(wake, || reply_for(&ben_id).is_some());
+    let owners = asked_by(s, w.owner, "owner-sum", &summary("sum-owner"))?;
+    s.eventually(wake, || reply_for(&owner_id).is_some());
+    let text = |who: &str| reply_for(who).and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let (ben_said, owner_said) = (text(&ben_id), text(&owner_id));
+    s.ok(
+        ASKER_CHECKS[3],
+        bens.starts_with("fetched 200") && owners.starts_with("fetched 200") && ben_said.contains("toast") && !ben_said.contains("porridge") && owner_said.contains("porridge") && !owner_said.contains("toast"),
+        json!({ "ben": bens, "owner": owners, "replies": records(api, w.owner, &calories, "replies") }),
+    );
+
+    let schedules = format!("/api/f/{chat}/schedules");
+    let made = api.signed(&ben, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "chat", "record": { "text": op("whoami", "who-schedule") } })))?;
+    cron_now(api, chat)?;
+    let fire = || records(api, w.owner, chat, "chat").into_iter().find(|r| r["author"] == "platform" && r["asker"] == ben_id.as_str());
+    s.eventually(wake, || fire().is_some());
+    let turn = turn_of(w.agent, chat, "chat", fire().and_then(|r| r["seq"].as_i64()).unwrap_or(0));
+    turns.set(turns.get() + 1);
+    let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+    s.eventually(wake, || reply().is_some());
+    let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let removed = api.signed(&ben, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
+    s.ok(
+        ASKER_CHECKS[4],
+        made.status == 200 && fire().is_some() && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }) && removed.status == 200,
+        json!({ "made": made.status, "fire": fire(), "said": said, "removed": removed.status }),
+    );
+
+    let paid = format!("fetch http://api.perplexity.ai/search with {}", placeholder(s, w.id, w.agent, "perplexity"));
+    let account = format!("fetch http://{SWAP_CONNECTION_HOST}/drive/v3/files with {}", placeholder(s, w.id, w.agent, SWAP_CONNECTION));
+    let spent = asked_by_ben(s, 3, &paid)?;
+    let seen = s.upstream.seen().len();
+    let unlent = asked_by_ben(s, 4, &account)?;
+    let unreached = s.upstream.seen().len() == seen;
+    s.ok(
+        ASKER_CHECKS[5],
+        spent.starts_with("fetched 200") && unlent.starts_with("fetched 403") && unlent.contains("hasn't lent it their accounts and keys") && unreached,
+        json!({ "paid": spent, "account": unlent }),
+    );
+    let lend = |spend: bool, accounts: bool| api.signed(w.owner, "PUT", &format!("/api/f/{chat}/members/{}/lend", w.identity), Some(&json!({ "spend": spend, "accounts": accounts })));
+    let switched = lend(false, true)?;
+    let seen = s.upstream.seen().len();
+    let unpaid = asked_by_ben(s, 5, &paid)?;
+    let unreached = s.upstream.seen().len() == seen;
+    let lent = asked_by_ben(s, 6, &account)?;
+    let back = lend(true, false)?;
+    let again = asked_by_ben(s, 7, &account)?;
+    s.ok(
+        ASKER_CHECKS[6],
+        switched.status == 200
+            && unpaid.starts_with("fetched 403")
+            && unpaid.contains("hasn't lent it their credit")
+            && unreached
+            && lent.starts_with("fetched 200")
+            && back.status == 200
+            && again.starts_with("fetched 403"),
+        json!({ "switched": switched.status, "paid": unpaid, "account": lent, "back": back.status, "again": again }),
+    );
+    let invites = format!("fetch http://api.fragment.internal/api/invites?for={owner_id} with {} in x-fragment-agent", w.agent);
+    let owners = asked_by(s, w.owner, "owner3", &invites)?;
+    let bens = asked_by_ben(s, 8, &invites)?;
+    s.ok(ASKER_CHECKS[7], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
+    let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
+    anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
+    Ok(turns.get())
+}
+
 pub(super) fn agent_replies(recs: &[Value], agent: &str) -> Vec<Value> {
     recs.iter().filter(|r| r["principal"] == agent && r["body"]["turn"].is_string() && r["body"]["text"].is_string()).cloned().collect()
 }
@@ -1404,6 +1563,53 @@ struct Doors<'a> {
 /// (telegram_settings.rs): this connector, set up as its page did before,
 /// a release later; and, once it is no door, another its agent's Set up
 /// makes. Answers the replies its agent's pokes made in the lane's own chat.
+/// Telegram's delivery of an update to a connector's inbox, with or without its webhook's secret.
+type Deliver<'a> = &'a dyn Fn(Value, Option<&str>) -> Result<crate::api::Reply>;
+
+/// Its agent's questions (FIN-747): a card of choices goes to Telegram as
+/// the computer's own SimpleX words one (applib/question.mjs), and its
+/// owner's next message there answers it, once, the turn going on with
+/// their words and no turn of their message's own; a card that needs a
+/// button says so there, and pressed in the chat, the turn's answer goes
+/// to Telegram too.
+fn telegram_questions(s: &mut Suite, api: &Api, c: &Doors, tg: &fragment_fakes::telegram::Telegram, name: &str, (deliver, hook, paul): (Deliver<'_>, &str, i64), wake: Duration) -> Result<()> {
+    use fragment_fakes::telegram::Telegram;
+    let said = |text: &str| tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"] == text);
+    let card_of = |text: &str| records(api, c.owner, name, "work").into_iter().find(|r| r["body"]["kind"] == "turn.prompt" && r["body"]["text"] == text).unwrap_or_default();
+    deliver(Telegram::message(15, paul, "Paul", "choose a plant"), Some(hook))?;
+    let question = "What should I plant?\n\n(Answer with one of: Basil, Mint, or in your own words.)";
+    let shown = s.eventually(wake, || said(question));
+    let card = card_of("What should I plant?");
+    s.ok(
+        "its agent's question goes to Telegram, its choices named and how to answer, as the computer's own SimpleX words it",
+        shown && card["body"]["asks"] == c.owner_id,
+        json!({ "sent": tg.sent(), "card": card }),
+    );
+    deliver(Telegram::message(16, paul, "Paul", "Mint"), Some(hook))?;
+    let chose = s.eventually(wake, || tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"].as_str().is_some_and(|t| t.contains("choose a plant (chose: Mint)"))));
+    let closed: Vec<Value> = records(api, c.owner, name, "work").into_iter().filter(|r| r["body"]["kind"] == "turn.prompt.closed" && r["body"]["prompt"] == card["body"]["prompt"]).collect();
+    let replies = agent_replies(&records(api, c.owner, name, "chat"), c.identity);
+    let own_turn = replies.iter().any(|r| r["body"]["text"].as_str().is_some_and(|t| t.ends_with("] Mint")));
+    s.ok(
+        "its owner's next message from Telegram answers it, once: the card closed with their words, its turn going on with them, and no turn of its own",
+        chose && closed.len() == 1 && closed[0]["body"]["outcome"] == "answered" && closed[0]["body"]["by"] == c.owner_id && closed[0]["body"]["text"] == "Mint" && !own_turn,
+        json!({ "closed": closed, "replies": replies, "sent": tg.sent() }),
+    );
+    deliver(Telegram::message(17, paul, "Paul", "approve this"), Some(hook))?;
+    let pressed = "Run `rm -rf ./scratch`?\n\n(This one needs a button: answer it in our chat.)";
+    let told = s.eventually(wake, || said(pressed));
+    let card = card_of("Run `rm -rf ./scratch`?");
+    let answer = json!({ "id": "e2e-tg-press", "body": { "kind": "prompt_response", "prompt": card["body"]["prompt"], "option": "once", "agent": c.identity, "turn": card["body"]["turn"], "answers": { "channel": "work", "seq": card["seq"] } } });
+    let r = api.signed(c.owner, "POST", &format!("/api/f/{name}/channels/chat"), Some(&answer))?;
+    let approved = s.eventually(wake, || tg.sent().iter().any(|m| m["chat_id"] == paul && m["text"].as_str().is_some_and(|t| t.contains("approve this (approved)"))));
+    s.ok(
+        "a question that needs a button says so in Telegram; pressed in the chat, its turn's answer goes to Telegram",
+        told && r.status == 200 && approved,
+        json!({ "pressed": { "status": r.status, "body": r.body }, "card": card, "sent": tg.sent() }),
+    );
+    Ok(())
+}
+
 fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite, u32, &str) -> Result<String>, wake: Duration) -> Result<usize> {
     use fragment_fakes::telegram::{Telegram, BOT_USERNAME};
     const TOKEN: &str = "7001000:e2e-telegram-bot-token";
@@ -1533,14 +1739,21 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
     // (FIN-393, telegram_settings.rs)
     let settings = super::telegram_settings::Connector { owner: c.owner, owner_id: c.owner_id, agent: c.agent, identity: c.identity, tg: &tg, token: TOKEN, wake };
     super::telegram_settings::after_a_release(s, api, &settings, &name, HOOK)?;
-    // its words before a tool call stay in the chat; a reply's file, which a
-    // viewer cannot upload, is named in its words
+    // its words before a tool call stay in the chat; a reply's file, which
+    // its agent (a viewer there) uploads as the connector's own agent, is
+    // the chat's, and Telegram is told so with its words
     deliver(Telegram::message(12, PAUL, "Paul", "tool please"), Some(HOOK))?;
     let tooled = s.eventually(wake, || sent("tool please").is_some());
     s.ok("its agent's interim words are not sent to Telegram, its answer is", tooled && sent("Let me look.").is_none(), json!(tg.sent()));
     deliver(Telegram::message(13, PAUL, "Paul", "draw me something"), Some(HOOK))?;
-    let named = s.eventually(wake, || sent("could not be attached").is_some());
-    s.ok("a reply whose file a viewer cannot attach goes with its words, saying so", named, json!(tg.sent()));
+    let named = s.eventually(wake, || sent("open the chat to see it").is_some());
+    let drawn = agent_replies(&records(api, c.owner, &name, "chat"), c.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
+    let blob = api.signed(c.owner, "GET", &format!("/api/f/{name}/blobs/{}", drawn["body"]["attachments"][0]["sha256"].as_str().unwrap_or("")), None)?;
+    s.ok(
+        "its agent's reply's file is in the connector's chat (its agent, a viewer there, uploads it), and Telegram is told so with its words",
+        named && blob.status == 200 && blob.text.contains("a drawing for") && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
+        json!({ "sent": tg.sent(), "reply": drawn, "blob": blob.status }),
+    );
     // while its agent works on a message from Telegram (a slow tool call),
     // Telegram shows the bot typing, and no longer once its answer went
     let relay = ran(&deliver(Telegram::message(14, PAUL, "Paul", "tool please, slowly"), Some(HOOK))?);
@@ -1556,6 +1769,7 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
             && answer.is_some_and(|at| actions.iter().any(|a| a["after"] == at) && actions.iter().all(|a| a["action"] == "typing" && a["after"].as_u64().is_some_and(|n| n <= at as u64))),
         json!({ "relay": relay, "typing": typing, "answer": answer, "actions": actions, "sent": tg.sent() }),
     );
+    telegram_questions(s, api, c, &tg, &name, (&deliver, HOOK, PAUL), wake)?;
 
     // only its owner edits it: the agent, acting for its owner, sets none of
     // its secrets (it would know the webhook's and forge a delivery), writes
@@ -2667,7 +2881,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         );
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
-        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
+        for label in OWN_MOVE_CHECKS.iter().chain(SWAP_CHECKS).chain(MODEL_CHECKS).chain(OWN_SIGNIN_MOVED_CHECKS).chain(VAULT_CHECKS).chain(GRANT_CHECKS).chain(ASKER_CHECKS).chain(&QUOTE_CHECKS).chain(&["narrowed, it is refused a provider its owner has"]) {
             s.skip(label, "it needs the stub's fetch, and the fakes' accounts and providers behind the swap");
         }
     } else {
@@ -2710,6 +2924,7 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let r = allow(&owner, Value::Null)?;
         s.ok("null gives it every provider its owner has again", r.status == 200 && r.body["agents"][0]["connections"].is_null(), &r);
         replies_so_far += grant_checks(s, api, &swapping, &fetched)?;
+        replies_so_far += asker_checks(s, api, &swapping, &chat_name, wake)?;
     }
     // its uses from before the move, owed to its owner's ledger (M16)
     uses_checks(s, api, &owner, &id, &agent_name, &month)?;
@@ -3545,6 +3760,84 @@ pub fn computer_room(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "view": gave_up, "saves": kept["saves"], "restored": kept["restored"] }),
     );
     let _ = lever_with(api, &lone, json!({ "op": "fail-restore", "save": 0 }));
+    Ok(())
+}
+
+const DAMAGE_CHECKS: [&str; 2] = [
+    "a start whose restore comes in damaged (the lever's damage-restores) asks again and comes up from that same save: never found unusable, no rollback, no strike",
+    "a save whose copy in R2 is really bad (the lever's damage-stored) is found unusable as before, and the start comes up from the save before it",
+];
+
+/// A computer's restores (FIN-784; cell/backups.mjs): bytes damaged on
+/// their way into its container, the right length with the wrong contents
+/// (FIN-775), are asked again, and a save is found unusable only once every
+/// try came damaged. Before this, the first damaged restore marked a whole
+/// save unusable, and went back to the save before.
+/// Each start is its owner's restart, which restores the newest good save,
+/// never a snapshot (a preview keeps one at each sleep), and each check
+/// says it restored from the save.
+pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
+    if !s.section("computer-damage", &[crate::Need::Computers, crate::Need::Levers]) {
+        return Ok(());
+    }
+    let owner = api.person()?;
+    let (id, ok) = computer_saved(s, api, &owner, 1)?;
+    let within = if s.hosted() { HOSTED_WAKE } else { WAKE + WAKE };
+    let view = || api.signed(&owner, "GET", &format!("/api/computers/{id}"), None).map(|r| r.body).unwrap_or(Value::Null);
+    // the lines its nodes logged (a hosted run reads none)
+    let lines = |s: &Suite, what: &str| super::vault::logs(s).matches(what).count();
+    let generation = |v: &Value| v["generation"].as_u64().unwrap_or(0);
+    let from_save = |v: &Value, save: &Value| v["phase"] == "awake" && v["restored"]["from"] == "backup" && v["restored"]["save"] == save["id"];
+    // woken from save 1, then restarted with its home's restore damaged: its
+    // restart's save, restored from on its second try
+    let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
+    let up = s.eventually(within, || view()["phase"] == "awake");
+    let asked = lines(s, r#""restore":"asked again""#);
+    let damaging = lever_with(api, &id, json!({ "op": "damage-restores", "times": 1 }))?;
+    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&view()), within)?;
+    let kept = lever(api, &id, "saves")?.body;
+    // its damage was spent on the way (a lever's pull answers what the last left)
+    let spent = lever_with(api, &id, json!({ "op": "damage-restores", "times": 0 }))?.body;
+    s.ok(
+        DAMAGE_CHECKS[0],
+        ok && up
+            && damaging.status == 200
+            && spent["unspent"] == 0
+            && r.status == 200
+            && done
+            && kept["saves"][0]["number"] == 2
+            && from_save(&v, &kept["saves"][0])
+            && v["restored"]["rollback"] == false
+            && kept["failures"] == 0
+            && kept["saves"].as_array().is_some_and(|l| l.iter().all(|s| s["unusable"] == false))
+            && (s.hosted() || lines(s, r#""restore":"asked again""#) > asked),
+        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body, "spent": spent }),
+    );
+    // put to sleep, its newest save's copy in R2 damaged, and restarted:
+    // asleep, it saves nothing more, so its start restores that save
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let saved = lever(api, &id, "saves")?.body;
+    let newest = saved["saves"][0].clone();
+    let damaging = lever_with(api, &id, json!({ "op": "damage-stored", "save": newest["number"] }))?;
+    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&view()), within)?;
+    let kept = lever(api, &id, "saves")?.body;
+    // the save before it a start restores: the newest not found unusable
+    let before = kept["saves"].as_array().and_then(|l| l.iter().skip(1).find(|s| s["unusable"] == false)).cloned().unwrap_or(Value::Null);
+    s.ok(
+        DAMAGE_CHECKS[1],
+        slept
+            && damaging.status == 200
+            && r.status == 200
+            && done
+            && newest["number"] == 3
+            && before["number"] == 2
+            && from_save(&v, &before)
+            && v["restored"]["rollback"] == true
+            && kept["saves"][0]["id"] == newest["id"]
+            && kept["saves"][0]["unusable"] == true
+            && kept["failures"] == 0,
+        json!({ "view": v, "saves": kept["saves"], "failures": kept["failures"], "damaging": damaging.body }),
+    );
     Ok(())
 }
 

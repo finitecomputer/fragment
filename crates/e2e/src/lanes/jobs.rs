@@ -1098,6 +1098,34 @@ fn future_rows(s: &mut Suite, api: &Api) -> Result<()> {
     Ok(())
 }
 
+/// A channel trigger's `kinds` (FIN-747): it starts a run for a record
+/// whose body's `kind` is one of them, a string, and for no other: not
+/// another kind, none, nor a number or a boolean that reads as one of
+/// them; listed in its manifest's order. A run is started as its record is
+/// appended, so the runs are there once the posts are answered.
+fn trigger_kinds(s: &mut Suite, api: &Api) -> Result<()> {
+    let owner = api.person()?;
+    let (name, _) = jobs_fragment(s, api, &owner, "kinds", |m| {
+        m["channels"]["pings"] = json!({ "read": "viewer", "post": "owner" });
+        m["triggers"].as_array_mut().expect("the fixture's triggers").push(json!({ "channel": "pings", "kinds": ["turn.prompt", "1"], "run": "tick" }));
+    })?;
+    let listed = api.signed(&owner, "GET", &format!("/api/f/{name}/triggers"), None)?;
+    let mine = listed.body["triggers"].as_array().and_then(|l| l.iter().find(|t| t["channel"] == "pings").cloned()).unwrap_or_default();
+    let mut posted = vec![];
+    for (i, body) in [json!({ "kind": 1 }), json!({ "kind": true }), json!({ "kind": "turn.start" }), json!({ "text": "no kind" }), json!({ "kind": "1" }), json!({ "kind": "turn.prompt" })].into_iter().enumerate() {
+        let r = api.signed(&owner, "POST", &format!("/api/f/{name}/channels/pings"), Some(&json!({ "id": format!("k{i}"), "body": body })))?;
+        posted.push(r.status);
+    }
+    let ticked: Vec<Value> = runs(api, &owner, &name, "&op=tick").into_iter().filter(|r| r["trigger"] == "pings").collect();
+    let seqs: Vec<i64> = records(api, &owner, &name, "pings").iter().filter(|r| r["body"]["kind"] == "1" || r["body"]["kind"] == "turn.prompt").filter_map(|r| r["seq"].as_i64()).collect();
+    s.ok(
+        "a channel trigger that names kinds starts a run for a record of one of them alone, by its body's kind as a string, and lists them in order",
+        mine["kinds"] == json!(["turn.prompt", "1"]) && posted.iter().all(|s| *s == 200) && ticked.len() == 2 && seqs.len() == 2,
+        json!({ "trigger": mine, "posted": posted, "runs": ticked, "matching": seqs }),
+    );
+    Ok(())
+}
+
 fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     let (owner, editor, viewer, stranger) = (api.person()?, api.person()?, api.person()?, api.person()?);
     let (name, c) = jobs_fragment(s, api, &owner, "schedules", |m| {
@@ -1109,7 +1137,7 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
     for (who, role) in [(&editor, "editor"), (&viewer, "viewer")] {
         api.share(&name, who.pubkey_hex(), role)?;
     }
-    let (own, editor_id) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?);
+    let (own, editor_id, own_owner) = (api.status(&owner, &name)?.body["npub"].as_str().unwrap_or("").to_string(), api.identity(&editor)?, api.identity(&owner)?);
     let path = format!("/api/f/{name}/schedules");
     let list = || api.signed(&owner, "GET", &path, None).ok().and_then(|r| r.body["schedules"].as_array().cloned()).unwrap_or_default();
     let add = |who: &Keys, cron: &str, channel: &str, record: Value| api.signed(who, "POST", &path, Some(&json!({ "cron": cron, "channel": channel, "record": record })));
@@ -1168,9 +1196,9 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
             && first["nextAt"].as_i64().is_some_and(|n| n > now_ms()),
         &r,
     );
-    let again = add(&owner, " 0 0 1 1  * ", "pings", json!({ "payload": "water the plants", "source": "schedule" }))?;
+    let again = add(&editor, " 0 0 1 1  * ", "pings", json!({ "payload": "water the plants", "source": "schedule" }))?;
     s.ok(
-        "the same schedule added again is that one, added once (its cron's spacing and its record's key order aside)",
+        "the same schedule added again by its asker is that one, added once (its cron's spacing and its record's key order aside)",
         again.status == 200 && again.body["replayed"] == true && again.body["schedule"]["id"] == id && list().len() == 1,
         &again,
     );
@@ -1221,6 +1249,57 @@ fn scheduled_records(s: &mut Suite, api: &Api, long: Duration) -> Result<()> {
         by_viewer.status == 403 && rm.status == 200 && rm.body["removed"] == id && gone.status == 404 && lever.body["records"] == 0 && pinged().len() == before && list().is_empty(),
         json!({ "viewer": by_viewer.body, "removed": rm.body, "again": gone.status }),
     );
+
+    // whose ask it is (FIN-720): its maker's, checked again at each fire
+    let theirs = json!({ "source": "schedule", "payload": "the editor's" });
+    let r = add(&editor, "0 0 1 1 *", "pings", theirs.clone())?;
+    let sid = r.body["schedule"]["id"].as_i64().unwrap_or(0);
+    let before = pinged().len();
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "a schedule is its maker's ask: due, its record is the fragment's, written for them (its asker)",
+        r.status == 200 && fired && rec["principal"] == own.as_str() && rec["author"] == "platform" && rec["asker"] == editor_id.as_str() && rec["body"] == theirs,
+        &rec,
+    );
+    // one kept from before askers (its asker unset) is its maker's all the same
+    let legacy = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": name, "op": "legacy-schedule", "schedule": sid })))?;
+    let before = pinged().len();
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "one kept from before askers is its maker's ask: it fires written for them",
+        legacy.body["schedules"] == 1 && fired && rec["author"] == "platform" && rec["asker"] == editor_id.as_str() && rec["body"] == theirs,
+        json!({ "lever": legacy.body, "record": rec }),
+    );
+    let out = api.signed(&owner, "DELETE", &format!("/api/f/{name}/members/{editor_id}"), None)?;
+    let before = pinged().len();
+    let lever = cron_now(api, &name)?;
+    std::thread::sleep(Duration::from_secs(3));
+    let unfired = events(api, &owner, &name).into_iter().rev().find(|e| e["kind"] == "schedule.unfired").unwrap_or_default();
+    s.ok(
+        "its maker gone from the fragment, it fires no more for them (one from before askers too), saying why; it is kept, for its owner to remove",
+        out.status == 200 && pinged().len() == before && unfired["data"]["schedule"] == sid && unfired.to_string().contains("no longer in this fragment") && list().iter().any(|x| x["id"] == sid),
+        json!({ "removed": out.status, "lever": lever.body, "pinged": pinged().len() - before, "event": unfired }),
+    );
+    // the owner's identical one is theirs: it fires, for them
+    let mine = add(&owner, "0 0 1 1 *", "pings", theirs.clone())?;
+    let oid = mine.body["schedule"]["id"].as_i64().unwrap_or(0);
+    cron_now(api, &name)?;
+    let fired = s.eventually(long, || pinged().len() == before + 1);
+    let rec = pinged().last().cloned().unwrap_or_default();
+    s.ok(
+        "its owner's identical one, added after its maker left, is theirs and not a replay of the departed maker's: it fires, for them",
+        mine.status == 200 && mine.body["replayed"] == false && oid != sid && fired && rec["asker"] == own_owner.as_str() && list().len() == 2,
+        json!({ "added": mine.body, "record": rec }),
+    );
+    api.share(&name, editor.pubkey_hex(), "editor")?;
+    cron_now(api, &name)?;
+    let back = s.eventually(long, || pinged().len() == before + 3);
+    let gone = [sid, oid].map(|id| api.signed(&owner, "DELETE", &format!("{path}/{id}"), None).map(|r| r.status).unwrap_or(0));
+    s.ok("back in, the maker's fires for them again, beside the owner's; its owner removes both", back && gone == [200, 200] && list().is_empty(), json!({ "removed": gone }));
 
     // at most 32 a fragment; the same one again at the bound is still that one
     let filled: Vec<i64> = (1..=limits::RECORD_SCHEDULES_MAX).filter_map(|n| add(&editor, "0 0 1 1 *", "pings", json!({ "n": n })).ok().and_then(|r| r.body["schedule"]["id"].as_i64())).collect();
@@ -1521,6 +1600,7 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     woke_trigger(s, api, long)?;
     future_rows(s, api)?;
     scheduled_records(s, api, long)?;
+    trigger_kinds(s, api)?;
 
     // cron, last: its fragment was deployed before the sections ahead of
     // this one, so a full run has passed a minute boundary by now; alone,

@@ -31,9 +31,11 @@ pub struct Core {
 /// The core started and its bot API dialed; every frame it says, its
 /// process's end (`CoreExited`), and its socket's (`CoreLost`: the process
 /// may live on), sent to `to`.
-pub async fn start(cfg: &run::Config, dir: &Path, name: &str, to: mpsc::Sender<Msg>) -> Result<Core, String> {
+/// `socks`: the runner's proxy, which every connection the core makes goes
+/// through (files.rs `Relay`).
+pub async fn start(cfg: &run::Config, dir: &Path, name: &str, socks: Option<u16>, to: mpsc::Sender<Msg>) -> Result<Core, String> {
     let mut cmd = run::core_command(&cfg.bin, dir);
-    cmd.args(run::core_args(cfg, &dir.join("sx"), dir, name, None));
+    cmd.args(run::core_args(cfg, &dir.join("sx"), dir, name, socks));
     let mut child = cmd.spawn().map_err(|e| format!("the core did not start: {e}"))?;
     let pid = child.id().ok_or("the core ended at once")?;
     let spawned_ms = fragment_bridge::log::now_ms();

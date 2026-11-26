@@ -6,24 +6,74 @@
 // container calls are here too; they only call and call back: every
 // decision is Rust's (jobs.rs, computer.rs).
 import { DurableObject, WorkerEntrypoint, WorkflowEntrypoint } from "cloudflare:workers";
-import { connect } from "cloudflare:sockets";
 import { DirectoryBackup, DirectoryBackupGateway as SandboxGateway, SandboxBackupError, SandboxFileError } from "@cloudflare/sandbox";
-import { readAgain } from "./backup-reads.mjs";
+import { readAgain, restoreChecked } from "./backups.mjs";
 import { intercept, interceptSwap, settled, startIntercepted } from "./intercepts.mjs";
+import { relay } from "./relay.mjs";
 import * as rs from "./build/index.js";
 // A SimpleX door's object and its container's egress: JavaScript of its
 // own (door.mjs), no Rust in the cell's Wasm
-export { SimplexDoor, DoorEgress } from "./door.mjs";
+import { DoorEgress as DoorCalls } from "./door.mjs";
+export { SimplexDoor } from "./door.mjs";
+
+// Every call a door's container makes to `door.fragment.internal` goes to
+// its own door (door.mjs `DoorEgress`), but an XFTP relay
+// (`GET /relay?host=&port=`, a WebSocket): to one of the deployment's
+// connector relay targets alone, as Rust allows (`DoorRelay.target`),
+// piped by relay.mjs as a computer's is.
+export class DoorEgress extends DoorCalls {
+  async fetch(request) {
+    const url = new URL(request.url);
+    if (url.pathname !== "/relay") return super.fetch(request);
+    if (request.method !== "GET" || (request.headers.get("upgrade") ?? "").toLowerCase() !== "websocket") return Response.json({ error: "invalid", message: "a relay is a WebSocket" }, { status: 400 });
+    const target = rs.DoorRelay.target(this.env, url.searchParams.get("host") ?? "", url.searchParams.get("port") ?? "");
+    if (target.error) {
+      console.log(JSON.stringify({ relay: "refused", door: this.ctx.props.door, message: target.message }));
+      return Response.json(target, { status: 403 });
+    }
+    return relay(this.ctx, target, { door: this.ctx.props.door }, async () => {});
+  }
+}
 
 // The Sandbox SDK's gateway between a computer's container and its saves in
 // R2, whose ranged reads (a restore's) that storage failed are asked again
-// (backup-reads.mjs); every other request is the SDK's own, once.
+// (backups.mjs); every other request is the SDK's own, once. A read grant
+// the lever `damage-restores` marks (`ContainerHost`'s `#damage`) has one
+// byte of its first range flipped on its way, its length kept.
 export class DirectoryBackupGateway extends SandboxGateway {
   fetch(request) {
     if (request.method !== "GET") return super.fetch(request);
+    const damage = this.ctx.props?.damage === true;
     const again = (tried, status) => console.log(JSON.stringify({ backup: "read again", status, tried, key: this.ctx.props?.key }));
-    return readAgain(() => super.fetch(request), again);
+    const read = async () => {
+      const answer = await super.fetch(request);
+      const range = damage && answer.status === 206 && /^bytes 0-([0-9]+)\//.exec(answer.headers.get("content-range") ?? "");
+      if (!range || !answer.body) return answer;
+      // answered at its length, as the SDK's own answer is
+      const fixed = new FixedLengthStream(Number(range[1]) + 1);
+      flipped(answer.body).pipeTo(fixed.writable).catch(() => {});
+      return new Response(fixed.readable, answer);
+    };
+    return readAgain(read, again);
   }
+}
+
+// `body` with one byte of its first chunk flipped, its length kept: the
+// lever `damage-restores`, as FIN-775's transfers came. The chunk is
+// copied, never written in place.
+function flipped(body) {
+  let done = false;
+  const flip = new TransformStream({
+    transform(chunk, out) {
+      if (!done && chunk.byteLength > 0) {
+        chunk = new Uint8Array(chunk);
+        chunk[chunk.byteLength >> 1] ^= 0xff;
+        done = true;
+      }
+      out.enqueue(chunk);
+    },
+  });
+  return body.pipeThrough(flip);
 }
 
 export default rs.default;
@@ -229,6 +279,9 @@ async function tail(stream, keep) {
   return new TextDecoder().decode(last);
 }
 
+// The bucket a computer's saves are in (computer.rs's `js::BLOBS`).
+const BACKUPS_BINDING = "BLOBS";
+
 // A container step that answered nothing within its bound: its name
 // (`step`) and the bound (`ms`) say which, in its message too, so the
 // Rust side's failure (a save's, a start's, a stop's) says it.
@@ -304,15 +357,37 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The e2e's lever `damage-restores` (computer.rs): how many of the next
+  // restores' grants the gateway damages, one each.
+  #damage = 0;
 
   constructor(ctx, env, report) {
     this.#ctx = ctx;
     this.#env = env;
     this.#report = report;
-    this.#backups = new DirectoryBackup(ctx.container, ctx.exports.DirectoryBackupGateway, {
-      binding: "BLOBS",
-      prefix: `computers/${ctx.id}/backups/`,
+    const gateway = ctx.exports.DirectoryBackupGateway;
+    this.#backups = new DirectoryBackup(ctx.container, ({ props }) => gateway({ props: this.#damaged(props) }), {
+      binding: BACKUPS_BINDING,
+      prefix: this.#prefix,
     });
+  }
+
+  get #prefix() {
+    return `computers/${this.#ctx.id}/backups/`;
+  }
+
+  // Where R2 keeps `record`'s archive: the SDK's own name for it
+  // (`DirectoryBackup`'s key; computer.rs's export reads it so too).
+  #key(record) {
+    return `${this.#prefix}${record.id}.tar.zst`;
+  }
+
+  // `props` of a grant, a restore's marked for the gateway to damage while
+  // the lever asks for it (one grant is one restore tried)
+  #damaged(props) {
+    if (props.mode !== "read" || !(this.#damage > 0)) return props;
+    this.#damage--;
+    return { ...props, damage: true };
   }
 
   get #c() {
@@ -497,19 +572,34 @@ class ContainerHost {
     return bounded(`the backup of ${dir}`, ms, (signal) => this.#backups.backup({ ...options, signal }));
   }
 
-  // Restores `record` into its directory within `ms` (`Overdue` past it):
-  // null once it is in place, `{unusable}` when the save itself will never
-  // restore (its archive gone or altered: the SDK's BACKUP_NOT_FOUND and
-  // BACKUP_INTEGRITY), or `{noRoom}` when it found no room on the disk (a
-  // restore's SandboxFileError ENOSPC), which the Rust side tells from a
-  // failure that may pass (it throws).
+  // Restores `record` into its directory within `ms` (`Overdue` past it),
+  // asked again while its bytes come damaged (backups.mjs
+  // `restoreChecked`): null once it is in place, `{unusable}` when the
+  // save itself will never restore (its archive gone, the SDK's
+  // BACKUP_NOT_FOUND, or its bytes damaged at every try: BACKUP_INTEGRITY),
+  // or `{noRoom}` when it found no room on the disk (a restore's
+  // SandboxFileError ENOSPC), which the Rust side tells from a failure that
+  // may pass (it throws).
   async restore(generation, record, ms) {
-    if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+    const until = Date.now() + ms;
+    const left = () => Math.max(1, until - Date.now());
+    const restore = async () => {
+      if (generation !== this.#generation) throw new Error(`start ${generation} is not the running one`);
+      try {
+        await bounded(`the restore of ${record.dir}`, left(), (signal) => this.#backups.restore(record, { signal }));
+        return null;
+      } catch (e) {
+        if (SandboxBackupError.is(e) && e.code === "BACKUP_INTEGRITY") return `${e.code}: ${e.detail || e.message}`;
+        throw e;
+      }
+    };
     try {
-      await bounded(`the restore of ${record.dir}`, ms, (signal) => this.#backups.restore(record, { signal }));
-      return null;
+      return await restoreChecked({
+        restore,
+        again: (tried, why) => console.log(JSON.stringify({ restore: "asked again", tried, dir: record.dir, why, key: this.#key(record) })),
+      });
     } catch (e) {
-      if (SandboxBackupError.is(e) && (e.code === "BACKUP_NOT_FOUND" || e.code === "BACKUP_INTEGRITY")) {
+      if (SandboxBackupError.is(e) && e.code === "BACKUP_NOT_FOUND") {
         return { unusable: `${e.code}: ${e.detail || e.message}` };
       }
       if (SandboxFileError.is(e) && e.operation === "restore" && e.code === "ENOSPC") {
@@ -522,6 +612,26 @@ class ContainerHost {
   // Deletes `record`'s archive within `ms` (`Overdue` past it).
   async forget(record, ms) {
     await bounded(`the delete of record ${record.id}`, ms, (signal) => this.#backups.delete(record, { signal }));
+  }
+
+  // The lever `damage-restores`: the next `times` restores each come
+  // damaged once. Answers how many the last pull left unspent.
+  damage(times) {
+    const unspent = this.#damage;
+    this.#damage = times;
+    return unspent;
+  }
+
+  // The lever `damage-stored`: R2's copy of `record` with one byte flipped,
+  // its length kept, a stored copy really bad (a test fleet's saves are
+  // small, so read whole).
+  async damageStored(record) {
+    const bucket = this.#env[BACKUPS_BINDING];
+    const object = await bucket.get(this.#key(record));
+    if (object === null) throw new Error(`record ${record.id} is not in R2`);
+    const bytes = new Uint8Array(await object.arrayBuffer());
+    bytes[bytes.length >> 1] ^= 0xff;
+    await bucket.put(this.#key(record), bytes, { httpMetadata: object.httpMetadata, customMetadata: object.customMetadata });
   }
 
   // A snapshot of the container within `ms` (`Overdue` past it): its id.
@@ -719,86 +829,10 @@ export class ComputerEgress extends WorkerEntrypoint {
     const asked = route === "api" && request.method === "GET" && new URL(request.url).pathname === "/api/computer/relay" && (request.headers.get("upgrade") ?? "").toLowerCase() === "websocket";
     const answer = await rs.ComputerEgress.handle(request, this.env, this.ctx, computer, route);
     const lease = asked ? answer.headers.get("x-fragment-relay") : null;
-    return lease ? relay(this.ctx, this.env, computer, lease, answer.headers) : answer;
+    if (!lease) return answer;
+    const h = answer.headers;
+    const target = { host: h.get("x-fragment-relay-host"), port: Number(h.get("x-fragment-relay-port")), bytesMax: Number(h.get("x-fragment-relay-bytes")), msMax: Number(h.get("x-fragment-relay-ms")) };
+    return relay(this.ctx, target, { computer }, (bytes) => rs.ComputerEgress.relay_closed(this.env, computer, lease, bytes));
   }
 }
 
-// An XFTP relay (fragment_core::relay; docs/computers.md, "The XFTP
-// relay"): the guest's WebSocket piped to raw TCP to the host Rust allowed
-// (`connect()`, which nothing inspects: Containers reset a TLS hello on 443
-// that names no server, and SimpleX's servers take their protocol only from
-// one). Bytes pass untouched both ways, the core's TLS end to end; this sees
-// their count and times alone, and logs its open and close, never what is
-// carried. It ends at its bounds (bytes, time), on either side's close or
-// error, and once: its place freed and its bytes counted at the computer.
-// Not piped through Rust: a stream of bytes, nothing in it to decide.
-// A frame from the computer is at most this (the bridge sends 16 KiB), and
-// what waits to be written toward the server at most this, at once.
-const RELAY_FRAME_MAX = 256 * 1024;
-const RELAY_QUEUE_MAX = 1024 * 1024;
-function relay(ctx, env, computer, lease, headers) {
-  const host = headers.get("x-fragment-relay-host");
-  const port = Number(headers.get("x-fragment-relay-port"));
-  const bytesMax = Number(headers.get("x-fragment-relay-bytes"));
-  const msMax = Number(headers.get("x-fragment-relay-ms"));
-  const [client, server] = Object.values(new WebSocketPair());
-  server.accept();
-  const t0 = Date.now();
-  let bytes = 0;
-  // what waits to be written toward the server: bounded on its own, apart
-  // from the relay's total (Alex's review): a server that stops reading
-  // closes the relay, never piles the computer's bytes up in memory
-  let queued = 0;
-  let ended = false;
-  const socket = connect({ hostname: host, port }, { secureTransport: "off", allowHalfOpen: false });
-  const writer = socket.writable.getWriter();
-  const end = (why, code) => {
-    if (ended) return;
-    ended = true;
-    clearTimeout(timer);
-    try { server.close(code, why); } catch {}
-    socket.close().catch(() => {});
-    console.log(JSON.stringify({ relay: "close", computer, host, port, bytes, ms: Date.now() - t0, why }));
-    ctx.waitUntil(rs.ComputerEgress.relay_closed(env, computer, lease, bytes));
-  };
-  const timer = setTimeout(() => end("its time is up", 4008), msMax);
-  const counted = (n) => {
-    bytes += n;
-    if (bytes <= bytesMax) return true;
-    end("its bytes are spent", 4008);
-    return false;
-  };
-  server.addEventListener("message", (e) => {
-    if (ended) return;
-    const data = typeof e.data === "string" ? new TextEncoder().encode(e.data) : new Uint8Array(e.data);
-    // an empty frame carries nothing: no write is queued for it
-    if (data.byteLength === 0) return;
-    if (data.byteLength > RELAY_FRAME_MAX) return end("a frame past its bound", 4008);
-    if (!counted(data.byteLength)) return;
-    queued += data.byteLength;
-    if (queued > RELAY_QUEUE_MAX) return end("the server is not taking what it is sent", 4008);
-    // writes queue in order on the stream; each one written frees its bytes
-    writer.write(data).then(() => { queued -= data.byteLength; }, () => end("the server's side failed", 1011));
-  });
-  server.addEventListener("close", () => end("the computer closed it", 1000));
-  server.addEventListener("error", () => end("the computer's side failed", 1011));
-  socket.opened.then(
-    () => console.log(JSON.stringify({ relay: "open", computer, host, port })),
-    () => end("the server did not answer", 1011),
-  );
-  ctx.waitUntil((async () => {
-    const reader = socket.readable.getReader();
-    try {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done || ended) break;
-        if (!counted(value.byteLength)) break;
-        server.send(value);
-      }
-      end("the server closed it", 1000);
-    } catch {
-      end("the server's side failed", 1011);
-    }
-  })());
-  return new Response(null, { status: 101, webSocket: client });
-}
