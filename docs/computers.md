@@ -564,12 +564,16 @@ the DO removes them from one started from a snapshot.
   unusable, as above, once a try beside them failed too; otherwise (a read
   that failed too) the restore is asked again, three tries in all, within
   its own bound, and a start whose tries all came damaged fails as one that
-  may pass, its save kept. A save's checks never hold its guest: a sleep
-  a wake cancelled as it saved lets its guest go once its records are all
-  taken, as an awake save does after its home; and a check is given up,
-  its record kept unchecked, once its save is no longer the one its
-  lifecycle asks (an owner's sleep or restart asked its own), so that one's
-  start is never held up by it. A start after a failed one reads R2's copy
+  may pass, its save kept. A save's checks are never a wait for anyone,
+  looked at every second as they read: a sleep a wake cancelled lets its
+  guest go once its records are all taken, as an awake save does after its
+  home; and a check is given up, its record kept unchecked as before the
+  check, once its save is no longer the one its lifecycle asks (an owner's
+  sleep or restart asked its own) or a start is owed after it (an owner's
+  restart, or a wake that came during an owner's sleep, waits for its
+  stop). So an idle sleep's save, and an owner's sleep's that nothing waits
+  on, are checked; a restart's is kept as before, and its start's restore
+  checks it. A start after a failed one reads R2's copy
   beside its first try too, so a copy damaged in R2 is found even when a
   long restore comes damaged with no time left to read it after (an 8 GB
   save's): the next wake goes back, as it must. A later start's save kept, an earlier start's

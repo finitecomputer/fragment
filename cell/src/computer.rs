@@ -243,8 +243,8 @@ const STALL_FAILING_START_MAX_MS: u64 = 10 * 60_000;
 const TAKE_OVER_RETRY_MS: i64 = 60_000;
 /// The lever's `fail-starts` and `fail-takeover-destroys` count at most this.
 const LEVER_FAILS_MAX: u32 = 10;
-/// A save's check of R2's copy looks this often whether its save is still
-/// the one its lifecycle asks (`stored_while_asked`): a lifecycle read.
+/// A save's check of R2's copy looks this often at its lifecycle
+/// (`stored_while_asked`): whether its guest may go, or its read is given up.
 const CHECK_LOOK_MS: u64 = 1_000;
 /// A pass of deletes of the records let go of (`forget`) ends within this:
 /// an R2 delete answers in well under a second, and what a pass leaves is
@@ -2357,13 +2357,6 @@ impl ComputerCell {
         // still a sleep's own save, its lifecycle read as it is asked (a wake
         // during its checks makes it an awake save, which goes on)
         let sleeps = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Sleeping { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
-        // every record is taken: a sleep a wake cancelled as it saved holds
-        // its guest no longer (`HomeSaved` lets an awake save's go, once)
-        // than a save that is not a sleep's would, its checks never a
-        // wait for turns
-        if self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, unheld: false, .. }) if s == seq)) {
-            until += self.home_saved(generation, seq).await;
-        }
         let snapshot_after = sleeps() && self.cfg.computer_snapshots && self.saves().is_ok_and(|s| !s.fresh());
         let checks_until = if snapshot_after { until.min(sleep_until - SNAPSHOT_MAX_MS - AFTER_SNAPSHOT_MS - FORGET_PASS_MS) } else { until };
         for (at, dir) in SAVED_DIRS.into_iter().enumerate() {
@@ -2452,25 +2445,43 @@ impl ComputerCell {
         js::from_js(&record).map_err(CellError::host)
     }
 
-    /// `stored`, given up (`Unread`, its record kept unchecked, as master
-    /// keeps every one) once save `seq` of start `generation` is no longer
-    /// the one its lifecycle asks (an owner's sleep or restart asked its
-    /// own), looked at every `CHECK_LOOK_MS`: its alarm ends then, so that
-    /// one's owed start is never held up by this one's read.
+    /// `stored`, with its records all taken, never a wait for anyone: it
+    /// lets its guest go once a wake cancelled its sleep (`HomeSaved`, as
+    /// an awake save's home does), and is given up (`Unread`, its record
+    /// kept unchecked, as master keeps every one) once its save is no
+    /// longer the one its lifecycle asks (an owner's sleep or restart asked
+    /// its own) or a start is owed after it (an owner's restart, or a wake
+    /// after an owner's sleep, waits for its stop), looked at every
+    /// `CHECK_LOOK_MS`. A sleep's own save, nothing waiting, is read whole.
     async fn stored_while_asked(&self, record: &Value, until: i64, generation: u64, seq: u64) -> Checked {
-        let asked = || self.lifecycle().is_ok_and(|l| l.generation() == generation && matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq));
-        if !asked() {
-            return Checked::Unread("a newer save was asked".into());
+        let given_up = || match self.lifecycle() {
+            Err(e) => Some(e.message),
+            Ok(l) if l.generation() != generation || !matches!(l.saving(), Some(Saving::Save { seq: s, .. }) if s == seq) => Some("a newer save was asked".into()),
+            Ok(l) if matches!(l.phase, Phase::Sleeping { owes_start: true, .. }) => Some("a start is owed after it".into()),
+            Ok(_) => None,
+        };
+        let woken = || self.lifecycle().is_ok_and(|l| matches!(l.phase, Phase::Awake { generation: g, .. } if g == generation) && matches!(l.saving(), Some(Saving::Save { seq: s, unheld: false, .. }) if s == seq));
+        if let Some(why) = given_up() {
+            return Checked::Unread(why);
         }
-        let given_up = async {
+        if woken() {
+            self.home_saved(generation, seq).await;
+        }
+        let watched = async {
             // bounded: by the read it races, which ends by `until`
-            while asked() {
+            loop {
                 Delay::from(std::time::Duration::from_millis(CHECK_LOOK_MS)).await;
+                if let Some(why) = given_up() {
+                    break why;
+                }
+                if woken() {
+                    self.home_saved(generation, seq).await;
+                }
             }
         };
-        let checked = match futures_util::future::select(Box::pin(self.stored(record, until)), Box::pin(given_up)).await {
+        let checked = match futures_util::future::select(Box::pin(self.stored(record, until)), Box::pin(watched)).await {
             futures_util::future::Either::Left((checked, _)) => checked,
-            futures_util::future::Either::Right(_) => Checked::Unread("a newer save was asked as it was checked".into()),
+            futures_util::future::Either::Right((why, _)) => Checked::Unread(format!("{why} as it was checked")),
         };
         checked
     }

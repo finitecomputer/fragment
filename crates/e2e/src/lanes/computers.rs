@@ -3630,23 +3630,22 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
     let lines = |s: &Suite, what: &str| super::vault::logs(s).matches(what).count();
     let generation = |v: &Value| v["generation"].as_u64().unwrap_or(0);
     let from_save = |v: &Value, save: &Value| v["phase"] == "awake" && v["restored"]["from"] == "backup" && v["restored"]["save"] == save["id"];
-    // woken from save 1, then restarted with its home's backup damaged: the
-    // restart's save is 2, and its fresh start restores it
+    // woken from save 1, then put to sleep with its home's backup damaged
+    // (its owner's sleep: nothing waits on it, so its save is checked
+    // whole), its save 2; and restarted asleep, a fresh start of save 2
     let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/wake"), Some(&json!({})));
-    let mut v = Value::Null;
-    let up = s.eventually(within, || {
-        v = view();
-        v["phase"] == "awake"
-    });
+    let up = s.eventually(within, || view()["phase"] == "awake");
     let again = lines(s, r#""backup":"saved again""#);
     let damaging = lever_with(api, &id, json!({ "op": "damage-saves", "times": 1 }))?;
-    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&v), within)?;
+    let (slept, _) = put_to_sleep(s, api, &owner, &id);
+    let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&view()), within)?;
     let kept = lever(api, &id, "saves")?.body;
     // its damage was spent on the way (a lever's pull answers what the last left)
     let spent = lever_with(api, &id, json!({ "op": "damage-saves", "times": 0 }))?.body;
     s.ok(
         DAMAGE_CHECKS[0],
         ok && up
+            && slept
             && damaging.status == 200
             && spent["unspent"] == 0
             && r.status == 200
@@ -3658,8 +3657,8 @@ pub fn computer_damage(s: &mut Suite, api: &Api) -> Result<()> {
             && (s.hosted() || lines(s, r#""backup":"saved again""#) > again),
         json!({ "view": v, "saves": kept["saves"], "damaging": damaging.body, "spent": spent }),
     );
-    // restarted with its home's restore damaged: its save is 3, restored
-    // from on its second try
+    // restarted with its home's restore damaged: its save is 3 (a
+    // restart's, read back by its start), restored from on its second try
     let asked = lines(s, r#""restore":"asked again""#);
     let damaging = lever_with(api, &id, json!({ "op": "damage-restores", "times": 1 }))?;
     let (r, v, done) = restart_followed(s, api, &owner, &id, generation(&v), within)?;
