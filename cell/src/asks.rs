@@ -7,7 +7,8 @@
 //! - **An ask handed** (`asks_handed`): words on `chat` that start a turn
 //!   (`mandate::starts_turn`), someone's (`mandate::asked_of`: their own;
 //!   an agent's to another of its owner's agents, said on their owner's
-//!   own proven ask, that ask carried on, and no one else's: ask_of), to
+//!   own proven ask, that ask carried on, and no one else's: ask_of; or
+//!   someone a door heard, an ask no one proves, its asker empty), to
 //!   an agent member there since before
 //!   they were said (`mandate::heard_by`: as its bridge hears them), open
 //!   that agent's ask of them
@@ -306,11 +307,13 @@ impl FragmentCell {
     /// agent's own, unproven, lending nothing. Only the owner's own ask is
     /// ever carried on: anyone else's, through another of its agents,
     /// would reach what that agent's cap, grants and lend reach (FIN-615 PR
-    /// 16a).
+    /// 16a). Someone a door heard is an ask no one proves (an empty
+    /// asker): its agent acts as itself here alone (`Proof::Itself`).
     fn ask_of(&self, asked: &Asked, to: &Member, members: &[Member], (seq, at): (i64, i64)) -> CellResult<Ask> {
         let own = |asker: &str| Ask { asker: asker.to_string(), proven: false, at, carried: None };
         Ok(match asked {
             Asked::By(asker) => Ask { proven: true, ..own(asker) },
+            Asked::Heard => own(""),
             Asked::Agent(agent) if !members.iter().any(|m| npub::display(&m.principal) == *agent && m.owner.is_some() && m.owner == to.owner) => own(agent),
             Asked::Agent(agent) => {
                 #[derive(Deserialize)]

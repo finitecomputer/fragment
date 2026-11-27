@@ -199,8 +199,10 @@ message is:
   speak for no one on the platform. Their asker is `<via>:<from>`
   (`slack:U0456`), never an npub: their words answer no card and command
   nothing, and a question the agent asks them takes only their next
-  words, in the same room. The platform gives them no mandate (docs/api.md,
-  "Who asked: mandates").
+  words, in the same room. The platform gives them no mandate: their
+  chat opens their turn as an ask no one proves, so on it the agent acts
+  as itself, in that chat alone, and lends nothing of its owner's
+  (docs/api.md, "A place opens its agents' turns").
 - `room` says where: `id` the door's id for it (`^[A-Za-z0-9._-]{1,64}$`),
   `name` what it is called, `thread` the door's own, for its replies. The
   agent keeps a conversation (its runtime's session) per room of a chat:

@@ -231,7 +231,8 @@ impl FragmentCell {
     /// before; an older version than the one held changes nothing. Its
     /// rows and every other place's past `TURNS_HELD_MAX`, it holds as one
     /// ask no one proves: the agent acts as itself there alone
-    /// (`Proof::Itself`), narrower than any, never refused.
+    /// (`Proof::Itself`), narrower than any, never refused. A place says
+    /// so itself with an empty asker (someone its door heard: asks.rs).
     pub(crate) fn turns_in(&self, t: TurnsIn) -> CellResult<()> {
         if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(t.agent.as_str()) {
             return Err(CellError::new(ErrorCode::NotFound, "no such agent here: this fragment was made again since"));
@@ -239,7 +240,9 @@ impl FragmentCell {
         if self.cfg.test_hooks && self.meta(MetaKey::TestRefuseTurns)?.is_some() {
             return Err(CellError::new(ErrorCode::HostFailed, "refused by a test hook (`refuse-turns`)"));
         }
-        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && npub::is_identity(&p.asker) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
+        // an asker is an identity, or no one (an ask no one proves, with no mandate)
+        let asker_ok = |p: &PlaceTurn| npub::is_identity(&p.asker) || (p.asker.is_empty() && p.mandate.is_none());
+        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && asker_ok(p) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
         if !valid_fragment_name(&t.place) || t.version <= 0 || !t.turns.iter().all(well_formed) {
             return Err(CellError::invalid("a place's turns are its name, their version, and each its id, asker and mandate"));
         }

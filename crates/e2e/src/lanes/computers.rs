@@ -66,9 +66,9 @@ pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
 /// The app `asker_checks` asks: it tells whom it was told (`whoami`), and
 /// has an op for editors and up (`backstage`).
-const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
-const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
-const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
+pub(super) const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+pub(super) const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+pub(super) const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 
 /// Whose ask a turn is (FIN-720; docs/api.md, "An agent's computer proves
 /// who asked"): the checks `asker_checks` makes, as a run without the stub

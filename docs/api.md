@@ -216,7 +216,9 @@ on unproven, as itself, in the place it was asked alone (SHIP IT,
 **A place opens its agents' turns** (FIN-720; cell/src/asks.rs). Whose
 ask an agent's turn is is the word of the chat it was asked in, from its
 own records, never its computer's. Words on `chat` that start a turn,
-someone's (`mandate::asked_of`), to an agent member as its bridge hears
+someone's (`mandate::asked_of`; someone a door heard in a room is an
+ask no one proves, its asker empty, so the agent acts as itself in that
+chat alone: `Proof::Itself`), to an agent member as its bridge hears
 them (`mandate::heard_by`: whom `to` names, else whom a person
 @-mentions, any mention being every agent, else the chat's lead), open
 that agent's ask as they first reach it: sent on its socket that

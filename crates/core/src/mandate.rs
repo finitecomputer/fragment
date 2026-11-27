@@ -248,6 +248,12 @@ pub enum Asked {
     /// is their owner's own (`records.carried`, `Mandate::carried`), else
     /// the agent's own, with nothing to prove it.
     Agent(String),
+    /// Someone a door heard in a room (its `heard`, relaying no one: a
+    /// Slack teammate, docs/chat-records.md "A message heard in a room"):
+    /// no one on the platform, so an ask no one proves. Its agent acts as
+    /// itself, in that place alone, and lends nothing of its owner's
+    /// (`Proof::Itself`): never its owner's reach (FIN-508).
+    Heard,
 }
 
 /// Whose ask a record is (`Asked`), or no one's: app code's words, the
@@ -256,7 +262,21 @@ pub fn asked_of(principal: &str, author: Option<Author>, asker: Option<&str>, bo
     if author == Some(Author::Agent) {
         return crate::npub::is_identity(principal).then(|| Asked::Agent(principal.to_string()));
     }
+    if author == Some(Author::Door) && heard(body) {
+        return Some(Asked::Heard);
+    }
     asker_of(principal, author, asker, body).map(Asked::By)
+}
+
+/// Whether a door's record is someone it heard: it names them (`heard`)
+/// and relays no one (`relayed`), as an agent's bridge reads it.
+fn heard(body: &str) -> bool {
+    // most bodies name no one heard: no parse for them
+    if !body.contains("\"heard\"") {
+        return false;
+    }
+    let Ok(serde_json::Value::Object(o)) = serde_json::from_str::<serde_json::Value>(body) else { return false };
+    o.get("heard").is_some_and(serde_json::Value::is_object) && o.get("relayed").is_none()
 }
 
 /// Whose own words a record is, as a mandate names them: a person's own
@@ -434,6 +454,12 @@ mod tests {
         assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"over to you","turn":"t1"}"#), Some(Asked::Agent(juniper.clone())), "an agent's words: the ask they were said on, else its own");
         assert_eq!(asked_of(&juniper, Some(Author::Code), None, r#"{"text":"hi"}"#), None, "app code's words are no one's");
         assert_eq!(asked_of("anon:x", Some(Author::Person), None, r#"{"text":"hi"}"#), None, "an anonymous visitor asks no one");
+        let heard_in = r#"{"text":"ship it","heard":{"via":"slack","from":"U0456","name":"Maple"},"room":{"id":"C0123"}}"#;
+        assert_eq!(asked_of(&ben, Some(Author::Door), None, heard_in), Some(Asked::Heard), "someone a door heard: an ask no one proves");
+        let relayed = format!(r#"{{"text":"roll back","relayed":{{"via":"slack","for":"{ben}"}},"heard":{{"via":"slack","from":"U1","name":"Ben"}}}}"#);
+        assert_eq!(asked_of(&juniper, Some(Author::Door), None, &relayed), Some(Asked::By(ben.clone())), "a door's relay of its owner is theirs, whatever else it names");
+        assert_eq!(asked_of(&ben, Some(Author::Person), None, heard_in), Some(Asked::By(ben.clone())), "only a door's record is someone it heard");
+        assert_eq!(asked_of(&ben, Some(Author::Door), None, r#"{"text":"hi","heard":null}"#), None, "a `heard` naming no one is no one heard");
         let agents = ["npub1lead", "npub1maple"];
         assert_eq!(heard_by(r#"{"text":"hi"}"#, false, &agents), vec!["npub1lead"], "a person's words naming no one are the lead's");
         assert_eq!(heard_by(r#"{"text":"hi","to":["npub1maple"]}"#, false, &agents), vec!["npub1maple"], "`to` names whom");
@@ -639,6 +665,9 @@ mod tests {
         assert_eq!(busy, Proof::Itself(vec!["hall", "room"]), "two other people: no one's, in their places");
         assert_eq!(proof(&ana, &[turn("room", &ben, None)]), Proof::Itself(vec!["room"]), "one other, unproven");
         assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
+        // someone a door heard (an empty asker, its place's word: asks.rs)
+        // beside its owner's own proven ask: never its owner's reach
+        assert_eq!(proof(&ana, &[turn("own", &ana, a2), turn("talk", "", None)]), Proof::Itself(vec!["talk"]), "someone heard: the agent itself, in that chat alone");
         // replay: the same turns decide the same
         assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
     }

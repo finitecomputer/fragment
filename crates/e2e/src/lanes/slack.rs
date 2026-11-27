@@ -9,6 +9,9 @@
 //!   there, stamped the door's, with the channel's context; their turn is
 //!   asked as them, in that room, and the reply goes to the message's
 //!   thread, 👀 on it while the agent works;
+//! - on a teammate's ask the agent acts only as itself, in that chat: its
+//!   call to its owner's private app is refused, though its owner's same
+//!   ask goes (FIN-508 with FIN-720);
 //! - a teammate's DM is a room of its own;
 //! - a delivery not signed by its secret is refused, and one Slack sends
 //!   again is taken once.
@@ -154,6 +157,39 @@ pub(super) fn checks(s: &mut Suite, api: &Api, c: &Agent<'_>) -> Result<()> {
     );
     let twice = ran(&deliver(&mention, SIGNING.as_bytes())?);
     s.ok("a delivery Slack sends again is taken once", twice["output"]["ignored"] == "taken already", &twice);
+
+    // a teammate is no one on the platform: on their ask the agent acts
+    // as itself, in this chat alone, and lends nothing of its owner's.
+    // Its owner's app, the agent an editor there, Maple no member
+    let private = s.named(api, c.owner, "slack-private")?;
+    let app = s.create(api, c.owner, &private)?;
+    s.commit(&app, &[("applib/format.mjs", Some(super::computers::FORMAT_MJS))]);
+    super::app::ship(s, &app, super::computers::WHOAMI_APP, super::computers::WHOAMI_JSON);
+    let r = api.signed(c.owner, "PUT", &format!("/api/f/{private}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent in its owner's app: {r}");
+    let whoami = |id: &str| format!("fetch http://api.fragment.internal/api/f/{private}/ops/whoami with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", c.agent);
+    let here = format!("fetch http://api.fragment.internal/f/{name}/ with {} in x-fragment-agent", c.agent);
+    // the agent's reply to the chat's record of `text`, by its turn
+    let said_to = |text: &str| -> String {
+        let seq = chat().into_iter().rev().find(|r| r["body"]["text"] == text).and_then(|r| r["seq"].as_i64()).unwrap_or(0);
+        let turn = super::computers::turn_of(c.agent, &name, "chat", seq);
+        let reply = || agent_replies(&chat(), c.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
+        s.eventually(c.wake, || reply().is_some());
+        reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default()
+    };
+    let theirs = format!("{} then {here}", whoami("heard-private"));
+    ran(&deliver(&Slack::mention(DEPLOYS, MAPLE, &theirs, "1790000006.000100"), SIGNING.as_bytes())?);
+    let maples = said_to(&theirs);
+    let owners_ask = whoami("owner-private");
+    ran(&deliver(&Slack::dm(PAUL, &owners_ask, "1790000007.000100"), SIGNING.as_bytes())?);
+    let owners = said_to(&owners_ask);
+    let (in_app, in_chat) = maples.split_once(" then ").unwrap_or((maples.as_str(), ""));
+    let whose = |said: &str| serde_json::from_str::<Value>(said.strip_prefix("fetched 200: ").unwrap_or("")).map(|v| v["result"].clone()).unwrap_or(Value::Null);
+    s.ok(
+        "on a teammate's ask the agent acts as itself, in that chat alone: its call to its owner's private app (the agent an editor there) is refused, its call in the chat goes; its owner's same ask goes, as the agent",
+        in_app.starts_with("fetched 4") && in_chat.starts_with("fetched 200") && whose(&owners) == json!({ "principal": c.identity, "role": "editor" }),
+        json!({ "maple": maples, "owner": owners }),
+    );
 
     // a teammate's DM: a room of its own
     let run = ran(&deliver(&Slack::dm(MAPLE, "a quiet question", "1790000005.000100"), SIGNING.as_bytes())?);
