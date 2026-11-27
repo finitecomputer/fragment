@@ -493,21 +493,22 @@ export class SimplexDoor extends DurableObject {
     const c = this.ctx.container;
     // its owner's messages its inbox has yet to take, or a file its runner
     // gave that no delivery names yet (taken as it stopped: Codex's round on
-    // f434be3bb); and, its runner running, anything on its way through its
-    // connector: busy, its runner running on (again), which delivers it. Its
-    // check and its stop are one ask, as its computer's handover is: fenced,
-    // its runner keeps each new message (`#deliver`), so none comes to its
-    // connector between them (the review of 354324b90)
-    const busy = async () => {
+    // f434be3bb); and, before it stops, anything on its way through its
+    // connector, its runner running or not (one between lives starts again):
+    // busy, its runner running on (again), which delivers it. Its check and
+    // its stop are one ask, as its computer's handover is: fenced, its runner
+    // keeps each new message (`#deliver`), so none comes to its connector
+    // between them (the review of 354324b90)
+    const busy = async (stopped) => {
       await this.#drain();
       if (ended()) return null;
       const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
       const given = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner = 'given'").one().n;
       if (unsent > 0 || given > 0) return `${unsent} of its owner's messages, and ${given} of their files, still go to its connector: ask again in a moment`;
-      return c?.running ? await this.#quiet() : null;
+      return stopped ? null : await this.#quiet();
     };
     for (const stopped of [false, true]) {
-      const why = await busy();
+      const why = await busy(stopped);
       if (ended()) return gone();
       if (why) {
         if (fenced) await this.#resume();
@@ -1125,10 +1126,6 @@ export class SimplexDoor extends DurableObject {
   // again as its body is read (Codex's round on f434be3bb).
   #deliver(m) {
     if (this.#door()?.stopped === HANDED_BACK && !this.ctx.container?.running) return refusal(409, "handed_back", "this door handed its link back to its computer: its runner's words are taken no more");
-    // fenced for its way back, its runner running on: refused, its runner
-    // keeps it past its cursor, so its save carries it to its computer,
-    // whose core delivers it into its own chat
-    if (this.#door()?.stopped === HANDED_BACK) return refusal(503, "handing_back", "this door is handing its link back: its computer takes this message");
     if (!(typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64 && typeof m.text === "string")) throw Object.assign(new Error("a delivery is {id, kind, text, at, file}"), { status: 400 });
     // its file, which its runner gave the door first, named by its SHA-256;
     // one named otherwise (a runner that carried no files, whose delivery
@@ -1136,6 +1133,11 @@ export class SimplexDoor extends DurableObject {
     if (m.file != null && !shaOk(m.file?.sha256)) m = { ...m, file: null };
     const had = this.ctx.storage.sql.exec("SELECT mark FROM deliveries WHERE id = ?", m.id).toArray()[0];
     if (had) return json({ again: true }, 200, { "x-door-mark": String(had.mark) });
+    // fenced for its way back, its runner running on: a new one refused, so
+    // its runner keeps it past its cursor and its save carries it to its
+    // computer, whose core delivers it into its own chat; one it took
+    // already (its answer lost) is said taken, above, never delivered twice
+    if (this.#door()?.stopped === HANDED_BACK) return refusal(503, "handing_back", "this door is handing its link back: its computer takes this message");
     // its inbox behind by as many as it keeps: refused, so its runner
     // keeps its cursor on this one and delivers it again later, none lost
     const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;

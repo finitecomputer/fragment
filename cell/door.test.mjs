@@ -1403,6 +1403,32 @@ test("fenced for its way back, its runner running on, a message its runner offer
   assert.deepEqual(d.posted(), [], "nothing on to its connector");
 });
 
+test("a delivery it took whose answer its runner lost, asked again while fenced for a way back, is said taken: its runner's cursor moves past it, so its computer never delivers it again (Codex's check of 5038d9523)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  life(await d.restore(d.row().started));
+  assert.equal((await d.deliver("m4")).status, 200);
+  await d.lever("fence");
+  const again = await d.deliver("m4");
+  assert.deepEqual([again.status, (await again.json()).again], [200, true]);
+  assert.deepEqual(d.posted(), ["m4"], "once, to its connector");
+});
+
+test("a way back with its runner between lives (not running) still asks its connector first: busy, refused, and its runner starts again to send what is on its way (Codex's check of 5038d9523)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its save");
+  d.c.running = false;
+  d.inbox.busy = "has its agent at work in it";
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, (await r.json()).error], [409, "busy"]);
+  assert.equal(d.inbox.quiets.length, 1, "asked its connector, its runner not running");
+  assert.deepEqual([d.row().stopped, d.c.running], [null, true], "its fence let go, its runner started again");
+});
+
 test("the way back waits while its owner's messages still go to its connector, never a save past a message no one has", async () => {
   const d = door();
   await d.moved();

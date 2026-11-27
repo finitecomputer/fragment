@@ -1905,6 +1905,12 @@ impl FragmentCell {
     /// `work`, as its list row says it: started, a step, or a card answered,
     /// at most the bridge's `TURN_IDLE_MS_MAX` ago). `{busy}`: why, or null.
     pub(crate) async fn inbox_quiet(&self, given: Admits, body: &[u8]) -> CellResult<Response> {
+        // its door's question alone: a connector's (its template a door's),
+        // under its code's inbox secret, never a webhook's token (what runs
+        // here is its members' to read: Codex's check of 5038d9523)
+        if matches!(given, Admits::Token(_)) || self.meta(MetaKey::DoorTemplate)?.is_none() {
+            return Err(CellError::new(ErrorCode::NotFound, "no route POST /api/inbox/quiet"));
+        }
         self.admitted(given, body).await?;
         let run = self.rows("SELECT op, status FROM runs WHERE via = 'channel' AND status IN ('queued', 'running', 'held', 'blocked') ORDER BY id LIMIT 1", vec![])?;
         let at_work = "SELECT 1 FROM listed WHERE channel = 'work' AND at > ? AND (kind IN ('turn.start', 'turn.step') OR (kind = 'turn.prompt.closed' AND json_extract(fields, '$.outcome') = 'answered')) LIMIT 1";

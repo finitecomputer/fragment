@@ -1349,6 +1349,10 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     s.ok("the inbox's job runs as the fragment itself", done["status"] == "succeeded" && done["via"] == "channel" && done["principal"] == own.as_str(), &done);
     let items = api.op(&owner, &name, "items", "q", json!({}))?;
     s.ok("and saved what was delivered", items.body["result"] == json!([{ "text": "from the inbox", "source": "github" }]), &items);
+    // its token posts, and asks nothing of what runs here: the quiet
+    // question is a door's of its own connector (Codex's check of 5038d9523)
+    let asked = api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox/quiet", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), extra: vec![("x-fragment-inbox-token", token.clone())], ..Call::default() })?;
+    s.ok("an inbox's token asks nothing of what runs there (its quiet question is a door's)", asked.status == 404 && asked.body.get("busy").is_none(), &asked);
     let recs = records(api, &owner, &name, "inbox");
     s.ok("the inbox channel keeps the delivery", recs.len() == 1 && recs[0]["body"]["source"] == "github" && recs[0]["principal"] == "inbox", json!(recs));
     let r = api.call(Call {
