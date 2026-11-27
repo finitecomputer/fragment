@@ -29,6 +29,7 @@ bound FragmentStatus.agentRole default null
 bound FragmentStatus.blobMinBytes default null
 bound FragmentStatus.blobMinBytes range u64
 bound FragmentStatus.kind default "app"
+bound FragmentStatus.linkShut default null
 bound FragmentStatus.page default null
 bound FragmentStatus.reach default false
 bound FragmentStatus.title default null
@@ -41,6 +42,7 @@ bound ListedFragment.dock default true
 bound ListedFragment.kind default "app"
 bound ListedFragment.listed default []
 bound ListedFragment.microphone default false
+bound ListedFragment.onlyYou default false
 bound ListedFragment.owned default false
 bound ListedFragment.picture default null
 bound ListedFragment.pinned default false
@@ -209,6 +211,7 @@ field FragmentStatus.code required CodeStatus
 field FragmentStatus.counts required Counts
 field FragmentStatus.inboxToken required string|null
 field FragmentStatus.kind required FragmentKind
+field FragmentStatus.linkShut optional LinkShut|null
 field FragmentStatus.name required string
 field FragmentStatus.npub required string
 field FragmentStatus.owner required string
@@ -246,6 +249,7 @@ field ListedFragment.kind required FragmentKind
 field ListedFragment.listed optional array<ListedRecord>
 field ListedFragment.microphone optional boolean
 field ListedFragment.name required string
+field ListedFragment.onlyYou optional boolean
 field ListedFragment.owned optional boolean
 field ListedFragment.picture optional string|null
 field ListedFragment.pinned optional boolean
@@ -810,6 +814,7 @@ type Has in object
 type IdentityKind out enum
 type LeftBehind both object
 type Lend both object closed
+type LinkShut out enum
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -1039,6 +1044,8 @@ value FragmentKind sessions
 value FragmentKind skills
 value IdentityKind agent
 value IdentityKind person
+value LinkShut alone
+value LinkShut reach
 value ListWatchFrame changed
 value ListWatchFrame hello
 value ListWatchFrame invited

@@ -521,6 +521,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `counts` | [`Counts`](#counts) | required |  |
 | `inboxToken` | `string` or `null` | required | Editors and up see the inbox token. |
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
+| `linkShut` | [`LinkShut`](#linkshut) or `null` | optional | Why its link and public stay shut, if they do (`LinkShut`): the reason its visibility refuses them with, which its share sheet shows. Left out while they may open it. |
 | `name` | `string` | required |  |
 | `npub` | `string` | required |  |
 | `owner` | `string` | required |  |
@@ -595,6 +596,12 @@ both, closed. What an agent's owner lends it for someone else's ask in one place
 | `accounts` | `boolean` | required | The owner's accounts and keys: their connections, their own keys, their Vault's secrets. |
 | `spend` | `boolean` | required | The owner's credit, for paid tools (an operator's keys). |
 
+### `LinkShut`
+
+out. Why a fragment's link and public stay shut (FIN-615 PR 18): the one reason, decided in its own cell (`FragmentCell::link_shut`), that its visibility refuses them with, its status says and its share sheet shows.
+
+Values: `alone`, `reach`.
+
 ### `ListWatchFrame`
 
 out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` the page reads its list, and what it is told (`GET /api/notices`), again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
@@ -620,6 +627,7 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
 | `microphone` | `boolean` | optional | The signer lets its page use their microphone: their own yes, asked in the shell once (docs/api.md, "One ask"; `PUT /api/fragments/{name}/microphone`), one for every chat on the release's chat template. Left out while false. |
 | `name` | `string` | required |  |
+| `onlyYou` | `boolean` | optional | Its signer's own and theirs alone (`Sharing::only_you`): the label "Only you", which a row they own without it reads as "Shared" (FIN-615 PR 18). Derived as the row is read, never kept; left out while false, and on a row they don't own. |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
 | `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
 | `pinned` | `boolean` | optional | The signer pinned it: their own view, not the fragment's (`PUT /api/fragments/{name}/pinned`; the shell's sidebar shows it first in its section). Left out while false, so a row from an older platform reads as not pinned. |

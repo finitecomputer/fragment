@@ -426,12 +426,18 @@ export function createAppsPage(page, h, shelf = "apps") {
   // what the list says of who is in each of theirs: a change asks again
   const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => onShelf(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
 
-  // who may open one of the person's own, at a glance
+  // who may open one of the person's own, at a glance: "Only you" or
+  // "Shared" (the list's word, `sharedWord`; the access view's, read
+  // later), then what shares it: its link, its people, its invites
   function whoLine(f) {
     const line = h.el("span", "app-row-access");
     const row = access?.fragments?.find((r) => r.name === f.name);
-    const [glyph, general] = GENERAL[row?.sharing?.visibility ?? f.sharing?.visibility] ?? GENERAL.members;
-    line.append(h.icon(glyph), general);
+    const visibility = row?.sharing?.visibility ?? f.sharing?.visibility;
+    const [glyph, general] = GENERAL[visibility] ?? GENERAL.members;
+    const word = row?.sharing ? (row.onlyYou ? "Only you" : "Shared") : h.sharedWord(f);
+    line.append(h.icon(glyph), word ?? general);
+    if (word !== "Shared") return line;
+    if (visibility === "link" || visibility === "public") line.append(` · ${general}`);
     if (!row) {
       const n = (f.sharing?.guests ?? 0) + (f.sharing?.invites ?? 0);
       if (n) line.append(` · ${n} ${n === 1 ? "other" : "others"}`);
@@ -443,7 +449,6 @@ export function createAppsPage(page, h, shelf = "apps") {
     const more = names.length - NAMES_SHOWN + (row.more ?? 0);
     if (names.length) line.append(` · ${names.slice(0, NAMES_SHOWN).join(", ")}${more > 0 ? ` +${more}` : ""}`);
     else if (!row.members && row.sharing?.guests) line.append(` · ${row.sharing.guests} ${row.sharing.guests === 1 ? "other" : "others"}`);
-    else line.append(" · Only you");
     const invited = row.invites?.length ?? row.sharing?.invites ?? 0;
     if (invited) line.append(` · ${invited} invited`);
     return line;

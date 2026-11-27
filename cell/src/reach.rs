@@ -25,7 +25,7 @@
 //! same fragment's other origin, its members and visibility the same, so it
 //! is no sharing here. Temporary: docs/technical-debt-ledger.md.
 
-use fragment_proto::{ErrorCode, Reason};
+use fragment_proto::{ErrorCode, LinkShut, Reason};
 
 use crate::error::{CellError, CellResult};
 use crate::fragment::{FragmentCell, MetaKey};
@@ -56,11 +56,24 @@ impl FragmentCell {
         self.set_meta(MetaKey::ReachTold, "1")
     }
 
-    /// Its link or public, refused while it has reach.
-    pub(crate) fn share_while_private(&self) -> CellResult<()> {
-        match self.reaches()? {
-            true => Err(CellError::new(ErrorCode::Forbidden, PRIVATE).because(Reason::PrivateWhileReaching)),
-            false => Ok(()),
+    /// Why its link and public stay shut, if they do (FIN-615 PR 18): the
+    /// one reason its visibility refuses them with (`link_refused`), its
+    /// status says (`linkShut`) and its share sheet shows. An agent's own
+    /// page is its owner's alone (alone.rs); one with reach is shared by
+    /// name only (above).
+    pub(crate) fn link_shut(&self) -> CellResult<Option<LinkShut>> {
+        Ok(match self.alone()? {
+            Some(_) => Some(LinkShut::Alone),
+            None => self.reaches()?.then_some(LinkShut::Reach),
+        })
+    }
+
+    /// Its link or public, refused while they stay shut (`link_shut`).
+    pub(crate) fn link_refused(&self) -> CellResult<()> {
+        match self.link_shut()? {
+            Some(LinkShut::Alone) => Err(CellError::new(ErrorCode::Forbidden, crate::alone::AGENT)),
+            Some(LinkShut::Reach) => Err(CellError::new(ErrorCode::Forbidden, PRIVATE).because(Reason::PrivateWhileReaching)),
+            None => Ok(()),
         }
     }
 

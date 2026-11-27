@@ -832,5 +832,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, microphone: r.microphone != 0, chat_release, owned: false, listed })
+    // the label, read off the one test as the row is read (FIN-615 PR 18)
+    let only_you = r.role == Role::Owner && sharing.as_ref().is_some_and(Sharing::only_you);
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, microphone: r.microphone != 0, chat_release, only_you, owned: false, listed })
 }

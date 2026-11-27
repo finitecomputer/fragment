@@ -1208,6 +1208,12 @@ pub struct FragmentStatus {
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
+    /// Why its link and public stay shut, if they do (`LinkShut`): the
+    /// reason its visibility refuses them with, which its share sheet
+    /// shows. Left out while they may open it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub link_shut: Option<LinkShut>,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
     pub urls: Urls,
@@ -1354,6 +1360,13 @@ pub struct ListedFragment {
     #[serde(default, rename = "chatRelease", skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub chat_release: bool,
+    /// Its signer's own and theirs alone (`Sharing::only_you`): the label
+    /// "Only you", which a row they own without it reads as "Shared"
+    /// (FIN-615 PR 18). Derived as the row is read, never kept; left out
+    /// while false, and on a row they don't own.
+    #[serde(default, rename = "onlyYou", skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub only_you: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1524,6 +1537,19 @@ pub struct Sharing {
     pub reach: bool,
 }
 
+/// Why a fragment's link and public stay shut (FIN-615 PR 18): the one
+/// reason, decided in its own cell (`FragmentCell::link_shut`), that its
+/// visibility refuses them with, its status says and its share sheet shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LinkShut {
+    /// An agent's own page: its owner's alone (FIN-544).
+    Alone,
+    /// It holds a key or a door, so it is shared by name only (FIN-352).
+    Reach,
+}
+
 impl Sharing {
     /// Whether anyone but its owner and their own agents is in it, or is
     /// invited (a row sent before invites were counted may have some).
@@ -1582,6 +1608,10 @@ pub struct AccessRow {
     /// The invites waiting, when it was asked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invites: Vec<Invite>,
+    /// Its owner's alone (`Sharing::only_you`): the label "Only you", else
+    /// "Shared" (FIN-615 PR 18), derived as the row is read.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub only_you: bool,
 }
 
 fn is_zero_u64(n: &u64) -> bool {
@@ -3076,7 +3106,7 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, microphone: false, chat_release: false, owned: false, listed: vec![] }], limits: None };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, microphone: false, chat_release: false, only_you: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         // the limits a person's client checks its files against, when the platform names them
         let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
@@ -3084,7 +3114,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, microphone: false, chat_release: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, microphone: false, chat_release: false, only_you: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
             limits: None,
         };
         assert_eq!(

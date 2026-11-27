@@ -51,8 +51,8 @@ use std::collections::BTreeMap;
 
 use fragment_core::{form, npub};
 use fragment_proto::{
-    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, Lend, ListedFragment, Member, MemberList, Role, SetRole,
-    SetVisibility, Shared, Visibility,
+    limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, Lend, LinkShut, ListedFragment, Member, MemberList, Role, SetRole,
+    SetVisibility, Shared, Sharing, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -347,7 +347,7 @@ struct SheetStatus {
     title: Option<String>,
     view_token: Option<String>,
     reach: Option<bool>,
-    npub: String,
+    link_shut: Option<LinkShut>,
 }
 
 /// Emails and pictures for identities, asked of the registry
@@ -481,14 +481,14 @@ struct Sheet {
     link: Option<String>,
     /// Its address, which opens it for the people in it.
     canonical: String,
-    /// It holds a key or a door, so it has no share link and is not public
-    /// (reach.rs): the sheet shows With link and Public unavailable, says
-    /// once that the people added can use its keys, and its Copy link is
-    /// its address, never the share link.
+    /// It holds a key or a door (reach.rs): the sheet says once that the
+    /// people added can use its keys.
     reach: bool,
-    /// An agent's own, its owner's alone (alone.rs): by its kind, or its
-    /// own key among its members, as it is once it has run as an agent.
-    alone: bool,
+    /// Why its link and public stay shut, as the fragment says (its status's
+    /// `linkShut`, reach.rs `link_shut`): the sheet shows them unavailable,
+    /// saying why, and its Copy link is its address, never the share link.
+    /// An agent's own (`Alone`) also adds no one.
+    shut: Option<LinkShut>,
     profiles: BTreeMap<String, Profile>,
     /// The page's form token.
     form: String,
@@ -536,7 +536,6 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
     // an agent in with its person is no entry of its own (decision 64):
     // its person is the one, "with their agents", never named
     let all = members.members;
-    let alone = kind == FragmentKind::Agent || all.iter().any(|m| m.principal == status.npub);
     let with_agents: Vec<String> = all.iter().filter(|m| with_their_person(m, &all)).filter_map(|m| m.owner.clone()).collect();
     let members: Vec<Member> = all.iter().filter(|m| !with_their_person(m, &all)).cloned().collect();
     // the list says a lend to its owner alone, of their own agents; one
@@ -567,7 +566,7 @@ async fn load(env: &Env, cfg: &Config, url: &Url, name: &str, who: &Signed, sess
         link,
         canonical,
         reach: status.reach == Some(true),
-        alone,
+        shut: status.link_shut,
         profiles,
         form: form::issue(session, &purpose("share", name), js::now_ms()),
     })
@@ -690,13 +689,12 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     // that means, then its address and Copy
     out += "<section><h2>Link</h2><div class=\"link-card\">";
     let (path, named, means) = general(sheet.visibility);
-    // an agent's own is its owner's alone (alone.rs): no switch, but one
-    // to close a link from before the rule
-    let alone = sheet.alone;
+    // its link and public, shut for the fragment's own reason (reach.rs
+    // `link_shut`), show unavailable, saying why; an agent's own is its
+    // owner's alone: no switch, but one to close a link from before the rule
+    let alone = sheet.shut == Some(LinkShut::Alone);
     let alone_now = alone && sheet.visibility == Visibility::Members;
-    // with reach, or an agent's, With link and Public show, unavailable,
-    // saying why (reach.rs)
-    let locked = |v: Visibility| (sheet.reach || alone) && v != Visibility::Members;
+    let locked = |v: Visibility| sheet.shut.is_some() && v != Visibility::Members;
     let why = if alone { crate::alone::AGENT } else { REACH_LINE };
     if sheet.owner() && !alone_now {
         let option = |v: Visibility| {
@@ -713,14 +711,14 @@ fn render(sheet: &Sheet, flash: Option<Flash>) -> String {
     } else {
         out += &format!("<div class=\"access-now\">{}<span>{named}</span></div>", svg("i", path));
     }
-    let note = if alone_now || (sheet.owner() && sheet.reach && !alone) { why } else { means };
+    let note = if alone_now || (sheet.owner() && sheet.shut == Some(LinkShut::Reach)) { why } else { means };
     out += &format!("<p class=\"hint\" data-link-note>{note}</p>");
     // the share link: its owner's, while it is what opens it. With reach,
     // Copy link never gives it, though one from before the rule still
     // opens it: the sheet gives it to no one more (reach.rs); New link, in
     // its field, still ends it
     let shared = sheet.link.as_deref().filter(|_| sheet.visibility == Visibility::Link);
-    let copied = shared.filter(|_| !sheet.reach && !alone).unwrap_or(&sheet.canonical);
+    let copied = shared.filter(|_| sheet.shut.is_none()).unwrap_or(&sheet.canonical);
     let rotate = match sheet.owner() && shared.is_some() && !alone {
         true => action_form(
             sheet,
@@ -1132,7 +1130,8 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
             // a guest's agent named nowhere, its members read or not (decision 64)
             let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
             let agents = fragment_core::permit::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
-            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
+            let only_you = f.sharing.as_ref().is_some_and(Sharing::only_you);
+            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites, only_you }
         })
         .collect();
     Ok(Access { fragments })

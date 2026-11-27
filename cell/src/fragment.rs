@@ -1744,6 +1744,8 @@ impl FragmentCell {
             view_token: self.shares(caller).then_some(facts.view_token),
             // it stays its owner's and their agents' while it has reach (reach.rs)
             reach: self.reaches()?,
+            // why its link and public stay shut: what its share sheet offers
+            link_shut: self.link_shut()?,
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),

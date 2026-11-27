@@ -1350,11 +1350,10 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; its link or public, not with reach
-        // (reach.rs) nor on an agent's own (alone.rs)
+        // members only narrows it; its link or public, only while they may
+        // open it (reach.rs `link_shut`)
         if body.visibility != Visibility::Members {
-            self.share_while_alone()?;
-            self.share_while_private()?;
+            self.link_refused()?;
         }
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
