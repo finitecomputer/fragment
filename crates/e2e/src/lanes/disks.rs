@@ -40,7 +40,7 @@ const CYCLES_MAX: u32 = 1_000;
 const CRASH_EVERY: u32 = 10;
 const FILL_MIB: u32 = 64;
 
-const DISK_CHECKS: [&str; 14] = [
+const DISK_CHECKS: [&str; 15] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
@@ -55,6 +55,7 @@ const DISK_CHECKS: [&str; 14] = [
     "a new disk's guest that reads its view has its disk kept as come up before its read is heard: no reading of its row shows its guest heard and its disk never up",
     "its owner's wipe from the CLI (`fragment operator wipe --yes`) finishes, its disk's settle waited out within its calls, and deletes every object of its disk's lives",
     "a computer on a disk restores no save, so a restore's retry never touches it: damage armed for its next restores (the lever `damage-restores`) stays unspent through a blank first life's fall back to a new disk, and through a wake after an export took a save, no save found unusable and its writes read there",
+    "a sleep whose disk's storage is unreachable at its final flush (the lever `fpac-refuse-at-stop`, past the old 150 s wait) keeps its container until that flush lands: a write made at its stop, which only that flush ships, is there after the next wake, its sleep clean",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -264,8 +265,40 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
         armed.status == 200 && woke && from == "disk" && first_line(&read) == "read disk/crash.txt: synced" && slept && left == Some(u64::from(RESTORE_DAMAGE)) && !unusable && fell_unspent == Some(u64::from(RESTORE_DAMAGE)),
         json!({ "fellBack": { "unspent": fell_unspent }, "afterExport": { "from": from, "read": read, "unspent": left, "saves": saves["saves"] } }),
     );
+
+    // FIN-783: its storage unreachable from its stop's signal for longer
+    // than the old wait (its guest's 140 s, the platform's 150 s): its
+    // container kept until its final flush lands, a write made at the stop
+    // (the stub's `at-stop`) shipped by that flush alone
+    let at_stop = talk.said(s, "at-stop disk/last-words.txt said at the stop")?;
+    let life = view()["restored"]["generation"].as_u64().unwrap_or(0);
+    let armed = lever_with(api, &id, json!({ "op": "fpac-refuse-at-stop", "ms": REFUSE_MS }))?;
+    let t0 = Instant::now();
+    let slept = s.eventually(Duration::from_millis(REFUSE_MS) + WAKE + WAKE, || {
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        phase(api, &owner, &id) == "asleep"
+    });
+    let took_ms = t0.elapsed().as_millis() as u64;
+    let after = row();
+    let clean = head_of(&after["head"]).is_some_and(|(e, c)| e == life && c);
+    let read = talk.said(s, "read disk/last-words.txt")?;
+    let last_sleep = lines(s).1.into_iter().rev().find(|l| l["sleep"]["generation"] == life).map(|l| l["sleep"].clone());
+    // asleep again, as every check before leaves it
+    let (slept_again, _) = put_to_sleep(s, api, &owner, &id);
+    s.ok(
+        DISK_CHECKS[14],
+        at_stop == "at stop: disk/last-words.txt" && armed.status == 200 && slept && took_ms >= REFUSE_MS && clean && first_line(&read) == "read disk/last-words.txt: said at the stop" && (!local || last_sleep.as_ref().is_some_and(|l| l["clean"] == true)) && slept_again,
+        json!({ "atStop": at_stop, "armed": armed.body, "slept": slept, "tookMs": took_ms, "head": after["head"], "read": read, "sleepLine": last_sleep, "sleptAgain": slept_again }),
+    );
     wiped(s, api, &owner, &id)
 }
+
+/// How long its disk's route refuses from its stop's signal
+/// (`fpac-refuse-at-stop`): past the old wait (the guest's 140 s, the
+/// platform's 150 s), so a stop that kept no container lost its last write.
+const REFUSE_MS: u64 = 180_000;
+// kept within its node's unsaved bound, past its stop's exit wait and a look
+const _: () = assert!(REFUSE_MS + fragment_core::computer::DISK_EXIT_WAIT_MS as u64 + fragment_core::computer::STOP_LOOK_MS as u64 <= crate::DISKS_UNSAVED_MAX_MS, "the lane's outage ends within its node's unsaved bound");
 
 /// Restores the checks arm to come damaged (the lever `damage-restores`'s
 /// `times`): a disk's start spends none.

@@ -668,6 +668,16 @@ class ContainerHost {
     return new Promise((r) => setTimeout(r, Math.max(0, this.#heldUntil - Date.now())));
   }
 
+  // The runtime's idle stop put `ms` past its last use, start `generation`'s
+  // container alone: a disk's sleep keeps it that long for its final flush
+  // (FIN-783), which its idle stop would otherwise cut short. Answers
+  // whether it was set.
+  async idleFor(generation, ms) {
+    if (generation !== this.#generation || !this.#runs) return false;
+    await settled(() => this.#c.setInactivityTimeout(ms));
+    return true;
+  }
+
   // Waits up to `ms` for the container to exit on its own (after a signal).
   async exited(ms) {
     const t0 = Date.now();

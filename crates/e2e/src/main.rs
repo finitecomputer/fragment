@@ -251,6 +251,10 @@ pub const DEFAULT_PLAN: &str = "seat";
 /// (`computers.unsaved_max_ms`; thirty minutes in production): short, so
 /// the computers lane sees the bound run out and its owner told of it.
 pub const UNSAVED_MAX_MS: u64 = 45_000;
+/// The disks lane's node's (`Shape::Disks`): long enough that a stop whose
+/// final flush its storage holds up is kept past its exit wait, within the
+/// bound (the lane's outage at a stop, FIN-783), as on a real deployment.
+pub const DISKS_UNSAVED_MAX_MS: u64 = 600_000;
 /// The WorkOS fake's environment.
 const WORKOS_CLIENT: &str = "client_fragment_e2e";
 const WORKOS_KEY: &str = "sk_test_fragment_e2e";
@@ -1066,7 +1070,7 @@ impl Suite {
             // for a door that links to SimpleX's servers for real
             computer_internet: false,
             door_internet: self.links_simplex(),
-            computer_unsaved_max_ms: Some(UNSAVED_MAX_MS),
+            computer_unsaved_max_ms: Some(if self.shape == Shape::Disks { DISKS_UNSAVED_MAX_MS } else { UNSAVED_MAX_MS }),
             computer_disks: (self.shape == Shape::Disks).then(|| "stub".into()),
             providers: Some({
                 let mut rows = swap_providers(Some(self.openrouter.node().oauth()))?;

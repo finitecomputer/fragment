@@ -388,6 +388,15 @@ enum MetaKey {
     DiskFell,
     /// When its wipe first found its container gone (its disk's settle).
     WipeGone,
+    /// When its disk's sleep first signalled its guest: `<generation> <ms>`
+    /// (`fpac::flush_wait_ms` counts from it, its final flush awaited).
+    DiskFlushing,
+    /// How long a disk's start's sleep keeps its container for its final
+    /// flush, as that start told its guest: `<generation> <ms>`.
+    DiskFlushKept,
+    /// The test lever's outage of its disk's route at its next stop
+    /// (`fpac-refuse-at-stop`), in ms from that stop's signal.
+    RefuseAtStop,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -452,6 +461,9 @@ impl MetaKey {
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::DiskFell => "disk_fell",
             MetaKey::WipeGone => "wipe_gone",
+            MetaKey::DiskFlushing => "disk_flushing",
+            MetaKey::DiskFlushKept => "disk_flush_kept",
+            MetaKey::RefuseAtStop => "refuse_at_stop",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -609,6 +621,9 @@ pub struct ComputerCell {
     /// agents' Vault secrets name a host more. In memory only: a new
     /// isolate arms again at the next read.
     armed: RefCell<Option<(u64, Vec<String>)>>,
+    /// Until when its disk's route refuses, as R2 down would (the lever
+    /// `fpac-refuse-at-stop`'s, from a stop's signal). In memory only.
+    refuse_until: std::cell::Cell<Option<i64>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
     /// When its owner's next look hands over the uses it owes
@@ -652,6 +667,7 @@ impl DurableObject for ComputerCell {
             disk_handed: RefCell::new(None),
             starts: RefCell::default(),
             armed: RefCell::new(None),
+            refuse_until: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
@@ -1510,10 +1526,22 @@ impl ComputerCell {
                 Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation, after_held).await,
-                Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
+                Action::Stop { generation, saved } => reported.extend(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
-                        reported.push(self.stopped(generation));
+                        // a disk's stop whose final flush it kept for ends here,
+                        // as its own stop's end would (`stop_disk`)
+                        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+                        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+                        reported.push(match on_disk {
+                            true => self.stop_disk(generation, &id, true).await.unwrap_or_else(|| self.stopped(generation)),
+                            false => self.stopped(generation),
+                        });
+                    } else if self.lifecycle().is_ok_and(|l| l.disk()) && self.flushing_since(generation).is_some() {
+                        // a disk's stop kept for its flush, still running: past
+                        // what it keeps, it goes (`stop_disk`), looked at each minute
+                        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+                        reported.extend(self.stop_disk(generation, &id, true).await);
                     }
                 }
                 Action::Meter { from_ms, to_ms } => {
@@ -1704,7 +1732,13 @@ impl ComputerCell {
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let disk = self.disk_props(id, generation)?;
-        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress(), disk]).await?;
+        // a disk's stop kept for its flush keeps its idle stop moved past
+        // what its guest waits, an adoption's arm too (Codex on #1567)
+        let idle = match self.flushing_since(generation) {
+            Some(_) => fpac::guest_flush_ms(self.flush_kept_for(generation)),
+            None => RUNTIME_IDLE_MS,
+        };
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(idle as f64), js::to_js(&hosts), self.codestorage_through_egress(), disk]).await?;
         let done = armed.as_bool() == Some(true);
         if done {
             *self.armed.borrow_mut() = Some((generation, hosts));
@@ -1858,8 +1892,12 @@ impl ComputerCell {
         });
         match plan {
             Restore::Backup => env["RESTORE_PENDING"] = json!("1"),
-            // its boot mounts /data from its disk (docs/computers.md, "A disk")
-            Restore::Disk => env["FRAGMENT_DISK"] = json!("fpac"),
+            // its boot mounts /data from its disk (docs/computers.md, "A disk"),
+            // and on SIGTERM waits for its final flush past the platform's own wait
+            Restore::Disk => {
+                env["FRAGMENT_DISK"] = json!("fpac");
+                env["FRAGMENT_DISK_FLUSH_MS"] = json!(fpac::guest_flush_ms(fpac::flush_kept_ms(self.rules().unsaved_max_ms)).to_string());
+            }
             Restore::Snapshot { .. } | Restore::Nothing => {}
         }
         env
@@ -1873,7 +1911,12 @@ impl ComputerCell {
         let Some(disk) = self.disk()? else { return Ok(JsValue::NULL) };
         let prefix = fpac::disk_prefix(id).ok_or_else(|| CellError::host(format!("{id} names no disk")))?;
         let name = prefix.trim_start_matches("disks/").trim_end_matches('/').to_string();
-        Ok(js::to_js(&json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) })))
+        let mut props = json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) });
+        // the lever's outage (`fpac-refuse-at-stop`): its route answers 503 until then
+        if let Some(until) = self.refuse_until.get().filter(|u| *u > js::now_ms()) {
+            props["refuseUntil"] = json!(until);
+        }
+        Ok(js::to_js(&props))
     }
 
     /// One start: from the snapshot when it caches the current save for the
@@ -2135,6 +2178,12 @@ impl ComputerCell {
     async fn try_start(&self, generation: u64, planned: &Planned) -> Result<(), Unstarted> {
         let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
+        if planned.plan == Restore::Disk {
+            // what its sleep keeps its container for, as its guest is told
+            // (`flush_kept_for`): a bound changed later never outlasts it
+            let kept = fpac::flush_kept_ms(self.rules().unsaved_max_ms);
+            self.set_meta(MetaKey::DiskFlushKept, &format!("{generation} {kept}")).map_err(Unstarted::Failed)?;
+        }
         let env = js::to_js(&self.guest_env(&id, &planned.image, &planned.plan));
         let snapshot_js = match &planned.plan {
             Restore::Snapshot { id, .. } => JsValue::from_str(id),
@@ -2810,11 +2859,11 @@ impl ComputerCell {
     /// within its bound, its sleep's steps by `until_ms` (`snapshot_ms`). A
     /// snapshot that fails forgets nothing: the one kept is still its own
     /// save's.
-    async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Event {
+    async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Option<Event> {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if self.lifecycle().is_ok_and(|l| l.disk()) {
-            return self.stop_disk(generation, &id).await;
+            return self.stop_disk(generation, &id, false).await;
         }
         let t0 = js::now_ms();
         let mut exited = None;
@@ -2844,7 +2893,7 @@ impl ComputerCell {
         // one line per stop (lesson 14): whether its guest went on its
         // signal, whether the destroy took, and how long the stop took
         console_log!("{}", json!({ "computer": id, "stopped": generation, "saved": saved, "exited": exited, "gone": gone, "ms": js::now_ms() - t0 }));
-        Event::Asleep { generation }
+        Some(Event::Asleep { generation })
     }
 
     /// A disk's sleep's end (docs/computers.md, "A disk"): the signal, its
@@ -2852,36 +2901,130 @@ impl ComputerCell {
     /// snapshot: its disk is what it wakes on. Its line says what its wait
     /// left unshipped and whether its head is clean after it; what it left
     /// is kept for its next start's line.
-    async fn stop_disk(&self, generation: u64, id: &str) -> Event {
+    /// A guest still flushing past its wait (R2 unreachable: FPAC tries
+    /// again) keeps its container, nothing reported, its stop looked at
+    /// again (`Action::Look`, an overdue `Action::Stop`, which signals it no
+    /// more), until its flush lands and it exits, or `fpac::flush_kept`'s
+    /// bound passes from its first signal: then it goes, that life unsaved
+    /// (FIN-783).
+    async fn stop_disk(&self, generation: u64, id: &str, look: bool) -> Option<Event> {
         let g = JsValue::from_f64(generation as f64);
         let t0 = js::now_ms();
         let mut exited = false;
+        // what its start's guest was told it waits (`flush_kept_for`), and
+        // its first signal's time, a stop kept for its flush already begun
+        let kept = self.flush_kept_for(generation);
+        let mut signalled = self.flushing_since(generation);
+        let within = |since: i64| fpac::flush_wait_ms(since, js::now_ms(), kept) > 0;
         if self.container_running().await {
-            let _ = self.call("signal", &[g, JsValue::from_f64(15.0)]).await;
-            exited = self.call("exited", &[JsValue::from_f64(DISK_EXIT_WAIT_MS as f64)]).await.ok().and_then(|r| r.as_bool()) == Some(true);
+            if signalled.is_none() && !look {
+                // the lever's outage of its route, from this signal
+                self.refuse_at_stop(generation, id).await;
+                // its runtime's idle stop past what its guest waits, which it
+                // would otherwise cut short (`RUNTIME_IDLE_MS` from its last
+                // use, about 10 minutes into a sleep)
+                let idle = fpac::guest_flush_ms(kept);
+                if self.call("idleFor", &[g.clone(), JsValue::from_f64(idle as f64)]).await.ok().and_then(|r| r.as_bool()) != Some(true) {
+                    console_error!("{}", json!({ "computer": id, "disk": "idle stop unmoved", "generation": generation }));
+                }
+                // kept for its flush only once its signal went: one unsent is
+                // waited for, then destroyed, as before
+                let now = js::now_ms();
+                if self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await.ok().and_then(|r| r.as_bool()) == Some(true) {
+                    match self.set_meta(MetaKey::DiskFlushing, &format!("{generation} {now}")) {
+                        Ok(()) => signalled = Some(now),
+                        Err(e) => console_error!("{}", json!({ "computer": id, "disk": "flushing unkept", "generation": generation, "error": e.message })),
+                    }
+                } else {
+                    console_error!("{}", json!({ "computer": id, "disk": "unsignalled", "generation": generation }));
+                }
+            }
+            // a look waits for nothing; a stop, its exit wait, never past what it keeps
+            let wait = match (look, signalled) {
+                (true, _) => 0,
+                (false, Some(since)) => fpac::flush_wait_ms(since, js::now_ms(), kept),
+                (false, None) => DISK_EXIT_WAIT_MS,
+            };
+            exited = wait > 0 && self.call("exited", &[JsValue::from_f64(wait as f64)]).await.ok().and_then(|r| r.as_bool()) == Some(true);
+            match signalled {
+                Some(since) if !exited && within(since) => {
+                    // one line per look while it flushes (lesson 14)
+                    console_log!("{}", json!({ "computer": id, "disk": "flushing", "generation": generation, "ms": js::now_ms() - since }));
+                    return None;
+                }
+                // a look at a stop that signalled nothing yet: its own stop's
+                None if look => return None,
+                _ => {}
+            }
+        } else if signalled.is_some() {
+            // a stop kept for its flush, its container gone on its own since
+            exited = true;
         }
         let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
+        if !gone {
+            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
+            // still there: while its guest's own wait lasts from its signal
+            // (`fpac::guest_flush_ms`, past which it exits by itself), its
+            // stop goes on, its destroy asked again at each look (Codex on
+            // #1567). Past it, or with no signal sent, its life ends and the
+            // next start waits for the container to go, as any start after a
+            // destroy that failed does (`earlier_runs`, `StartBlocked`: no
+            // strike at first, and nothing starts beside it): bounded, its
+            // queued wake kept
+            if signalled.is_some_and(|since| js::now_ms() < since.saturating_add(fpac::guest_flush_ms(kept))) {
+                return None;
+            }
+        }
+        let _ = self.delete_meta(MetaKey::DiskFlushing);
         let (status, drain_ms) = match self.disk_drained.borrow_mut().take() {
             Some((d, status, ms)) if d == generation => (status, ms),
             _ => (None, 0),
         };
         // its final flush posts a clean head of its own life
         let clean = self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
-        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - t0, exited, clean };
+        // its stop's time from its first signal, a stop kept for its flush too
+        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - signalled.unwrap_or(t0), exited, clean };
         console_log!("{}", start_line::sleep_line(id, &facts));
-        let kept = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
-        if let Err(e) = kept {
+        let kept_row = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
+        if let Err(e) = kept_row {
             console_error!("{}", json!({ "computer": id, "slept": "unkept", "generation": generation, "error": e.message }));
-        }
-        if !gone {
-            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
         }
         // a final flush that posted no clean head: its last moments' writes
         // may not have shipped, and its life ends unsaved, saying so
-        if clean {
-            Event::Asleep { generation }
-        } else {
-            Event::AsleepUnshipped { generation }
+        Some(if clean { Event::Asleep { generation } } else { Event::AsleepUnshipped { generation } })
+    }
+
+    /// When start `generation`'s disk's sleep first signalled its guest
+    /// (`MetaKey::DiskFlushing`), if it did.
+    fn flushing_since(&self, generation: u64) -> Option<i64> {
+        let kept = self.meta(MetaKey::DiskFlushing).ok().flatten()?;
+        let (g, ms) = kept.split_once(' ')?;
+        (g.parse::<u64>().ok()? == generation).then(|| ms.parse::<i64>().ok()).flatten()
+    }
+
+    /// How long start `generation`'s sleep keeps its container for its
+    /// final flush (`fpac::flush_kept_ms`), as its start told its guest
+    /// (`MetaKey::DiskFlushKept`): a bound changed since never outlasts
+    /// what the guest waits. A start that recorded none (a release before)
+    /// keeps its exit wait alone, as then.
+    fn flush_kept_for(&self, generation: u64) -> i64 {
+        let told = self.meta(MetaKey::DiskFlushKept).ok().flatten().and_then(|t| {
+            let (g, ms) = t.split_once(' ')?;
+            (g.parse::<u64>().ok()? == generation).then(|| ms.parse::<i64>().ok()).flatten()
+        });
+        told.map_or(DISK_EXIT_WAIT_MS, fpac::flush_kept_ms)
+    }
+
+    /// The test lever `fpac-refuse-at-stop`: its route refuses (503, as R2
+    /// down) for its ms from this stop's signal, its intercepts armed again
+    /// with that in their props. Taken once.
+    async fn refuse_at_stop(&self, generation: u64, id: &str) {
+        let Some(ms) = self.cfg.test_hooks.then(|| self.take_ms(MetaKey::RefuseAtStop)).flatten() else { return };
+        self.refuse_until.set(Some(js::now_ms() + ms));
+        let hosts = self.armed.borrow().as_ref().filter(|(a, _)| *a == generation).map(|(_, h)| h.clone()).unwrap_or_default();
+        match self.arm(generation, id, hosts).await {
+            Ok(true) => console_log!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "generation": generation, "ms": ms })),
+            other => console_error!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "armed": other.ok() })),
         }
     }
 
@@ -3802,6 +3945,15 @@ impl ComputerCell {
             }
             // a head that will not open, its newest, the one it had kept as
             // the head before: asleep only, as a life's last post leaves it
+            // its disk's route refuses (503, as R2 down) for `ms` from its
+            // next stop's signal, at most `fpac::guest_flush_ms`'s bound: its
+            // final flush tried again until it lands (FIN-783)
+            "fpac-refuse-at-stop" => {
+                let max = fpac::guest_flush_ms(fpac::flush_kept_ms(self.rules().unsaved_max_ms));
+                let ms = b.ms.map(i64::from).filter(|ms| (1..=max).contains(ms)).ok_or_else(|| CellError::invalid(format!("fpac-refuse-at-stop names its ms, 1 to {max}")))?;
+                self.set_meta(MetaKey::RefuseAtStop, &ms.to_string())?;
+                Ok(json!({ "computer": id, "refuseAtStop": ms }))
+            }
             "fpac-head" => {
                 let line = b.head.as_deref().ok_or_else(|| CellError::invalid("fpac-head names a head"))?;
                 let head = fpac::Head::decode(line).ok_or_else(|| CellError::invalid("fpac-head's head is not one"))?;
