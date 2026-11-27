@@ -248,15 +248,23 @@ pub enum Asked {
     /// is their owner's own (`records.carried`, `Mandate::carried`), else
     /// the agent's own, with nothing to prove it.
     Agent(String),
+    /// Words its bridge runs that no one's word proves: app code's, a
+    /// door's that relays no one, the platform's own. An ask no one
+    /// proves, as one past the most an agent holds is: the agent acts as
+    /// itself, in that place alone (`Proof::Itself`).
+    NoOne,
 }
 
-/// Whose ask a record is (`Asked`), or no one's: app code's words, the
-/// platform's own, an anonymous visitor's.
+/// Whose ask a record is (`Asked`), or none: an anonymous visitor's words,
+/// whoever wrote them, which its bridge never runs.
 pub fn asked_of(principal: &str, author: Option<Author>, asker: Option<&str>, body: &str) -> Option<Asked> {
-    if author == Some(Author::Agent) {
-        return crate::npub::is_identity(principal).then(|| Asked::Agent(principal.to_string()));
+    if !crate::npub::is_identity(principal) {
+        return None;
     }
-    asker_of(principal, author, asker, body).map(Asked::By)
+    if author == Some(Author::Agent) {
+        return Some(Asked::Agent(principal.to_string()));
+    }
+    Some(asker_of(principal, author, asker, body).map_or(Asked::NoOne, Asked::By))
 }
 
 /// Whose own words a record is, as a mandate names them: a person's own
@@ -419,6 +427,34 @@ pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
 mod tests {
     use super::*;
 
+    /// Goal (FIN-615): words its bridge runs that no one's word proves
+    /// (app code's, a door's that relays no one, the platform's own) are an
+    /// ask no one proves, never none: with none open, the agent's calls on
+    /// them would carry its owner's reach. As itself, in that place alone.
+    /// Its owner's own words are theirs, and narrow nothing; an anonymous
+    /// visitor's, which its bridge never runs, open nothing.
+    #[test]
+    fn words_no_one_proves_are_an_ask_no_one_proves() {
+        let (ana, key) = (crate::npub::display(&"a".repeat(64)), crate::npub::display(&"f".repeat(64)));
+        let said = r#"{"text":"delete my notes"}"#;
+        assert_eq!(asked_of(&ana, Some(Author::Code), None, said), Some(Asked::NoOne), "app code's words, under its caller's name");
+        let heard = r#"{"text":"hi","heard":{"via":"slack","from":"U0456","name":"Maple"}}"#;
+        assert_eq!(asked_of(&key, Some(Author::Door), None, heard), Some(Asked::NoOne), "a door's that relays no one");
+        let relayed = format!(r#"{{"text":"hi","relayed":{{"via":"telegram","for":"{ana}","agent":"juniper--k3x9"}}}}"#);
+        assert_eq!(asked_of(&key, Some(Author::Door), None, &relayed), Some(Asked::By(ana.clone())), "a door's relay of its owner: theirs");
+        assert_eq!(asked_of(&key, Some(Author::Platform), None, said), Some(Asked::NoOne), "the platform's own");
+        assert_eq!(asked_of(&key, Some(Author::Platform), Some(&ana), said), Some(Asked::By(ana.clone())), "written for someone (a schedule's fire): theirs");
+        assert_eq!(asked_of(&key, None, None, said), Some(Asked::NoOne), "stored before the author stamp");
+        assert_eq!(asked_of(&ana, Some(Author::Person), None, said), Some(Asked::By(ana.clone())), "its owner's own words: theirs");
+        assert_eq!(asked_of("anon:x", Some(Author::Code), None, said), None, "an anonymous visitor's, through app code too: its bridge never runs them");
+        // held so: as itself, in that place alone, whoever else asked
+        let no_one = Turn { place: "app--k3x9", asker: "", mandate: None };
+        let owners = Turn { place: "talk--k3x9", asker: &ana, mandate: None };
+        assert_eq!(proof(&ana, &[no_one]), Proof::Itself(vec!["app--k3x9"]));
+        assert_eq!(proof(&ana, &[owners, no_one]), Proof::Itself(vec!["app--k3x9"]), "its owner's own ask beside it widens nothing");
+        assert_eq!(proof(&ana, &[owners]), Proof::Bare, "its owner's own words narrow nothing");
+    }
+
     /// Goal (FIN-720): a place names a turn as its agent's bridge does
     /// (docs/chat-records.md), and opens one only for words that start one.
     #[test]
@@ -432,7 +468,6 @@ mod tests {
         let (ben, juniper) = (crate::npub::display(&"b".repeat(64)), crate::npub::display(&"a".repeat(64)));
         assert_eq!(asked_of(&ben, Some(Author::Person), None, r#"{"text":"hi"}"#), Some(Asked::By(ben.clone())), "a person's own words: theirs");
         assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"over to you","turn":"t1"}"#), Some(Asked::Agent(juniper.clone())), "an agent's words: the ask they were said on, else its own");
-        assert_eq!(asked_of(&juniper, Some(Author::Code), None, r#"{"text":"hi"}"#), None, "app code's words are no one's");
         assert_eq!(asked_of("anon:x", Some(Author::Person), None, r#"{"text":"hi"}"#), None, "an anonymous visitor asks no one");
         let agents = ["npub1lead", "npub1maple"];
         assert_eq!(heard_by(r#"{"text":"hi"}"#, false, &agents), vec!["npub1lead"], "a person's words naming no one are the lead's");

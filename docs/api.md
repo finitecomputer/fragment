@@ -233,7 +233,11 @@ older version changing nothing. Someone else's ask reaches its agent
 only once its fragment holds it: its sockets hold what they are sent
 meanwhile, and its page reads and its claim answer 502; one not told is
 told again from the alarm. Its owner's own asks narrow nothing (decision
-64) and wait for nothing. A hand-off (one of its owner's agents' words,
+64) and wait for nothing. Words its bridge runs that no one's word
+proves (app code's, a door's that relays no one, the platform's own)
+open an ask no one proves, waited for as someone else's: the agent acts
+as itself, in that chat alone, as it does past the most asks it holds.
+An anonymous visitor's, which its bridge never runs, open nothing. A hand-off (one of its owner's agents' words,
 said on their owner's own proven ask: "An ask carried on", above) opens
 that ask carried on, by the same words and day; on anyone else's ask, and
 another owner's agent's words, the posting agent's own, unproven, lending

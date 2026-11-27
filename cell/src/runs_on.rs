@@ -228,10 +228,12 @@ impl FragmentCell {
 
     /// The turns a place holds open for this agent (`TurnsIn`): the one
     /// word on them, its place's own (FIN-720), replacing what it said
-    /// before; an older version than the one held changes nothing. Its
-    /// rows and every other place's past `TURNS_HELD_MAX`, it holds as one
-    /// ask no one proves: the agent acts as itself there alone
-    /// (`Proof::Itself`), narrower than any, never refused.
+    /// before; an older version than the one held changes nothing. A turn
+    /// of no one's (its asker empty: words no one's word proves,
+    /// `mandate::Asked::NoOne`), and its rows and every other place's past
+    /// `TURNS_HELD_MAX`, it holds as one ask no one proves: the agent acts
+    /// as itself there alone (`Proof::Itself`), narrower than any, never
+    /// refused.
     pub(crate) fn turns_in(&self, t: TurnsIn) -> CellResult<()> {
         if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(t.agent.as_str()) {
             return Err(CellError::new(ErrorCode::NotFound, "no such agent here: this fragment was made again since"));
@@ -239,7 +241,8 @@ impl FragmentCell {
         if self.cfg.test_hooks && self.meta(MetaKey::TestRefuseTurns)?.is_some() {
             return Err(CellError::new(ErrorCode::HostFailed, "refused by a test hook (`refuse-turns`)"));
         }
-        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && npub::is_identity(&p.asker) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
+        let asker = |p: &PlaceTurn| npub::is_identity(&p.asker) || (p.asker.is_empty() && p.mandate.is_none());
+        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && asker(p) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
         if !valid_fragment_name(&t.place) || t.version <= 0 || !t.turns.iter().all(well_formed) {
             return Err(CellError::invalid("a place's turns are its name, their version, and each its id, asker and mandate"));
         }
