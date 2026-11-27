@@ -737,8 +737,8 @@ pub const NOSTR_KEY_HOST: &str = "finite.site";
 /// bound to the new agent's fragment, toward the hosts its kind goes to.
 /// `None`: a Nostr key that is not one (the Vault takes no other value).
 ///
-/// - Telegram's token, toward `api.telegram.org`: moved from there into
-///   the new agent's Telegram connector by Settings (`fromVault`).
+/// - Telegram's token, toward `api.telegram.org`: lent from there to the
+///   new agent's Telegram connector by Settings, as its `TELEGRAM_BOT_TOKEN`.
 /// - OpenRouter's key, toward `openrouter.ai`.
 /// - The Nostr key, as 64 hex, to sign with (NIP-98) toward
 ///   `NOSTR_KEY_HOST`: the new agent brings its old sites over itself,
@@ -768,7 +768,7 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
         let label = label[..label.len().min(room)].trim_end_matches('-');
         format!("{word}-{label}-{hash}--{suffix}")
     };
-    Some((name, PutSecret { value: Some(value), hosts, place, agents: vec![fragment.to_string()] }))
+    Some((name, PutSecret { value: Some(value), hosts, place, agents: vec![fragment.to_string()], apps: vec![] }))
 }
 
 // ---- the mover's upload
@@ -2001,7 +2001,7 @@ mod tests {
             for fragment in ["kestrel--x7k2", long.as_str()] {
                 let (name, put) = vault_secret(kind, fragment, value).unwrap();
                 assert!(name.len() <= 32 && name.ends_with("--x7k2"), "{name}");
-                let checked = crate::vault::check(&name, &put, None, &catalog).unwrap_or_else(|e| panic!("{name}: {e}"));
+                let checked = crate::vault::check(&name, &put, None, &catalog, false).unwrap_or_else(|e| panic!("{name}: {e}"));
                 if kind == SecretKind::NostrNsec {
                     // it signs toward finite.site: not parked, so its agent's view lists it
                     assert_eq!((checked.hosts.as_slice(), &checked.placing), (&["finite.site".to_string()][..], &crate::vault::Placing::Nip98), "{name}");

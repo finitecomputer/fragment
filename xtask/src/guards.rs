@@ -213,6 +213,9 @@ mod tests {
         for name in ["TURN_IDLE_MS_MAX", "PROMPT_TTL_MS_DEFAULT"] {
             assert_eq!(constant(&shell, "const", name, " = "), constant(&bridge, "pub const", name, ": u64 = "), "the shell's {name} is the bridge's");
         }
+        // and the cell's, whose inbox says whether a member is at work in it
+        let jobs = std::fs::read_to_string(root.join("cell/src/jobs.rs")).expect("the cell's jobs read");
+        assert_eq!(constant(&jobs, "const", "TURN_IDLE_MS_MAX", ": i64 = "), constant(&bridge, "pub const", "TURN_IDLE_MS_MAX", ": u64 = "), "the cell's TURN_IDLE_MS_MAX is the bridge's");
         let settings = std::fs::read_to_string(root.join("cell/shell/agent-settings.js")).expect("the shell's agent settings read");
         let computer = std::fs::read_to_string(root.join("cell/src/computer.rs")).expect("the cell's computer reads");
         assert_eq!(constant(&settings, "const", "ROLE_MAX_CHARS", " = "), fragment_proto::limits::ROLE_MAX_CHARS as i64);
@@ -226,14 +229,16 @@ mod tests {
     /// workspace of its own), takes a message's files as the platform
     /// bounds them: its `ATTACHMENT_MAX_BYTES` is proto's `BLOB_MAX_BYTES`
     /// (a computer's files never meet a zone's limit) and its
-    /// `ATTACHMENTS_MAX` is `FILES_PER_MESSAGE`. Its `HERMES_MEDIA_MAX_BYTES`
-    /// is Hermes' own, and no platform limit. Method: its file, read and
-    /// evaluated.
+    /// `ATTACHMENTS_MAX` is `FILES_PER_MESSAGE`; it asks a chat of at most
+    /// `HELD_IDS_MAX` post ids at once, as the platform answers. Its
+    /// `HERMES_MEDIA_MAX_BYTES` is Hermes' own, and no platform limit.
+    /// Method: its file, read and evaluated.
     #[test]
     fn the_bridge_takes_files_as_the_platform_bounds_them() {
         let bridge = std::fs::read_to_string(crate::devstack::repo_root().join("images/bridge/src/limits.rs")).expect("the bridge's limits read");
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENT_MAX_BYTES", ": u64 = "), fragment_proto::limits::BLOB_MAX_BYTES as i64);
         assert_eq!(constant(&bridge, "pub const", "ATTACHMENTS_MAX", ": usize = "), i64::from(fragment_proto::limits::FILES_PER_MESSAGE));
+        assert_eq!(constant(&bridge, "pub const", "HELD_IDS_MAX", ": usize = "), fragment_proto::limits::HELD_IDS_MAX as i64);
     }
 
     /// Goal: a SimpleX door carries a reply's files as the platform bounds a

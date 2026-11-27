@@ -49,14 +49,14 @@ const { setup } = await import(new URL("../../../templates/simplex/site/setup.js
 // a page opened as `role`, its calls and fetches kept; `push(state)`, its
 // live `state` answering
 async function opened(role = "owner") {
-  const w = { calls: [], fetched: [], push: null, root: new El("main") };
+  const w = { calls: [], inputs: [], fetched: [], push: null, root: new El("main") };
   globalThis.fetch = async (url, init) => {
     w.fetched.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
     return new Response(JSON.stringify(String(url).includes("__door") ? { bound: { door: "simplex", agent: "juniper--k3x9" } } : { ok: true }), { status: 200 });
   };
   globalThis.__fragment = {
     me: async () => ({ role, platform: "https://platform.example" }),
-    call: async (op) => (w.calls.push(op), { run: w.calls.length, status: "queued" }),
+    call: async (op, input) => (w.calls.push(op), w.inputs.push(input), { run: w.calls.length, status: "queued" }),
     live: (_op, _input, onResult, onError) => {
       w.push = async (s) => {
         onResult(s);
@@ -113,6 +113,26 @@ test("opened new, it starts its door, asks a link, shows its link and code, then
     await w.push(CONNECTED);
     assert.deepEqual(w.said(), { line: "Not linked.", buttons: ["Link"], qr: false });
     assert.deepEqual(w.calls, ["connect", "link", "unlink"], "no link of its own after an unlink");
+  } finally {
+    mock.timers.reset();
+  }
+});
+
+test("a door holding its owner's SimpleX chat with their old agent asks them first: kept, or a new chat instead", async () => {
+  mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 });
+  try {
+    for (const [press, keep] of [["Keep my SimpleX chat", true], ["Start a new chat", false]]) {
+      const w = await opened();
+      await w.push(NEW);
+      assert.deepEqual([w.calls, w.inputs], [["connect"], [{ name: "Juniper" }]], "its first connect says nothing of it");
+      await w.push({ ...NEW, why: failed(Date.now(), "staged", "connect") });
+      assert.deepEqual(w.said(), { line: "Your SimpleX chat came over from finite.computer.", buttons: ["Keep my SimpleX chat", "Start a new chat"], qr: false });
+      assert.deepEqual(w.calls, ["connect"], "nothing asked by itself: theirs to say");
+      await w.press(press);
+      assert.deepEqual([w.calls.at(-1), w.inputs.at(-1)], ["connect", { name: "Juniper", keep }], press);
+      await w.push(CONNECTED);
+      assert.equal(w.calls.at(-1), "link", "then on as a new door goes");
+    }
   } finally {
     mock.timers.reset();
   }

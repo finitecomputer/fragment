@@ -203,6 +203,13 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         mine.status == 200 && mine.body["seat"].is_null() && mine.body["admin"] == true && mine.body["org"].is_object() && mine.body["guest"] == true,
         &mine,
     );
+    // the one guest test (FIN-615): the ledger agrees with the seat page
+    let made = api.create(&bob, "after-comp")?;
+    s.ok(
+        "and, as a guest, makes no new fragment (403, decision 49: creating needs a seat)",
+        made.status == 403 && made.message().starts_with("guests can't create fragments"),
+        &made,
+    );
     let r = api.signed(&operator, "DELETE", &format!("/api/admin/seats/{carol_seat}"), None)?;
     let view = api.signed(&alice, "GET", "/api/org", None)?;
     s.ok("a waiting seat that ends is gone from its org", r.status == 200 && view.body["members"].as_array().map(Vec::len) == Some(1), &view);
@@ -214,6 +221,8 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         v["seat"] == "active" && v["plan"] == "seat"
     });
     s.ok("a seatless admin comped again takes the seat in their own org, active again", r.status == 200 && r.body["seat"]["id"] == bob_seat.as_str() && pushed, ledger(api, &bob));
+    let made = api.create(&bob, "comped-again")?;
+    s.ok("and, the seat active again, makes fragments again", made.status == 200, &made);
 
     // ---- the registry is the seat's one writer: a ledger an operator's
     // `seat` command (gone 2026-10-16) left at an order an hour ahead of

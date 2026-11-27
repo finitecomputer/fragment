@@ -126,12 +126,14 @@ export async function setup(root) {
     }
     draw();
   };
-  const connect = () =>
+  // `keep`: its owner's word on their chat with their old agent, where its
+  // door holds one (it refuses `staged` until they say)
+  const connect = (keep) =>
     ask("connect", "Starting…", async () => {
       // the inbox's secret first: once it is here, connecting is all a try
       // cut short needs; the door is given it at the platform's egress
       await platformJson(`./__secrets/SIMPLEX_DOOR_SECRET`, { method: "PUT", headers: JSON_TYPE, body: JSON.stringify({ value: randomHex(32), hosts: [DOOR_HOST] }) });
-      await fragment.call("connect", { name });
+      await fragment.call("connect", keep === undefined ? { name } : { name, keep });
     });
   const link = () => ask("link", "Making a link…", () => fragment.call("link"));
   // unlinked, it waits for Link
@@ -177,6 +179,9 @@ export async function setup(root) {
     if (waiting?.late) return say(el("p", "setup-error", "Couldn't reach SimpleX. Try again."), row(again));
     if (waiting) return say(el("p", "setup-now", waiting.line));
     if (error) return say(el("p", "setup-error", error), row(again));
+    // its owner's SimpleX chat with their old agent, moved here from their
+    // computer: theirs to keep, or a new chat instead
+    if (s.why?.code === "staged") return say(el("p", "setup-now", "Your SimpleX chat came over from finite.computer."), row(button("Keep my SimpleX chat", "", () => connect(true)), button("Start a new chat", "quiet", () => connect(false))));
     if (s.why) return say(el("p", "setup-error", failure(s.why)), ...(s.why.code === "no_doors" ? [] : [row(again)]));
     if (s.linked) {
       const who = s.linked.name ? `Linked with ${s.linked.name}.` : "Linked.";

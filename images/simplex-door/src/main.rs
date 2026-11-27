@@ -138,6 +138,21 @@ struct Kept {
     /// the core's received copy gone, delivers it as its door holds it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     given: Option<(i64, door::File)>,
+    /// Its owner's SimpleX chat with their old agent, handed over from
+    /// their computer staged (finite.computer's move set it aside there,
+    /// never kept: docs/bridge.md, "SimpleX"), and what its computer's read
+    /// of it found: in the save its door was given, which its door starts
+    /// only once its owner keeps it (its connector's connect `keep`), so it
+    /// is adopted as it is restored, once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    adopt: Option<run::Adoption>,
+    /// The messages its computer's chat holds past the cursor it handed
+    /// over, as that chat answered at the handover (the bridge's
+    /// `Handle::ahead`), each by its item and its sender's id:
+    /// never delivered here, as a message reaches a chat once, by its own
+    /// id, however far back that cursor stands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ahead: Vec<(i64, String)>,
 }
 
 /// A reply's file the core is uploading: its copy's folder (under
@@ -333,13 +348,24 @@ async fn main() {
 
     let (to, mut rx) = mpsc::channel::<Msg>(MSGS_MAX);
     // its door's calls first, so it sees the runner come up (each answered
-    // 503 until the link is up); held for the runner's life
+    // 503 until the link is up, at once while its save restores and its
+    // core starts: never left waiting); held for the runner's life
     let (_stop_tx, stop_rx) = watch::channel(false);
     let listener = tokio::net::TcpListener::bind(env("DOOR_HTTP", "0.0.0.0:8080")).await.expect("the runner's port");
-    let asks = to.clone();
-    tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), req), stop_rx));
+    let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (asks, open) = (to.clone(), looping.clone());
+    tokio::spawn(net::serve(listener, move |req, _| handle(asks.clone(), open.clone(), req), stop_rx));
 
-    let (kept, door_mark, behind, life) = restore(&door, &dir).await;
+    let (mut kept, door_mark, behind, life) = restore(&door, &dir).await;
+    // kept at its owner's word: its link bound to their contact, as their
+    // computer's adoption binds one (`link::Input::Adopt`: what their chat
+    // held is delivered already, its other contacts, groups and address
+    // let go), and their app told it moved, once; its next save holds it
+    if let Some(a) = kept.adopt.take() {
+        kept.link.apply(Input::Adopt { owner: a.owner, name: &a.name, newest: a.newest, leftovers: &a.leftovers });
+        kept.replies.push_back(Reply { key: "adopted".into(), text: run::moved(&name), contact: a.owner, files: vec![], said: false });
+        ev!("door.adopted", { "owner": a.owner, "leftovers": a.leftovers.len() });
+    }
     // every call of this life carries its generation
     let door = door.living(life);
     let generation = life;
@@ -377,6 +403,7 @@ async fn main() {
         let _ = term.send(Msg::Stop("sigterm")).await;
     });
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
+    looping.store(true, std::sync::atomic::Ordering::Release);
     // bounded by the runner's life: it ends by `exit`
     loop {
         tokio::select! {
@@ -471,7 +498,7 @@ async fn restore(door: &Door, dir: &Path) -> (Kept, u64, bool, u64) {
 fn staged(packed: &[u8], dir: &Path) -> Result<Kept, save::SaveError> {
     let state = save::stage(packed, dir)?;
     let kept: Kept = serde_json::from_slice(&state).map_err(|e| save::SaveError::Corrupt(format!("its state: {e}")))?;
-    if let Some(contact) = kept.link.contact() {
+    for contact in kept.link.contact().into_iter().chain(kept.adopt.as_ref().map(|a| a.owner)) {
         if !save::staged_contact(dir, contact)? {
             return Err(save::SaveError::Corrupt(format!("its link's contact {contact} is not in its chat database")));
         }
@@ -1175,6 +1202,8 @@ impl Runner {
         for item in items {
             let theirs = item.received && Some(item.contact) == contact && item.id > delivered;
             // a message has its sender's id; one without is no message to carry
+            // nor one its computer's chat holds already (`ahead`)
+            let theirs = theirs && !item.shared.as_ref().is_some_and(|id| self.kept.ahead.iter().any(|(_, a)| a == id));
             if let (true, Content::Message { kind, text }, Some(id)) = (theirs, &item.content, &item.shared) {
                 self.page.push_back(Inbound { id: id.clone(), kind: kind.clone(), text: text.clone(), at: item.at.clone(), item: item.id, file: item.file.clone() });
             }
@@ -1457,17 +1486,39 @@ impl Runner {
     }
 }
 
-/// The door's calls, to the loop.
-async fn handle(to: mpsc::Sender<Msg>, req: Request<Incoming>) -> Response<Body> {
+/// The door's calls, to the loop, each answer named by its SHA-256
+/// (`door::SHA_HEADER`), which its door checks before it uses it (FIN-775:
+/// a state's invitation one character off would still parse).
+async fn handle(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic::AtomicBool>, req: Request<Incoming>) -> Response<Body> {
+    let (mut parts, body) = asked_of(to, looping, req).await.into_parts();
+    let Ok(body) = body.collect().await;
+    let bytes = body.to_bytes();
+    parts.headers.insert(door::SHA_HEADER, hyper::header::HeaderValue::from_str(&files::sha256_hex(&bytes)).expect("hex is a header's value"));
+    Response::from_parts(parts, Body::new(bytes))
+}
+
+/// A call of its door's, answered: refused at once (503) before its loop
+/// runs, as it is up no sooner (a restore asked again, as a copy damaged on
+/// its way is, may take a while).
+async fn asked_of(to: mpsc::Sender<Msg>, looping: std::sync::Arc<std::sync::atomic::AtomicBool>, req: Request<Incoming>) -> Response<Body> {
+    if !looping.load(std::sync::atomic::Ordering::Acquire) {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "the door is starting or stopping");
+    }
     let mark = req.headers().get(door::MARK_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     let asked = match (req.method().as_str(), req.uri().path(), mark) {
         ("GET", "/state", _) => Asked::State,
         ("POST", "/link", Some(mark)) => Asked::Link { mark },
         ("POST", "/unlink", Some(mark)) => Asked::Unlink { mark },
         ("POST", "/reply", Some(mark)) => {
+            let sha = req.headers().get(door::SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
             let Ok(body) = Limited::new(req.into_body(), REPLY_BODY_MAX_BYTES).collect().await.map(|b| b.to_bytes()) else {
                 return refuse(StatusCode::PAYLOAD_TOO_LARGE, "a reply past its bound");
             };
+            // taken only as its door hashed it: one damaged on its way
+            // (FIN-775) is refused before anything, and its door asks again
+            if !door::whole(&body, sha.as_deref()) {
+                return refuse(StatusCode::UNPROCESSABLE_ENTITY, "a reply that is not the bytes its SHA-256 names: damaged on its way");
+            }
             match reply(&body) {
                 Ok((key, text, files)) => Asked::Reply { key, text, files, mark },
                 Err(why) => return refuse(StatusCode::BAD_REQUEST, why),
@@ -1738,6 +1789,23 @@ mod tests {
         assert_eq!((r.anchor, r.seek, r.held.len(), r.poked), (None, None, 0, true), "begins again");
     }
 
+    /// Goal: a message its computer's chat holds already is never delivered
+    /// again here, though the cursor it handed over stands before it (a post
+    /// refused there, later ones posted: Codex's rounds on #1541). Invalid:
+    /// 42 posted there, `ahead`. Valid: 41, never posted there, and 43.
+    #[tokio::test]
+    async fn what_its_computers_chat_holds_is_never_delivered_again() {
+        let (mut r, mut writes) = scripted("ahead", true);
+        r.kept.link.delivered = 40;
+        r.kept.ahead = vec![(42, "s42".into())];
+        r.deliver(Instant::now());
+        let (c, _) = asked_of(&mut writes).pop().unwrap();
+        r.frame(&page_of(c, &[41, 42, 43]));
+        assert_eq!(r.page.iter().map(|i| i.item).collect::<Vec<_>>(), vec![41, 43]);
+        let kept: Kept = serde_json::from_slice(&serde_json::to_vec(&r.kept).unwrap()).unwrap();
+        assert_eq!(kept.ahead, r.kept.ahead, "kept in its saves");
+    }
+
     /// Goal: a planned stop saves only once the core's process has ended
     /// (the review of #1430: its socket closing was taken for its end),
     /// and the mark moves no more once the core is gone (what it never
@@ -1765,6 +1833,104 @@ mod tests {
     /// and a text at its bound fits the body's bound however it is escaped
     /// (review of #1430: 52,891 bytes of JSON-heavy text was refused 413).
     /// Method: valid, each way to be invalid, and the worst escaping.
+    /// Goal: a reply its door sends is taken only as its door hashed it:
+    /// one damaged on its way (FIN-775), or naming no SHA-256, is refused
+    /// (422) before anything reaches the runner, so its door asks again;
+    /// one whole is taken. Method: the runner's own server, one reply
+    /// sent with one byte flipped after its hashing, then whole.
+    #[tokio::test]
+    async fn a_reply_damaged_on_its_way_is_refused_before_anything() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/reply", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), looping.clone(), req), stop_rx));
+        // whatever reaches the runner is answered as taken, and kept
+        let taken = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let kept = taken.clone();
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::Reply { text, .. }, tx)) = asks.recv().await {
+                kept.lock().unwrap().push(text);
+                let _ = tx.send(answer(StatusCode::OK, "{}"));
+            }
+        });
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let whole = br#"{"key":"k1","text":"hello"}"#;
+        let sha = files::sha256_hex(whole);
+        let send = |body: &'static [u8], sha: Option<&str>| {
+            let mut req = Request::post(&url).header(door::MARK_HEADER, "3");
+            if let Some(sha) = sha {
+                req = req.header(door::SHA_HEADER, sha);
+            }
+            client.request(req.body(http_body_util::Full::new(Bytes::from_static(body))).unwrap())
+        };
+        let damaged = send(br#"{"key":"k1","text":"hellp"}"#, Some(&sha)).await.unwrap();
+        let unnamed = send(whole, None).await.unwrap();
+        let sent = send(whole, Some(&sha)).await.unwrap();
+        assert_eq!((damaged.status(), unnamed.status(), sent.status()), (StatusCode::UNPROCESSABLE_ENTITY, StatusCode::UNPROCESSABLE_ENTITY, StatusCode::OK));
+        assert_eq!(*taken.lock().unwrap(), ["hello"], "only the whole reply reaches the runner");
+    }
+
+    /// Goal: every answer its door reads names its SHA-256, as its runner
+    /// made it, whatever the answer (a refusal, a state, a reply's), so its
+    /// door uses none that came damaged (Codex's round on 45fc87eee: a
+    /// state's invitation one character off would still parse). Method: the
+    /// runner's own server, a refusal before its loop runs, then a state.
+    #[tokio::test]
+    async fn every_answer_names_its_sha256() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/state", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open = looping.clone();
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), open.clone(), req), stop_rx));
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::State, tx)) = asks.recv().await {
+                let _ = tx.send(answer(StatusCode::OK, r#"{"phase":"inviting","link":"simplex:/invitation#abc"}"#));
+            }
+        });
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let read = || async {
+            let r = client.request(Request::get(&url).body(http_body_util::Full::new(Bytes::new())).unwrap()).await.unwrap();
+            let sha = r.headers().get(door::SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+            let status = r.status();
+            let body = r.into_body().collect().await.unwrap().to_bytes();
+            (status, door::whole(&body, sha.as_deref()))
+        };
+        assert_eq!(read().await, (StatusCode::SERVICE_UNAVAILABLE, true), "a refusal, named");
+        looping.store(true, std::sync::atomic::Ordering::Release);
+        assert_eq!(read().await, (StatusCode::OK, true), "a state, named");
+    }
+
+    /// Goal: its door's calls are answered at once while its save restores
+    /// (asked again, as a copy damaged on its way is) and its core starts:
+    /// 503, never left waiting (its door's state read hung 60 s on one in
+    /// the e2e), then taken once its loop runs. Method: the runner's own
+    /// server, its loop not yet running, then running.
+    #[tokio::test]
+    async fn its_doors_calls_are_answered_at_once_before_it_runs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/state", listener.local_addr().unwrap());
+        let (to, mut asks) = mpsc::channel::<Msg>(4);
+        let (_stop, stop_rx) = watch::channel(false);
+        let looping = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let open = looping.clone();
+        tokio::spawn(net::serve(listener, move |req, _| handle(to.clone(), open.clone(), req), stop_rx));
+        let client = hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new()).build_http::<http_body_util::Full<Bytes>>();
+        let ask = || client.request(Request::get(&url).body(http_body_util::Full::new(Bytes::new())).unwrap());
+        let early = tokio::time::timeout(Duration::from_secs(2), ask()).await.expect("answered at once, never left waiting").unwrap();
+        assert_eq!(early.status(), StatusCode::SERVICE_UNAVAILABLE);
+        looping.store(true, std::sync::atomic::Ordering::Release);
+        tokio::spawn(async move {
+            while let Some(Msg::Asked(Asked::State, tx)) = asks.recv().await {
+                let _ = tx.send(answer(StatusCode::OK, "{}"));
+            }
+        });
+        assert_eq!(ask().await.unwrap().status(), StatusCode::OK, "taken once its loop runs");
+    }
+
     #[test]
     fn a_reply_is_its_key_and_text() {
         assert_eq!(reply(&Bytes::from_static(br#"{"key":"chat:12","text":"hi"}"#)), Ok(("chat:12".into(), "hi".into(), vec![])));

@@ -113,6 +113,7 @@ impl Lifecycle {
         if matches!(self.phase, Phase::Sleeping { restarting: true, .. }) {
             self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
+            self.stop_free(now_ms);
             step.actions.push(Action::Stop { generation, saved: false });
             step.note = SaveNote::Says(if self.disk {
                 format!("its restart stopped it before its disk shipped all it held ({why}): what it had not shipped is lost")
@@ -146,6 +147,7 @@ impl Lifecycle {
             }
             self.end_unsaved(now_ms, step);
             self.saving = Some(Saving::Stop { since_ms: now_ms, saved: false });
+            self.stop_free(now_ms);
             step.actions.push(Action::Stop { generation, saved: false });
             step.note = SaveNote::Says(if self.disk {
                 format!("it slept with writes its disk could not ship in {} minutes ({why}): those are lost, the rest is on its disk", rules.unsaved_max_ms / 60_000)

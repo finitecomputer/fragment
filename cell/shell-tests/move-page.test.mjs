@@ -394,8 +394,8 @@ async function opened(p, agents, offers = [offer("a", "open", READY)]) {
   await settle();
 }
 // Upgrade pressed: their agents read again, whole, then the move opened
-// and a seat waited for
-async function upgraded(p, agents, offers = [offer("a", "open", READY)]) {
+// and a seat waited for, the ledger answering `ledger`
+async function upgraded(p, agents, offers = [offer("a", "open", READY)], ledger = { plan: "seat" }) {
   p.button("Upgrade").onclick();
   await settle();
   for (const [fragment, json] of agents) {
@@ -404,7 +404,7 @@ async function upgraded(p, agents, offers = [offer("a", "open", READY)]) {
   await settle();
   p.next("POST", "/api/migrations/offers").ok({ offers });
   await settle();
-  p.next("GET", "/api/ledger").ok({ plan: "seat" });
+  p.next("GET", "/api/ledger").ok(ledger);
   await settle();
 }
 
@@ -450,6 +450,30 @@ test("one of theirs chosen: the move opened, a seat, then its Yes with that agen
   assert.equal(p.calls.length, 0, "and nothing else asked: no write to Pip, no other agent's Yes");
   assert.equal(p.question("a"), null, "bound: nothing left to ask");
   assert.equal(p.button("Upgrade"), undefined);
+});
+
+test("one of theirs chosen while their seat is canceled: its Yes goes on, nothing made, so no seat waited for (the ledger refuses a canceled seat's making alone)", async (t) => {
+  const p = page(t, pip());
+  const agents = [["pip--a1b2", { tier: "standard" }]];
+  await opened(p, agents);
+  p.choose("a", "Use Pip");
+  await upgraded(p, agents, undefined, { plan: "seat", seat: "canceled" });
+  assert.deepEqual(p.next("POST", "/api/migrations/offers/a/yes").body, { agent: "npub1pip" });
+  assert.equal(p.made.length, 0);
+});
+
+test("Make a new one while a restored seat's ledger still says canceled: nothing made until the ledger has it, as it decides a making", async (t) => {
+  const p = page(t, pip());
+  const agents = [["pip--a1b2", { tier: "standard" }]];
+  await opened(p, agents);
+  p.choose("a", NEW);
+  await upgraded(p, agents, undefined, { plan: "seat", seat: "canceled" });
+  assert.equal(p.made.length, 0, "nothing made while its ledger says canceled");
+  p.timers.due();
+  await settle();
+  p.next("GET", "/api/ledger").ok({ plan: "seat", seat: "active" });
+  await settle();
+  assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Old a", role: null, quiet: true, from: "a", agent: null }], "made once its seat reached the ledger");
 });
 
 test("Make a new one: as without an agent here, a new one made for it and its Yes posted with that one", async (t) => {

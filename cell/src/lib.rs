@@ -93,6 +93,7 @@ mod runs_on;
 mod serve;
 mod share;
 mod shell;
+mod simplex_move;
 mod stripe;
 mod subscriptions;
 mod updating;
@@ -979,13 +980,13 @@ const INBOX_HEADERS_MAX: usize = 100;
 
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
-struct Forward {
-    routed: Routed,
+pub(crate) struct Forward {
+    pub(crate) routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
-    inner: String,
+    pub(crate) inner: String,
     /// Headers this route passes on purpose (the inbox's token, hop count,
     /// and the headers an inbox may read its secret from).
-    extra: Vec<(String, String)>,
+    pub(crate) extra: Vec<(String, String)>,
 }
 
 /// A blob upload declares its length, at most `most`: past that it is
@@ -1002,12 +1003,12 @@ fn blob_length(req: &Request, most: u64) -> CellResult<()> {
 }
 
 /// Bytes the router read, as a body to forward.
-fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
+pub(crate) fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
 }
 
 /// Hands a request to the fragment's supervisor.
-async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
+pub(crate) async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
     let cookies = fetched(req)?.site;
     for k in PASSED_HEADERS {
@@ -1554,7 +1555,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
-                "/api/inbox" => {
+                "/api/inbox" | "/api/inbox/quiet" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
                             extra.push((k.to_string(), v));

@@ -715,7 +715,8 @@ impl FragmentCell {
         // is no door from then on, nor its owner's alone to edit (doors.rs),
         // and keeps none of its secrets (Paul, 2026-10-31): what its owner set
         // while it was theirs alone (its bot's token, its webhook's secret) is
-        // not the new code's, nor its editors', to send
+        // not the new code's, nor its editors', to send; nor what their Vault
+        // lent it (`Unmade`, jobs.rs `lent`)
         if let Some(t) = self.meta(MetaKey::DoorTemplate)? {
             if fragment_core::door::blessed_template(&loader_id) != Some(t.as_str()) {
                 // its door, if a SimpleX one, ends by the alarm (ended.rs)
@@ -724,6 +725,7 @@ impl FragmentCell {
                     self.door_ends(life, &own)?;
                 }
                 self.del_meta(MetaKey::DoorTemplate)?;
+                self.set_meta(MetaKey::Unmade, "1")?;
                 self.unbind_door("its code is no longer its connector's")?;
                 let secrets = self.drop_secrets()?;
                 self.event("door.unmade", &format!("ran code that is not the {t} connector's: never a door again, its secrets removed ({})", secrets.len()), json!({ "template": t, "code": loader_id, "secrets": secrets }));
