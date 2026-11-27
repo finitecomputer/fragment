@@ -1284,7 +1284,9 @@ impl Engine {
                 // a question another turn asks meanwhile
                 let cause = Cause { fragment: fragment.to_string(), channel: records::CHAT.to_string(), seq };
                 let id = records::turn_id(agent, fragment, records::CHAT, seq);
-                let m = Message { text: fresh.text, to: vec![a.identity.clone()], ..Message::default() };
+                // in its card's room (`Fresh::room`): that room's conversation
+                let room = fresh.room.map(|id| records::Room { id, name: String::new(), context: Vec::new() });
+                let m = Message { text: fresh.text, to: vec![a.identity.clone()], room, ..Message::default() };
                 self.admit(&a, fragment, cause, at, (&asker, mandate), name(&asker), &m, 0, Ask::Message);
                 if let Some(t) = self.state.turns.get_mut(&id).filter(|t| t.phase == Phase::Queued) {
                     t.note = Some(fresh.note);
@@ -1490,9 +1492,12 @@ impl Engine {
         let running = self.state.turns.values().find(|t| t.agent == agent.fragment && t.fragment == fragment && t.active()).map(|t| t.id.clone());
         match item.how {
             _ if refused.is_some() => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_command, 0, Ask::Refused(refused.unwrap_or_default())),
-            How::Stop => self.stop_all(&agent.fragment, fragment),
+            How::Stop => self.stop_all(&agent.fragment, fragment, false),
             How::Restart => {
-                self.stop_all(&agent.fragment, fragment);
+                // a reset is of the chat's own conversation, where a
+                // command runs (in no room): a room's turns, each in its
+                // own conversation, run on
+                self.stop_all(&agent.fragment, fragment, true);
                 self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_command, 0, Ask::Command);
             }
             How::Message if has_args => self.admit(agent, fragment, cause, record.at, (&record.principal, record.mandate.clone()), asker_name, &as_message, 0, Ask::Message),
@@ -1513,8 +1518,16 @@ impl Engine {
     /// The agent's owner stopped it in this chat (`How::Stop`): its turn
     /// running there is stopped, whoever asked it, and its waiting ones end
     /// stopped, never run.
-    fn stop_all(&mut self, agent: &str, fragment: &str) {
-        let mut mine: Vec<(u64, String, Phase)> = self.state.turns.values().filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended).map(|t| (t.order, t.id.clone(), t.phase)).collect();
+    /// The agent's unfinished turns in the chat stopped, oldest first: every
+    /// one (`/stop`), or `root_only` those of the chat's own conversation,
+    /// in no room (`/new`).
+    fn stop_all(&mut self, agent: &str, fragment: &str, root_only: bool) {
+        let mut mine: Vec<(u64, String, Phase)> = self
+            .state
+            .turns
+            .values()
+            .filter(|t| t.agent == agent && t.fragment == fragment && t.phase != Phase::Ended && (!root_only || t.room.is_none()))
+            .map(|t| (t.order, t.id.clone(), t.phase)).collect();
         mine.sort_by_key(|(order, _, _)| *order);
         for (_, id, phase) in mine {
             crate::ev!("turn.stopped", { "turn": id, "phase": format!("{phase:?}").to_lowercase(), "by": "command" });
