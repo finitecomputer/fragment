@@ -5,17 +5,20 @@
 // the move the agent's upgrade: the same agent, in a better home (the
 // server's words say so too, promising only what comes).
 //
-// Upgrade: the person opens the move (`POST /api/migrations/offers`,
-// which binds them and gives its comp once: a comped seat, so a guest
-// may make agents), then, one at a time, a new agent is made as Settings'
-// Add makes one (onboarding.js `addAgent`, its chat not opened) and its
-// Yes posted (`…/offers/{old}/yes {agent}`), which stops the old agent and
-// starts the move. One new agent an old one: the agent keeps which old one
-// it was made for (agent.json `from`), so a Yes that never arrived, or a
-// reload, is gone on with that agent, never a second (`madeFor`). A Never'd one has Ask again. Nothing is drawn ahead of
-// the server: each step shows while its call is out, and every line after
-// is the server's, read again while a move is under way. A refusal is the
-// server's words.
+// Upgrade: the person opens the move (`POST /api/migrations/offers`, which
+// binds them and gives its comp once: a comped seat, so a guest may make
+// agents), then, one at a time, a new agent is made as Settings' Add makes
+// one (onboarding.js `addAgent`, its chat not opened) and its Yes posted
+// (`…/offers/{old}/yes {agent}`), which stops the old agent and starts the
+// move, and only then its hello, which tells its person their upgrade is
+// under way (`hello`, FIN-817: never before the Yes has landed, so no one
+// is promised an import that never began). One new agent an old one: the
+// agent keeps which old one it was made for (agent.json `from`), so a Yes
+// that never arrived, or a reload, is gone on with that agent, never a
+// second (`madeFor`). A Never'd one has Ask again. Nothing is drawn ahead
+// of the server: each step shows while its call is out, and every line
+// after is the server's, read again while a move is under way. A refusal
+// is the server's words.
 //
 // Someone who has an agent here already (one who moved by hand, Paul
 // 11-19) is asked, for each old agent: a new one, or one of theirs
@@ -36,7 +39,8 @@
 // left to its person, who came here to see it.
 //
 // The shell owns the page's place and its helpers (`h`): `api`, `el`,
-// `addAgent`, `setGuest`, `reload` (the list again), `ownAgents` (their
+// `addAgent`, `hello` (a move's new agent's, as Add answered it),
+// `setGuest`, `reload` (the list again), `ownAgents` (their
 // agent fragments' names), `identityOf` (an agent fragment's identity, once
 // its computer has it), `named` (a node named after an agent, following
 // its renames), `chatOf` (an agent identity's own chat, of theirs),
@@ -394,6 +398,9 @@ export function createMovePage(root, h) {
       doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
       draw();
       await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
+      // its import begun, its hello says so; one lost is said by the next
+      // page opened at home, which asks the move (onboarding.js `resumeAdd`)
+      await h.hello(made, o.old).catch(() => {});
       doing = null;
       await read();
       now = offers ?? [];

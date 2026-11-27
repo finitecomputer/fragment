@@ -2103,6 +2103,7 @@ function leaveSkills() {
 const movePage = createMovePage($("move-page"), {
   api, el, setGuest, named, reload: () => load(),
   addAgent: (spec) => onboarding.addAgent(spec),
+  hello: (made, from) => onboarding.moveHello(made, from),
   ownAgents: () => state.fragments.filter((f) => f.kind === "agent" && own(f)).map((f) => f.name),
   identityOf: (fragment) => [...state.agents.values()].find((a) => a.fragment === fragment)?.identity ?? null,
   chatOf: (identity) => {

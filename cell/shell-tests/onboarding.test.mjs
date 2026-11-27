@@ -18,7 +18,8 @@ const SUFFIX = "abcdefghjkmnpqrstuvwxyz23456789";
 const labelOf = (name) => name.replace(/--[a-km-np-z2-9]{4}$/, "");
 
 // The platform: fragments as the list says them, files at main, members,
-// one computer, and each agent's `tasks`. `first`: their first agent made
+// one computer, each agent's `tasks`, and the moves whose Yes landed
+// (each old agent's offer naming its new one). `first`: their first agent made
 // and talked to already (none: a mover's account, whose first agent is the
 // move's).
 function platform({ first: seeded = true } = {}) {
@@ -26,6 +27,7 @@ function platform({ first: seeded = true } = {}) {
   const files = new Map();
   const members = new Map();
   const tasks = new Map();
+  const moves = new Map();
   const computer = { computer: "c1", phase: "awake", agents: [] };
   let made = 0;
   let cut = null;
@@ -52,6 +54,7 @@ function platform({ first: seeded = true } = {}) {
       return { agents: computer.agents };
     }
     if (path === "/api/computers/c1/wake") return computer;
+    if (method === "GET" && path === "/api/migrations/offers") return { offers: [...moves].map(([old, agent]) => ({ old, state: "asked", agent })) };
     if (!(m = path.match(/^\/api\/f\/([^/]+)\/([^?]+)(?:\?(.*))?$/))) throw new Error(`no route: ${method} ${path}`);
     const [, name, rest, query] = m;
     assert.ok(row(name), `${method} ${path}: no such fragment`);
@@ -118,6 +121,8 @@ function platform({ first: seeded = true } = {}) {
     tasks: (name) => tasks.get(name),
     members: (name) => members.get(name),
     make,
+    // a move's Yes landed: its offer names the agent `id`
+    yes: (old, id) => moves.set(old, id),
     // what was asked to change since the last ask
     writes: () => writes.splice(0),
     // the next call `when` names fails; `done`, after it was done
@@ -184,9 +189,10 @@ function page(world, { at = null } = {}) {
 }
 
 // Wren made whole: one agent of that name with its role and job, on the
-// computer, in one chat of its own, its hello posted there; and nothing
-// else made (no default agent, no second chat).
-function madeWhole(world) {
+// computer, in one chat of its own, its hello posted there (`said`; none,
+// a move's before its Yes); and nothing else made (no default agent, no
+// second chat).
+function madeWhole(world, { said = true } = {}) {
   const rows = world.rows();
   const wrens = rows.filter((f) => f.kind === "agent" && f.title === "Wren");
   assert.equal(wrens.length, 1, "one agent named Wren");
@@ -199,7 +205,9 @@ function madeWhole(world) {
   assert.ok(world.members(chats[0].name).has(id), "Wren is in its chat");
   assert.equal(wren.agentRole, "Researcher", "its role, its face's");
   assert.match(world.files(wren.name).get("SOUL.md"), /one of kim@e2e\.test's agents/, "its job");
-  assert.equal(world.tasks(wren.name)?.get("hello")?.chat, chats[0].name, "its hello, in its chat");
+  if (said) assert.equal(world.tasks(wren.name)?.get("hello")?.chat, chats[0].name, "its hello, in its chat");
+  else assert.equal(world.tasks(wren.name)?.get("hello"), undefined, "no hello yet");
+  return { wren: wren.name, id };
 }
 
 const adding = async (p) => p.onboarding.addAgent({ name: "Wren", role: "Researcher" });
@@ -321,15 +329,23 @@ for (const stray of [false, true]) {
 // runs, minutes later, so its hello says its upgrade is under way, never a
 // new agent's "who I am" (one greeted its person as a stranger, in
 // Chinese). Every hello names the language their browser is set to.
+// FIN-817: that hello is said only once its Yes has landed, by the move's
+// page after it (`moveHello`): its making says none.
 const said = (world) => world.tasks(world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name).get("hello").text;
 const language = `browser is set to (${globalThis.navigator?.language || "en"}) until they write to you in another.`;
+const moving = (p) => p.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" });
 
-test("a move's agent says its upgrade is under way; an added one says who it is; each in the browser's language", async () => {
+test("a move's agent says its upgrade is under way, once its Yes landed; an added one says who it is; each in the browser's language", async () => {
   for (const from of [null, "old1"]) {
     const world = platform();
     const p = page(world, from ? { at: "move" } : {});
     await p.load();
-    await p.onboarding.addAgent({ name: "Wren", role: "Researcher", ...(from ? { quiet: true, from } : {}) });
+    const made = await p.onboarding.addAgent({ name: "Wren", role: "Researcher", ...(from ? { quiet: true, from } : {}) });
+    if (from) {
+      madeWhole(world, { said: false });
+      world.yes(from, made.id);
+      await p.onboarding.moveHello(made, from);
+    }
     madeWhole(world);
     const text = said(world);
     if (from) {
@@ -344,24 +360,47 @@ test("a move's agent says its upgrade is under way; an added one says who it is;
   }
 });
 
+// FIN-817: the move's agent made, its Yes never arrived (the connection
+// dropped, the tab closed). No page says its upgrade is under way, nor any
+// other hello; once a Yes lands (Upgrade pressed again), its hello follows,
+// and one lost then is said by the page opened next.
+const helloCut = at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST");
+test("a move's Yes that never arrived: no page says its upgrade is under way; once a Yes lands, its hello, one lost said by the page opened next", async () => {
+  const world = platform();
+  const p = page(world, { at: "move" });
+  await p.load();
+  const made = await moving(p);
+  await page(world).opened();
+  madeWhole(world, { said: false });
+  world.yes("old1", made.id);
+  world.cut(helloCut);
+  await assert.rejects(p.onboarding.moveHello(made, "old1"));
+  madeWhole(world, { said: false });
+  await page(world).opened();
+  madeWhole(world);
+  assert.match(said(world), /your upgrade is under way/);
+});
+
 // Each place a move's Add may be cut once its chat is made: the page opened
 // next (home's, which knows nothing of the move) makes it on from what was
-// made, and its hello is still the move's, from its agent.json's `from`.
-const helloCut = at(/^\/api\/f\/wren--[^/]+\/channels\/tasks$/, "POST");
+// made, saying no hello (its Yes never sent); once its Yes lands, a page
+// opened says the move's, from its agent.json's `from`.
 for (const [where, when, done] of [
   ["its chat made, its answer lost", create("wren-chat"), true],
   ["its chat made, before its computer took it", at(/\/agents\/wren--/, "PUT"), false],
   ["on its computer, before its deploy", at(/^\/api\/f\/wren--[^/]+\/deploy$/, "POST"), false],
   ["deployed, before it joined its chat", at(/\/members\/npub1wren$/, "PUT"), false],
-  ["in its chat, before its hello", helloCut, false],
 ]) for (const seeded of [true, false]) {
   // none before it: the page opened next owes their first agent, and makes it on as the first run's
-  test(`a move's agent cut short (${where})${seeded ? "" : ", their first here"}: the page opened next says the move's hello`, async () => {
+  test(`a move's agent cut short (${where})${seeded ? "" : ", their first here"}: the page opened next says no hello; once its Yes lands, the move's`, async () => {
     const world = platform({ first: seeded });
     const first = page(world, { at: "move" });
     await first.load();
     world.cut(when, done);
-    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    await assert.rejects(moving(first));
+    await page(world).opened();
+    const { id } = madeWhole(world, { said: false });
+    world.yes("old1", id);
     await page(world).opened();
     madeWhole(world);
     assert.match(said(world), /your upgrade is under way/);
@@ -370,21 +409,20 @@ for (const [where, when, done] of [
 
 // Its hello posted, its answer lost, and asked again in other words (a
 // browser set to another language, or an older release's hello): the hello
-// already there is its hello, kept, and the making goes on to its Yes.
+// already there is its hello, kept.
 for (const how of ["on the same page", "after a reload"]) {
-  test(`a move's agent whose hello is there in other words is made whole ${how}`, async () => {
+  test(`a move's hello there in other words is kept, asked again ${how}`, async () => {
     const world = platform();
     const first = page(world, { at: "move" });
     await first.load();
+    const made = await moving(first);
+    world.yes("old1", made.id);
     world.cut(helloCut, true);
-    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
-    const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
-    world.tasks(wren).get("hello").text = "Older words.";
-    const p = how === "after a reload" ? page(world, { at: "move" }) : first;
-    await p.load();
-    const made = await p.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1", agent: wren });
+    await assert.rejects(first.onboarding.moveHello(made, "old1"));
+    world.tasks(made.agent).get("hello").text = "Older words.";
+    if (how === "after a reload") await page(world).opened();
+    else await first.onboarding.moveHello(made, "old1");
     madeWhole(world);
-    assert.ok(made?.id, "Add answers what it made, for its Yes");
     assert.equal(said(world), "Older words.", "the hello there is kept");
   });
 }
@@ -407,34 +445,37 @@ test("a making gone on with keeps an agent.json of null, and its job", async () 
   assert.equal(world.tasks(wren)?.get("hello")?.chat, world.rows().find((f) => labelOf(f.name) === "wren-chat").name, "made whole: its hello in its chat");
 });
 
-// Its agent.json unread on the page opened next: no hello yet, never the
-// other one. In its chat already, its hello waits for a read that answers;
-// not yet in it, the making says what failed in its chat, and its Try again
-// says the move's.
-test("a move's agent cut short in its chat, its agent.json unread next: its hello waits for a read", async () => {
-  const world = platform();
-  const first = page(world, { at: "move" });
-  await first.load();
-  world.cut(helloCut);
-  await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
-  const next = page(world);
-  world.cut(at(/\/file\?path=agent\.json$/, "GET"));
-  await next.opened();
-  const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren").name;
-  assert.equal(world.tasks(wren)?.get("hello"), undefined, "no hello on an unread agent.json");
-  assert.ok(next.onboarding.putOff(), "put off till a read answers");
-  await next.onboarding.resumeFirstRun();
-  madeWhole(world);
-  assert.match(said(world), /your upgrade is under way/);
-});
+// Its Yes landed, its hello lost, and on the page opened next its
+// agent.json or its move unread: no hello yet, never the other one; it
+// waits for a read that answers.
+for (const [unread, cut] of [["its agent.json", at(/\/file\?path=agent\.json$/, "GET")], ["its move", at(/^\/api\/migrations\/offers$/, "GET")]]) {
+  test(`a move's agent whose hello was lost, ${unread} unread next: its hello waits for a read`, async () => {
+    const world = platform();
+    const first = page(world, { at: "move" });
+    await first.load();
+    const made = await moving(first);
+    world.yes("old1", made.id);
+    const next = page(world);
+    world.cut(cut);
+    await next.opened();
+    assert.equal(world.tasks(made.agent)?.get("hello"), undefined, `no hello on ${unread} unread`);
+    assert.ok(next.onboarding.putOff(), "put off till a read answers");
+    await next.onboarding.resumeFirstRun();
+    madeWhole(world);
+    assert.match(said(world), /your upgrade is under way/);
+  });
+}
 
+// Cut short before it joined its chat, its agent.json unread next: the
+// making says what failed, and its Try again makes it whole, saying no
+// hello (its Yes never sent), never the other one.
 for (const seeded of [true, false]) {
-  test(`a move's agent cut short before it joined its chat, its agent.json unread next${seeded ? "" : ", their first here"}: its Try again says the move's hello`, async () => {
+  test(`a move's agent cut short before it joined its chat, its agent.json unread next${seeded ? "" : ", their first here"}: its Try again says no hello`, async () => {
     const world = platform({ first: seeded });
     const first = page(world, { at: "move" });
     await first.load();
     world.cut(at(/\/members\/npub1wren$/, "PUT"));
-    await assert.rejects(first.onboarding.addAgent({ name: "Wren", role: "Researcher", quiet: true, from: "old1" }));
+    await assert.rejects(moving(first));
     const next = page(world);
     world.cut(at(/\/file\?path=agent\.json$/, "GET"));
     await next.opened();
@@ -447,8 +488,7 @@ for (const seeded of [true, false]) {
     else assert.ok(chat && next.onboarding.setupFor(chat).error, "its chat says what failed");
     if (chat) next.onboarding.retrySetup(chat);
     await next.onboarding.creatingAgent();
-    madeWhole(world);
-    assert.match(said(world), /your upgrade is under way/);
+    madeWhole(world, { said: false });
   });
 }
 
@@ -479,7 +519,7 @@ for (const [where, when, done] of [
       const wrote = made && world.files(made.name).get("agent.json");
       const agent = wrote && JSON.parse(wrote).from === "old1" ? made.name : null;
       const again = await p.onboarding.addAgent({ name, role: "Researcher", quiet: true, from: "old1", agent });
-      madeWhole(world);
+      madeWhole(world, { said: false });
       const wren = world.rows().find((f) => f.kind === "agent" && f.title === "Wren");
       assert.equal(again?.id, world.computer().agents.find((a) => a.fragment === wren.name)?.identity, "Add answers the one it made");
     });

@@ -27,8 +27,13 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // is empty until its import's routine runs, minutes after its Yes: its
   // hello says its upgrade is under way, and before then it answers nothing
   // as if it knew them (FIN-492, 11-22: one greeted its person as a
-  // stranger, in Chinese). Every hello names the language their browser is
-  // set to, so an agent with nothing else to go on writes in theirs.
+  // stranger, in Chinese). So it is said only once its Yes has landed
+  // (FIN-817: said before, a Yes that never arrived left the person told
+  // their memories were coming, and no import begun): by the move's page
+  // after its Yes (`moveHello`), or by a page opened later, once the move
+  // names the agent (`resumeAdd`). Its making says no hello of its own.
+  // Every hello names the language their browser is set to, so an agent
+  // with nothing else to go on writes in theirs.
   // A hello already posted in other words (a retry from a browser set to
   // another language, or one an older release wrote) is its hello: the
   // channel refuses its id with another body (409 `conflicting_body`), and
@@ -40,6 +45,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     }).catch((e) => {
       if (e?.code !== "conflicting_body") throw e;
     });
+  // whether the move of `from` names the agent `id` (its Yes landed),
+  // undefined while unread
+  const moveNames = (from, id) =>
+    api("GET", "/api/migrations/offers").then((r) => (r?.offers ?? []).some((o) => o.old === from && o.agent === id), () => undefined);
   const helloText = (from) => [
     from
       ? "You were just made to take in your person's agent from finite.computer: to them, this is its upgrade, and you are that agent. Your memories, chats and skills are still on their way: a routine brings them in a few minutes. Say in a sentence or two that your upgrade is under way and that you'll write again when everything is here. Until that routine has run you know nothing about them: if they write before then, say you're still bringing yourself over, and never guess who they are or what they want."
@@ -364,7 +373,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // `<label>`. Not yet in it, it is made on from there, named as it was:
   // Add made its agent, its job and its role before its chat (`makeAgent`).
   // In it, only its hello may be missing: it is posted again (the same
-  // record), once a page. Put off, as the first run is, while a read failed.
+  // record), once a page; a move's, only once its move names it. Put off,
+  // as the first run is, while a read failed.
   const helloAgain = new Set();
   async function resumeAdd() {
     if (setup || isGuest()) return;
@@ -389,19 +399,21 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
       if (joined) {
         if (!helloAgain.has(chat.name)) {
           helloAgain.add(chat.name);
-          // a move's agent says its own (agent.json `from`): unread, put off
-          // until a read answers, never the other hello
+          // a move's agent says its own (agent.json `from`), once its move
+          // names it, and none before: unread, either, put off until a read
+          // answers, never the other hello
           const from = await api("GET", `/api/f/${seg(agent.name)}/file?path=agent.json`).then((json) => json?.from ?? null, (e) => (e?.status === 404 ? null : undefined));
-          if (from === undefined) {
+          const due = from === undefined ? undefined : from ? await moveNames(from, id) : true;
+          if (due === undefined) {
             helloAgain.delete(chat.name);
             firstRunPutOff = true;
-          } else hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
+          } else if (due) hello(agent.name, chat.name, from).catch(() => helloAgain.delete(chat.name));
         }
         continue;
       }
       if (setup) return;
-      // made on, a move's agent still says the move's hello (`agentWritten`
-      // reads its agent.json's `from`)
+      // made on, a move's agent says no hello (`agentWritten` reads its
+      // agent.json's `from`): its move's is said once its Yes lands
       setup = { label, title: titleOf(agent.name), role: null, job: addedJob, added: true, agent: agent.name, written: false, chat: null, made: false, joined: false, ready: false, error: null };
       return creatingAgent();
     }
@@ -421,9 +433,10 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // (it rejects): nothing is drawn over the page, and Add again goes on with
   // what was made.
   // `quiet` (the move's page): its chat is made but not opened, the page
-  // staying as it is; answered with what was made (`{chat, id, computer}`).
-  // `from`: the old finite.computer agent it is made for, kept in its
-  // agent.json (`from`), so the page finds it again (move-page.js `madeFor`).
+  // staying as it is; answered with what was made (`{chat, id, computer,
+  // agent}`). `from`: the old finite.computer agent it is made for, kept in
+  // its agent.json (`from`), so the page finds it again (move-page.js
+  // `madeFor`); its hello is the page's, after its Yes (`moveHello`).
   // `agent`: the one made for it before, which the page found so: gone on
   // with by its own label (its chat too, one made whose answer was lost),
   // under the name it has, never another made.
@@ -481,10 +494,11 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     // its joining is what lets the chat's page send (and wakes its computer)
     await api("PUT", `/api/f/${chatName}/members/${seg(id)}`, { role: "editor" });
     setupChanged({ joined: true });
-    await hello(agent, chatName, setup.from);
+    // a move's agent's hello waits for its Yes (`moveHello`)
+    if (!setup.from) await hello(agent, chatName);
     api("POST", `/api/computers/${seg(computer.computer)}/wake`, {}).then(computerIs).catch(() => {});
     await load();
-    return { chat: chatName, id, computer: computer.computer };
+    return { chat: chatName, id, computer: computer.computer, agent };
   }
   // Its agent fragment's name: made unless a try made it (`setup.agent`, else
   // found by its label), with its job, tier and role written once (an agent
@@ -497,8 +511,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     if (setup.written) return agent;
     // Written, it may name the old agent a move made it for (`from`): a
     // making gone on with after a reload, by Add's or the first run's way
-    // (a mover's first agent here), knows it only from here, and its hello
-    // is still the move's.
+    // (a mover's first agent here), knows it only from here, and says no
+    // hello of its own (its move's waits for its Yes).
     // (any answer but 404 is written, whatever it holds)
     const read = await api("GET", `/api/f/${seg(agent)}/file?path=agent.json`).then((json) => ({ json }), (e) => { if (e.status === 404) return null; throw e; });
     if (read) {
@@ -631,6 +645,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     setupState: () => setup && [setup.chat, setupFor(setup.chat)],
     setupPending: () => setup && !setup.joined,
     retrySetup: (name) => { if (name === setup?.chat && setup.error) creatingAgent(); },
+    // a move's agent's hello, as `addAgent` answered it, once its Yes landed
+    moveHello: ({ agent, chat }, from) => hello(agent, chat, from),
     putOff: () => firstRunPutOff,
   };
 }

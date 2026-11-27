@@ -1,7 +1,7 @@
 // cell/shell/move-page.js, the move's page (FIN-463 F6): a person's old
 // agents in the server's words, the one question (which, by what name),
 // then for each a new agent made as Settings' Add makes one and its Yes
-// posted; for someone with agents here already, a new one or one of
+// posted, and only then its hello; for someone with agents here already, a new one or one of
 // theirs, asked; a refusal in the server's words; Ask again after a Never;
 // a move under way read again. The real `createMovePage`, its page faked;
 // each call answers only when the test says.
@@ -34,6 +34,9 @@ function page(t, own = { agents: [], ids: new Map(), chats: new Map(), names: ne
   const root = new Node("section");
   const calls = [];
   const made = [];
+  // each hello asked for, as the calls went then (FIN-817: after its Yes)
+  const hellos = [];
+  let helloFails = false;
   const timers = { setTimeout: (fn) => (timers.due = fn, 1), clearTimeout: () => (timers.due = null), due: null };
   const api = (method, path, body) => new Promise((ok, fail) => calls.push({ method, path, body, ok, fail }));
   let guest = true;
@@ -42,6 +45,10 @@ function page(t, own = { agents: [], ids: new Map(), chats: new Map(), names: ne
     api, el: (tag, cls, text) => new Node(tag, cls, text), timers,
     setGuest: (g) => (guest = g),
     addAgent: (spec) => new Promise((ok, fail) => made.push({ spec, ok, fail })),
+    hello: async (agent, from) => {
+      hellos.push({ agent, from, calls: calls.length });
+      if (helloFails) throw new Error("Failed to fetch");
+    },
     reload: () => {},
     ownAgents: () => own.agents, identityOf: (f) => own.ids.get(f) ?? null,
     named: (node, fragment, make) => ((node.textContent = make(own.names?.get(fragment) ?? fragment)), node),
@@ -78,7 +85,7 @@ function page(t, own = { agents: [], ids: new Map(), chats: new Map(), names: ne
     for (const x of walk(li).filter((n) => n.tag === "input" && n.type === "radio")) x.checked = x === r;
     r.onchange();
   };
-  return { ui, root, calls, made, timers, rows, button, errors, next, opened, guest: () => guest, question, choose };
+  return { ui, root, calls, made, hellos, helloFails: () => (helloFails = true), timers, rows, button, errors, next, opened, guest: () => guest, question, choose };
 }
 
 const offer = (old, state, said, o = {}) => ({ old, name: `Old ${old}`, state, said, ...o });
@@ -116,18 +123,57 @@ test("Upgrade: the move opened (the comp), a seat waited for, then each a new ag
   assert.equal(p.guest(), false, "a seat, as the platform said");
   assert.deepEqual(p.made.map((m) => m.spec), [{ name: "Old a", role: null, quiet: true, from: "a", agent: null }], "made for its old agent, which its agent.json keeps, under its name");
   assert.deepEqual(p.rows()[0].words, ["Old a", "Preparing Old a's upgrade…"], "while it is made");
-  p.made[0].ok({ chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa" });
+  const juniper = { chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa", agent: "juniper--k3x9" };
+  p.made[0].ok(juniper);
   await settle();
   const yes = p.next("POST", "/api/migrations/offers/a/yes");
   assert.deepEqual(yes.body, { agent: "npub1juniper" });
+  assert.deepEqual(p.hellos, [], "no hello while its Yes is out: nothing said of an import not begun");
   yes.ok({ state: "asked" });
   await settle();
+  assert.deepEqual(p.hellos.map(({ agent, from }) => ({ agent, from })), [{ agent: juniper, from: "a" }], "its hello, once its Yes landed, for its old agent");
   p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "asked", "Pausing Old a for its upgrade…")] });
   await settle();
   p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "asked", "Pausing Old a for its upgrade…")] });
   await settle();
   assert.deepEqual(p.rows(), [{ old: "a", words: ["Old a", "Pausing Old a for its upgrade…"], pick: false, buttons: [] }]);
   assert.equal(p.button("Upgrade"), undefined, "nothing left to ask");
+});
+
+// FIN-817: a Yes that did not arrive says nothing of an upgrade under way
+// (its hello never asked); a hello lost after a Yes that landed is no
+// failure of the Upgrade, whose import began (the page opened next at
+// home says it: onboarding.js `resumeAdd`).
+test("a Yes that failed asks no hello; a hello lost after a Yes that landed is no failure", async (t) => {
+  for (const landed of [false, true]) {
+    const p = page(t);
+    if (landed) p.helloFails();
+    p.ui.open();
+    p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a's upgrade is ready.")] });
+    await settle();
+    p.button("Upgrade").onclick();
+    await settle();
+    p.next("POST", "/api/migrations/offers").ok({ offers: [offer("a", "open", "Old a's upgrade is ready.")] });
+    await settle();
+    p.next("GET", "/api/ledger").ok({ plan: "seat" });
+    await settle();
+    p.made[0].ok({ chat: "juniper-chat--k3x9", id: "npub1juniper", computer: "computer:aa", agent: "juniper--k3x9" });
+    await settle();
+    const yes = p.next("POST", "/api/migrations/offers/a/yes");
+    if (landed) yes.ok({ state: "asked" });
+    else yes.fail(Object.assign(new Error("Couldn't reach the server."), { status: 0 }));
+    await settle();
+    p.next("GET", "/api/migrations/offers").ok({ offers: [offer("a", landed ? "asked" : "open", landed ? "Pausing Old a for its upgrade…" : "Old a's upgrade is ready.")] });
+    await settle();
+    if (landed) {
+      assert.equal(p.hellos.length, 1, "its hello asked, once its Yes landed");
+      assert.deepEqual(p.errors(), [], "its import began: nothing failed");
+    } else {
+      assert.deepEqual(p.hellos, [], "no hello: no import begun");
+      assert.deepEqual(p.errors(), ["Couldn't reach the server."]);
+      assert.equal(p.button("Upgrade").disabled, false, "to try again, with the same agent");
+    }
+  }
 });
 
 test("a refusal is the server's words, the page as read, to try again", async (t) => {
