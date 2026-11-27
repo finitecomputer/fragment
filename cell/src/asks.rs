@@ -306,7 +306,8 @@ impl FragmentCell {
     /// (`records.carried`, kept in the append's own step), that ask
     /// carried on: the same asker, place, record and day; else the posting
     /// agent's own, unproven, lending nothing; words no one's word proves
-    /// (app code's, a door's that relays no one), no one's. Only the owner's own ask is
+    /// (app code's, a door's that relays no one), the place's own, unproven
+    /// (an identity every release takes as an asker). Only the owner's own ask is
     /// ever carried on: anyone else's, through another of its agents,
     /// would reach what that agent's cap, grants and lend reach (FIN-615 PR
     /// 16a).
@@ -314,9 +315,8 @@ impl FragmentCell {
         let own = |asker: &str| Ask { asker: asker.to_string(), proven: false, at, carried: None };
         Ok(match asked {
             Asked::By(asker) => Ask { proven: true, ..own(asker) },
-            // no one's word proves it: an empty asker, which its agent
-            // fragment holds as no one's (runs_on.rs `turns_in`)
-            Asked::NoOne => own(""),
+            // no one's word proves it: in the place's own name, never proven
+            Asked::NoOne => own(&npub::display(&self.must(MetaKey::Npub)?)),
             Asked::Agent(agent) if !members.iter().any(|m| npub::display(&m.principal) == *agent && m.owner.is_some() && m.owner == to.owner) => own(agent),
             Asked::Agent(agent) => {
                 #[derive(Deserialize)]

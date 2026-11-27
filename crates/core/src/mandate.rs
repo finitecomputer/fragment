@@ -249,9 +249,9 @@ pub enum Asked {
     /// the agent's own, with nothing to prove it.
     Agent(String),
     /// Words its bridge runs that no one's word proves: app code's, a
-    /// door's that relays no one, the platform's own. An ask no one
-    /// proves, as one past the most an agent holds is: the agent acts as
-    /// itself, in that place alone (`Proof::Itself`).
+    /// door's that relays no one, the platform's own. An ask in the place's
+    /// own name, which nothing proves: the agent acts as itself, in that
+    /// place alone (`Proof::Itself`), as on anyone's unproven ask.
     NoOne,
 }
 
@@ -329,15 +329,22 @@ pub fn turn_id(agent_fragment: &str, place: &str, channel: &str, seq: i64) -> St
 }
 
 /// Whether a record's body is words an agent answers with a turn: a
-/// message (no `kind`, or `message`), as an agent's bridge hears one; a
-/// stop, a card's answer or a command starts none.
+/// message (no `kind`, or `message`) that says something, as an agent's
+/// bridge hears one; a stop, a card's answer, a command or an object
+/// with no words starts none.
 pub fn starts_turn(body: &str) -> bool {
-    match serde_json::from_str::<serde_json::Value>(body) {
-        Ok(serde_json::Value::String(_)) => true,
-        Ok(serde_json::Value::Object(o)) => match o.get("kind") {
-            None => true,
-            Some(kind) => kind == "message",
-        },
+    use serde_json::Value;
+    match serde_json::from_str::<Value>(body) {
+        Ok(Value::String(_)) => true,
+        // words, as its bridge reads a message (records.rs `message`): a
+        // `text`, or with none, attachments; a status object says nothing
+        Ok(Value::Object(o)) => {
+            let words = match o.get("text") {
+                Some(text) => text.is_string(),
+                None => o.get("attachments").and_then(Value::as_array).is_some_and(|a| !a.is_empty()),
+            };
+            o.get("kind").is_none_or(|kind| kind == "message") && words
+        }
         _ => false,
     }
 }
@@ -429,7 +436,7 @@ mod tests {
 
     /// Goal (FIN-615): words its bridge runs that no one's word proves
     /// (app code's, a door's that relays no one, the platform's own) are an
-    /// ask no one proves, never none: with none open, the agent's calls on
+    /// ask nothing proves, never none: with none open, the agent's calls on
     /// them would carry its owner's reach. As itself, in that place alone.
     /// Its owner's own words are theirs, and narrow nothing; an anonymous
     /// visitor's, which its bridge never runs, open nothing.
@@ -447,8 +454,12 @@ mod tests {
         assert_eq!(asked_of(&key, None, None, said), Some(Asked::NoOne), "stored before the author stamp");
         assert_eq!(asked_of(&ana, Some(Author::Person), None, said), Some(Asked::By(ana.clone())), "its owner's own words: theirs");
         assert_eq!(asked_of("anon:x", Some(Author::Code), None, said), None, "an anonymous visitor's, through app code too: its bridge never runs them");
-        // held so: as itself, in that place alone, whoever else asked
-        let no_one = Turn { place: "app--k3x9", asker: "", mandate: None };
+        // and only words its bridge runs: an object with none starts no turn
+        assert!(!starts_turn(r#"{"status":"saved"}"#) && !starts_turn(r#"{"text":5}"#) && !starts_turn(r#"{"attachments":[]}"#), "no words, no turn");
+        assert!(starts_turn(r#"{"attachments":[{"sha256":"x"}]}"#), "attachments alone are words");
+        // held so, in the place's own name (`key`, which every release
+        // takes): as itself, in that place alone, whoever else asked
+        let no_one = Turn { place: "app--k3x9", asker: &key, mandate: None };
         let owners = Turn { place: "talk--k3x9", asker: &ana, mandate: None };
         assert_eq!(proof(&ana, &[no_one]), Proof::Itself(vec!["app--k3x9"]));
         assert_eq!(proof(&ana, &[owners, no_one]), Proof::Itself(vec!["app--k3x9"]), "its owner's own ask beside it widens nothing");

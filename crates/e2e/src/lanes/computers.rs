@@ -296,6 +296,8 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         let turn = turn_of(w.agent, &says, "chat", seq);
         let reply = || agent_replies(&records(api, w.owner, &says, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
         s.eventually(wake, || reply().is_some());
+        // its end, which closes that ask (its reply is posted before it)
+        s.eventually(wake, || work_of(&records(api, w.owner, &says, "work"), &turn).iter().any(|r| r["body"]["kind"] == "turn.end"));
         Ok(reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default())
     };
     let for_owner = |on: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{on}/ops/whoami?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
