@@ -460,6 +460,35 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let started = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
     anyhow::ensure!(started.status == 200, "starting the fixture turn: {started}");
     s.ok("a turn.start replaces startup or delay status with the agent's working status", super::shows(chrome, &page, "window.__frame.contentDocument.querySelectorAll('.working').length === 1 && window.__frame.contentDocument.querySelector('.working').textContent.includes('is working')"), "");
+    // a hand-off's turn, as its bridge starts one (FIN-615, PR 16a): the
+    // agent that said the words its `asker`, whose ask they were on
+    // `carried`; its line names both
+    let (juniper, ben) = (super::super::delegation::agent_of(api, owner)?.1, api.identity(&api.person()?)?);
+    let both = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": "awake" }, { "identity": juniper, "name": "juniper", "title": "Juniper", "phase": "awake" }] });
+    chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({both}, location.origin); return true; }})()"))?;
+    for (id, body) in [
+        ("fixture-new-end", json!({ "kind": "turn.end", "turn": "fixture-new", "outcome": "idle" })),
+        ("fixture-carried", json!({ "kind": "turn.start", "turn": "fixture-carried", "agent": agent, "asker": juniper, "carried": ben, "cause": { "channel": "chat", "seq": cause["seq"] } })),
+    ] {
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+    }
+    let carried_line = format!("Bob is working for npub…{} (via Juniper)", &ben[ben.len() - 6..]);
+    s.ok(
+        "a hand-off's working line names whose ask it carries on and the agent that said it: \"Bob is working for Ben (via Juniper)\"",
+        super::shows(chrome, &page, &format!("window.__frame.contentDocument.querySelector('.working')?.textContent === {}", super::js(&carried_line))),
+        chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null),
+    );
+    // a folder of their own: a later check makes `chat-polish` again
+    let carried_shots = s.dir("carried-line");
+    for (w, h, phone, scheme, file) in [(1280, 860, false, "light", "desktop.png"), (1280, 860, false, "dark", "desktop-dark.png"), (390, 844, true, "light", "phone.png"), (390, 844, true, "dark", "phone-dark.png")] {
+        super::fit(chrome, &page, w, h, phone)?;
+        chrome.color_scheme(&page, scheme)?;
+        chrome.screenshot(&page, &carried_shots.join(file))?;
+    }
+    println!("      (the carried line's screenshots in {})", carried_shots.display());
+    chrome.color_scheme(&page, "light")?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     println!("      (polish screenshots in {})", shots.display());
     chrome.close(page)?;
     forged_turn(s, api, owner, chrome, &name, &hand, agent)

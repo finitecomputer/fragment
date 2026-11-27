@@ -16,6 +16,13 @@
 //! it. An agent's computer can neither make nor alter one, and one names
 //! its agent, so no other key may carry it. It holds from its record's
 //! writing for `limits::MANDATE_LIFE_MS`, so old words start nothing new.
+//!
+//! **Carried** (FIN-615, PR 16a: `fragment ask`, a hand-off): an agent on
+//! its owner's own proven ask that asks another agent of its owner's hands
+//! that agent the same ask (`Mandate::carried`), so it too acts for its
+//! owner, proven, for as long as the ask holds. Only its owner's own ask is
+//! carried (the caller checks): anyone else's is lent and capped per agent,
+//! and goes on unproven, the agent acting as itself (docs/api.md).
 
 pub use fragment_proto::Lend;
 use fragment_proto::{limits, valid_channel_name, Author};
@@ -105,6 +112,15 @@ impl Mandate {
     /// kind, which no mandate could carry.
     pub fn of_record(asker: &str, agent: &str, place: &str, channel: &str, seq: i64, at: i64) -> Option<Mandate> {
         let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq, until: at.saturating_add(limits::MANDATE_LIFE_MS) };
+        well_formed(&m).then_some(m)
+    }
+
+    /// This ask carried by its agent to `agent`, another agent of the same
+    /// owner's it asked, the ask its owner's own (the caller checks both):
+    /// the same asker, place, record and day, so it holds no longer and says
+    /// no more than the ask it came from. None for a name not of its kind.
+    pub fn carried(&self, agent: &str) -> Option<Mandate> {
+        let m = Mandate { agent: agent.into(), ..self.clone() };
         well_formed(&m).then_some(m)
     }
 
@@ -456,5 +472,22 @@ mod tests {
         assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
         // replay: the same turns decide the same
         assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
+    }
+
+    /// Goal (FIN-615, PR 16a): an ask carried to another agent is the same
+    /// ask: its asker, place, record and day, made for that agent alone, so
+    /// it opens for it under the same keys, says nothing more, and the agent
+    /// that carried it can't carry the text made for the other.
+    #[test]
+    fn a_carried_ask_is_the_same_ask_for_another_agent() {
+        let key = vec![MandateKey::derive(HOST)];
+        let rowan = crate::npub::encode(&"f".repeat(64));
+        let m = ben_asks_juniper(1_000);
+        let c = m.carried(&rowan).expect("carried");
+        assert_eq!(c, Mandate { agent: rowan.clone(), ..m.clone() });
+        assert_eq!(open(&key, &c.text(&key[0]), 2_000), Ok(c.clone()));
+        assert_eq!(open(&key, &c.text(&key[0]), c.until + 1), Err(Refused::Expired), "no longer than the ask it came from");
+        assert_ne!(c.text(&key[0]), m.text(&key[0]), "made for the agent asked alone");
+        assert_eq!(m.carried("npub1short"), None);
     }
 }

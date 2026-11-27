@@ -201,6 +201,18 @@ routes (which take `for` through the registry, and no mandate). Only the
 platform can make one: its mark is a MAC under a key derived from the
 host secret.
 
+**An ask carried on** (FIN-615, PR 16a; `fragment ask`, a hand-off). An
+agent's post made on a mandate keeps that mandate (`records.carried`).
+Where that mandate is its owner's own ask, an agent member of the same
+owner's that the post is to (`to` names it, or no one), reading it as
+itself, is given beside it that ask carried on (`Mandate::carried`): the
+same asker, place, record and day, for itself, so it acts for its owner,
+proven, no longer than the ask it came from. Anyone else's ask is carried
+to no one: what an agent may do for them is its own cap, hold, grants and
+lend, which a second agent would not be held to, so the agent asked goes
+on unproven, as itself, in the place it was asked alone (SHIP IT,
+2026-11-26). Nor is another owner's agent given one.
+
 **An agent's computer proves who asked** (FIN-720). Its bridge tells the
 agent's fragment each turn it runs, before its runtime hears of it
 (`/api/computer/turns`: docs/computers.md). The egress then signs each
@@ -212,7 +224,10 @@ unproven, the agent as itself, with no `for`, in those turns' places
 alone, and 403 anywhere else. The invites waiting on its owner's email
 take `for` and no mandate: there its owner's own ask keeps `for`, and
 anyone else's is 403. A hand-off (another agent of the computer's words
-in a chat) carries on the ask of the turn it was said in, unproven. Since decision 64 an agent's own
+in a chat) carries on the ask of the turn it was said in: proven by the
+mandate its place gave the agent beside the words ("An ask carried on",
+above), else unproven (an image from before, a record from before, or
+words on no mandate). Since decision 64 an agent's own
 memberships mirror its owner's, so acting as itself elsewhere would reach
 what is its owner's for someone it cannot name. A mandate names whose ask
 a turn is, whatever its bridge says (a schedule's fire is its maker's,
