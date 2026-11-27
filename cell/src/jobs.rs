@@ -1052,7 +1052,7 @@ impl FragmentCell {
         let mut resp = routed.ask(&self.env, Method::Post, &format!("/api/reads/{op}"), Some(&body), None).await.map_err(retry)?;
         let status = resp.status_code();
         let text = resp.text().await.map_err(|e| StepFail::Retry(e.to_string()))?;
-        let answer: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+        let answer: Value = crate::json_text(&text).unwrap_or(Value::Null);
         match status {
             200..=299 => Ok(answer["result"].clone()),
             429 | 500.. => Err(StepFail::Retry(format!("{fragment} answered {status}"))),
