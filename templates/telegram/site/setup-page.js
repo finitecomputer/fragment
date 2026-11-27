@@ -48,6 +48,13 @@ export function copyButton(text, shown, what) {
       await navigator.clipboard.writeText(text);
     } catch {
       if (mine !== presses) return;
+      // the browser's older copy, as the chat page's (response-actions.js
+      // `copy`): a hidden field's text, copied by this press
+      if (copiedByHand(text)) {
+        shows(true);
+        setTimeout(() => mine === presses && shows(false), 1500);
+        return;
+      }
       shows(false);
       const range = document.createRange();
       range.selectNodeContents(shown);
@@ -62,6 +69,24 @@ export function copyButton(text, shown, what) {
     setTimeout(() => mine === presses && shows(false), 1500);
   });
   return { button: b, said };
+}
+
+function copiedByHand(text) {
+  const field = el("textarea");
+  field.value = text;
+  field.setAttribute("aria-hidden", "true");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  field.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  field.remove();
+  return copied;
 }
 
 export const row = (...items) => {

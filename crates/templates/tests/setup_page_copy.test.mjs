@@ -2,7 +2,9 @@
 // `copyButton`, which Slack's pairing step uses), as the shell's: a copy
 // icon and its word, a check and "Copied" for 1.5 s once copied, then Copy
 // again; a newer press's answer is the one shown; a clipboard that
-// refuses selects what it copies and says so, and Copy stays Copy.
+// refuses (as a frame's whose policy names another origin) copies by the
+// browser's older way, as the chat page does; when that refuses too, it
+// selects what it copies and says so, and Copy stays Copy.
 import { test, mock } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
@@ -14,7 +16,11 @@ register("data:text/javascript," + encodeURIComponent(`export async function res
 
 class El {
   constructor(tag) {
-    Object.assign(this, { tag, className: "", textContent: "", children: [], attrs: {}, listeners: {}, hidden: false });
+    Object.assign(this, { tag, className: "", textContent: "", children: [], attrs: {}, listeners: {}, hidden: false, style: {} });
+  }
+  select() {}
+  remove() {
+    removed.push(this);
   }
   append(...c) {
     this.children.push(...c);
@@ -31,7 +37,12 @@ class El {
 }
 globalThis.window = { parent: {} };
 let selected = null;
+let byHand = false;
+const removed = [];
+const execs = [];
 globalThis.document = {
+  body: { append() {} },
+  execCommand: (c) => (execs.push(c), byHand),
   createElement: (t) => new El(t),
   createElementNS: (_, t) => new El(t),
   documentElement: { dataset: {} },
@@ -78,7 +89,29 @@ test("a second press keeps Copied its full 1.5 s: the first press's timer change
   mock.timers.reset();
 });
 
-test("a clipboard that refuses (or none at all) selects the code to copy by hand, says so, and Copy stays Copy", async () => {
+test("a clipboard that refuses (a frame's, FIN-508's live test) copies by the browser's older way, and shows Copied", async () => {
+  mock.timers.enable({ apis: ["setTimeout"] });
+  Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async () => { throw new Error("NotAllowedError"); } } }, configurable: true });
+  byHand = true;
+  execs.length = 0;
+  removed.length = 0;
+  selected = null;
+  const { button, said } = copyButton("pair 975fb7d36e5c93db", el("code"), "the pairing message");
+  await button.listeners.click();
+  assert.deepEqual(execs, ["copy"]);
+  assert.equal(removed.length, 1, "its hidden field is gone");
+  assert.equal(removed[0].value, "pair 975fb7d36e5c93db");
+  assert.deepEqual(shown(button), { word: "Copied", check: true, label: "Copied" });
+  assert.equal(said.hidden, true);
+  assert.equal(selected, null);
+  mock.timers.tick(1500);
+  assert.equal(shown(button).word, "Copy");
+  byHand = false;
+  mock.timers.reset();
+});
+
+test("a clipboard that refuses, or none at all, with the older way refused too, selects the code to copy by hand, says so, and Copy stays Copy", async () => {
+  byHand = false;
   for (const nav of [{ clipboard: { writeText: async () => { throw new Error("NotAllowedError"); } } }, {}]) {
     Object.defineProperty(globalThis, "navigator", { value: nav, configurable: true });
     selected = null;

@@ -337,13 +337,15 @@ function frameOf(src, title, name = null, { microphone = false } = {}) {
   frame.setAttribute("aria-label", title);
   frame.allow = "clipboard-write";
   frame.dataset.src = src;
-  if (name) frame.dataset.fragment = name;
-  if (name && microphone) {
-    // A bare `microphone` is the src's origin's, the mint's on this page's;
+  if (name) {
+    frame.dataset.fragment = name;
+    // A bare feature is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
-    // without asking. So it names that origin before the frame navigates
-    // (a policy is read as a navigation starts): known here, no request.
-    frame.allow = `clipboard-write; microphone ${originAt(name)}`;
+    // (its clipboard, in silence; its microphone, without asking). So it
+    // names that origin before the frame navigates (a policy is read as a
+    // navigation starts): known here, no request.
+    const at = originAt(name);
+    frame.allow = microphone ? `clipboard-write ${at}; microphone ${at}` : `clipboard-write ${at}`;
   }
   frame.src = src;
   frame.addEventListener("load", () => theme(frame));

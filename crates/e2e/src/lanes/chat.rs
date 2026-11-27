@@ -329,8 +329,9 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
 /// (`/auth/frame`) sends on to the chat's own origin. A bare
 /// `allow="microphone"` names the frame's `src`'s origin, the platform's,
 /// and the browser refused the chat's page the microphone without asking
-/// ("The microphone is off for this chat", PR 582). Valid: the shell's
-/// frame names the chat's origin, and there, the microphone allowed
+/// ("The microphone is off for this chat", PR 582), as it refused its
+/// clipboard (FIN-508). Valid: the shell's frame names the chat's origin
+/// for both, and there, the microphone allowed
 /// (Chrome's fake, as a person's Allow), the chat is told it may record,
 /// and a press records at once, with no card.
 fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> Result<()> {
@@ -360,7 +361,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: &str) -> R
     let read_first = navigated.is_some_and(|i| asked[..i].iter().any(|u| u.contains(&format!("/api/f/{chat}/status"))));
     s.ok(
         "the shell's frame names the chat's own origin in its policy and navigates at once: no read of the chat's status first",
-        allow == json!(format!("clipboard-write; microphone {}", api.site_origin(chat))) && navigated.is_some() && !read_first,
+        allow == json!(format!("clipboard-write {o}; microphone {o}", o = api.site_origin(chat))) && navigated.is_some() && !read_first,
         json!({ "allow": allow, "navigated": navigated, "read_first": read_first }),
     );
     let frame = chrome.frame(chat)?;
