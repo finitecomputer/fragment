@@ -862,6 +862,17 @@ fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
     c.call_as::<Value>(resp)
 }
 
+/// A SimpleX move's `go` refused because its connector's name is taken:
+/// made by a move that stopped. Its next step is the move's own, never
+/// `name_taken`'s hint to remove the fragment (the move deletes nothing:
+/// `--back` archives it).
+fn stopped_making(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<CodedError>() {
+        Some(ce) if ce.code == Code::NameTaken => anyhow::Error::new(CodedError { code: Code::InvalidRequest, msg: format!("{}: its connector was made by a move that stopped: --back archives it, then --yes", ce.msg) }),
+        _ => e,
+    }
+}
+
 #[derive(Subcommand)]
 enum LedgerCmd {
     /// Grant someone credit (the deployment's operators): an email, an
@@ -1816,7 +1827,7 @@ fn run(cli: Cli) -> Result<()> {
             // bounded: a door links within minutes; each ask goes on from its record
             let t0 = std::time::Instant::now();
             loop {
-                let v = ask("go").map_err(|e| if e.to_string().contains("already_exists") { e.context("its connector was made by a move that stopped: --back archives it, then --yes") } else { e })?;
+                let v = ask("go").map_err(stopped_making)?;
                 let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
                 if step == "done" || step == "offered" {
                     json_exit(j, &v);
@@ -3504,6 +3515,21 @@ mod tests {
 
         let (err, _) = error_body(&coded(Code::OutcomeUnknown));
         assert!(err.get("id").is_none() && !err["hint"].as_str().unwrap_or("").contains("--id"), "{err}");
+    }
+
+    /// Goal: a SimpleX move refused because its connector's name is taken
+    /// (a move that stopped made it) says `--back`, and never hints that
+    /// the fragment be removed. Invalid: any other refusal keeps its own
+    /// code and hint.
+    #[test]
+    fn a_stopped_making_says_back_never_remove() {
+        let taken = anyhow::Error::new(CodedError { code: Code::NameTaken, msg: "its connector's making: 409 already_exists: juniper-simplex--k3x9 exists".into() });
+        let (err, _) = error_body(&stopped_making(taken));
+        let (message, hint) = (err["message"].as_str().unwrap_or(""), err["hint"].as_str().unwrap_or(""));
+        assert!(message.contains("--back archives it, then --yes"), "{err}");
+        assert!(!hint.contains("fragment rm") && !message.contains("fragment rm"), "{err}");
+        let (err, _) = error_body(&stopped_making(coded(Code::Conflict)));
+        assert_eq!((err["code"].as_str(), err["hint"].as_str()), (Some("conflict"), Some(Code::Conflict.hint())));
     }
 
     /// Goal: `fragment host <url>` changes the host and keeps the config's
