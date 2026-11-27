@@ -22,7 +22,7 @@ use crate::vault::{LendSecret, PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
     Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, PostsHeld, PostsHeldAsk, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen,
     SetArchived,
-    SetDock, SetPinned,
+    SetDock, SetMicrophone, Microphone, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, Conflict, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
 
@@ -268,6 +268,17 @@ pub const ROUTES: &[Route] = &[
         params: &[NAME],
         request: Some(Body::Json(ty::<SetPinned>())),
         answer: Answer::Json(ty::<Pinned>()),
+        errors: &[Unauthenticated, InvalidRequest, NotFound],
+    },
+    Route {
+        operation: "fragments.microphone",
+        method: Method::Put,
+        path: "/api/fragments/{name}/microphone",
+        summary: "Let a fragment's page use the signer's microphone, or take it back (on a release chat: every such chat).",
+        auth: SIGNED,
+        params: &[NAME],
+        request: Some(Body::Json(ty::<SetMicrophone>())),
+        answer: Answer::Json(ty::<Microphone>()),
         errors: &[Unauthenticated, InvalidRequest, NotFound],
     },
     Route {

@@ -2867,7 +2867,7 @@ export function mount(root) {
       recording = null;
       renderRecording();
       if (ended) return;
-      return err?.name === "NotAllowedError" ? showMicCard("denied") : problem(`Could not record: ${err?.message ?? err}`);
+      return err?.name === "NotAllowedError" ? showMicCard() : problem(`Could not record: ${err?.message ?? err}`);
     }
     // pressed again while the browser asked: nothing was recorded to send
     if (memo.stopped) {
@@ -2923,26 +2923,20 @@ export function mount(root) {
     renderAttachments();
     send(input.value);
   }
-  // Before the browser's own prompt, a card says what the microphone is
-  // for, and asks only on Continue; one the browser refused says where it
-  // is allowed again (the page can do nothing more: Okay closes it). A
-  // browser that cannot say (Firefox) or asks every visit (Safari) shows
-  // the first card once: this browser remembers it was read.
-  const MIC_PRIMED = "fragment-chat:mic-primed";
-  const MIC_CARD = {
-    ask: ["Send voice memos to your agent", "Allow the microphone on the next step.", "Continue"],
-    denied: ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"],
-  };
-  const primed = () => {
-    try { return localStorage.getItem(MIC_PRIMED) === "1"; } catch { return false; }
-  };
+  // The microphone is the shell's to lend (FIN-615 PR 11): framed by it, a
+  // voice memo asks it first, from its press (`microphone?`). The shell asks
+  // its person once, for every chat, and makes this frame again, lent it (a
+  // frame made after their yes is lent from the first); then comes the
+  // browser's own prompt. One the browser refused says where it is allowed
+  // again (the page can do nothing more: Okay closes it).
+  const MIC_ASK_MS = 120_000;
+  const MIC_DENIED = ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"];
   async function micPermission() {
     try { return (await navigator.permissions.query({ name: "microphone" })).state; } catch { return null; }
   }
-  function showMicCard(kind) {
-    const [title, text, go] = MIC_CARD[kind];
+  function showMicCard() {
+    const [title, text, go] = MIC_DENIED;
     const card = $("mic-card");
-    card.dataset.kind = kind;
     $("mic-card-title").textContent = title;
     $("mic-card-text").textContent = text;
     $("mic-card-go").textContent = go;
@@ -2955,20 +2949,21 @@ export function mount(root) {
     hideMicCard();
     input.focus();
   };
-  $("mic-card-go").onclick = () => {
-    if ($("mic-card").dataset.kind === "denied") return $("mic-card-close").onclick();
-    try { localStorage.setItem(MIC_PRIMED, "1"); } catch {}
-    hideMicCard();
-    startMemo();
-  };
+  $("mic-card-go").onclick = () => $("mic-card-close").onclick();
   $("record").onclick = async () => {
     if (recording) return stopMemo(false);
     if (!canAttach() || !recordable()) return;
+    if (framed && state.me) {
+      // asked in this click's own turn: the shell reads the click
+      const lent = await askShell({ fragment: KIND.micAsk }, MIC_ASK_MS);
+      // not lent (Not now, or no shell), or this frame is being made again, lent it
+      if (ended || lent?.ok !== true || lent.reload === true) return;
+    }
     const mic = await micPermission();
     // its access ended while the browser was asked
     if (ended) return;
-    if (mic === "granted" || (mic !== "denied" && primed())) return startMemo();
-    showMicCard(mic === "denied" ? "denied" : "ask");
+    if (mic === "denied") return showMicCard();
+    startMemo();
   };
   $("discard").onclick = () => {
     stopMemo(true);
@@ -3125,7 +3120,7 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
-    } else if ([KIND.alerts, KIND.confirmed].includes(d?.fragment) && event.origin === state.me?.platform) {
+    } else if ([KIND.alerts, KIND.confirmed, KIND.micAnswer].includes(d?.fragment) && event.origin === state.me?.platform) {
       if (typeof d.nonce !== "string") return;
       const waiting = askingShell.get(d.nonce);
       if (!waiting) return;

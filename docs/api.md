@@ -879,6 +879,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `SetArchived` → `Archived` (docs/wire): their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
 | `PUT /api/fragments/{name}/dock` | the same | `SetDock` → `Docked`: whether their dock shows it, as archiving is (every fragment is on it until taken off); their list's sockets are told. Not for `for` |
 | `PUT /api/fragments/{name}/pinned` | the same | `SetPinned` → `Pinned`: whether they pinned it, as archiving is (nothing is pinned until pinned); their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
+| `PUT /api/fragments/{name}/microphone` | the same | `SetMicrophone` → `Microphone`: their yes to its page using their microphone (none until they say yes), which the shell asks behind a press in its page (One ask) and lends its frames by (`ListedFragment.microphone`); on a chat of the release's chat template, their one yes for every such chat. Their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
 | `PUT /api/fragments/{name}/seen` | the same | no body → `Seen` (`unread: 0`): they have seen its messages up to the newest their search holds; it never goes back. Any body 400. Not for `for` |
 | `GET /api/search?q=` | any signer | → `SearchAnswer` (docs/wire, `search.find`; Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
 | `POST /api/search` | any signer, `for` too | `Across {q, in, limit?, mode?, fields?, after?, before?}` → `FoundAcross {results, fragments, semantic}`: one question asked of several fragments' indexes (Search across fragments) |
@@ -1049,6 +1050,24 @@ option, answers: {channel: "work", seq}}` alone (400 otherwise:
 once answered or run out). Never words or a message: an answer starts no
 turn, and the asker asks again (the debt ledger, "A card's answer resumes
 nothing").
+
+The microphone is asked in the same dialog, the shell's own: a page
+framed by the shell asks it (`microphone?`, templates/chat/site/
+frame-messages.js), and the shell asks its person once
+per fragment ("Let Recipes use your microphone?", saying "an app shared
+with you" when it is not theirs; "Use your microphone in chats?" for the
+release's chat, one yes for every such chat). **Allow** keeps the yes on
+their row (`PUT /api/fragments/{name}/microphone`) and makes the frame
+again, naming the fragment's origin in its policy; **Not now** keeps
+nothing. A frame names no microphone until then, and a visitor's (no row)
+never does. The fragment's ⋯ takes it back: its open pages, in every tab
+(every chat's, for a chat's), are made again without it (the list's
+change). The consent is the dialog's own Allow, which arms after a moment
+and no page can press; against spam, one ask is open at a time across
+every frame ("busy"), and a frame told Not now asks nothing more until the
+shell loads it again (its Reload, or opened again). A release chat's page
+is the platform's and asks only from its own mic button, so its mic
+pressed again asks again.
 
 ### Listed records
 
