@@ -119,7 +119,7 @@ pub struct MySeat {
 }
 
 /// `GET /api/seat`'s answer: `MySeat`, whether they are a guest
-/// (`fragment_core::org::guest`), and what is sold, for a page to show:
+/// (`fragment_core::permit::guest`), and what is sold, for a page to show:
 /// none where nothing is (no Stripe: billing off, every seat a comp).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

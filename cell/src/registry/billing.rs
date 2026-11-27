@@ -310,7 +310,7 @@ impl RegistryCell {
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
                 let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref());
-                match (paying, m.admin != 0) {
+                match (paying, m.admins(None)) {
                     (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
                     (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name)).because(Reason::OrgPays)),
                     (true, false) | (false, false) => return Err(conflict(format!("you are in {}: its admins give you a seat", o.name))),
@@ -350,7 +350,7 @@ impl RegistryCell {
         let (org, person) = match (&b.member, mine) {
             (None, Some(m)) if m.seat.is_some() => (m.org, who.id.clone()),
             (None, _) => return Err(CellError::invalid("credit packs are for a seat's holder: you hold none").because(Reason::NoSeat)),
-            (Some(id), Some(m)) if m.admin != 0 => {
+            (Some(id), Some(m)) if m.admins(None) => {
                 let member = self.member(id)?;
                 match (member.org == m.org, member.person, member.seat) {
                     (true, Some(p), Some(_)) => (m.org, p),
@@ -539,7 +539,7 @@ impl RegistryCell {
             }
             // their org buying again: its admin still, and nothing else pays
             Some(_) => {
-                let Some(m) = mine.filter(|m| m.org == b.org && m.admin != 0) else { return Ok(false) };
+                let Some(m) = mine.filter(|m| m.admins(Some(&b.org))) else { return Ok(false) };
                 self.apply_subscription_copy(&b.org, &b.subscription, None)?;
                 if self.billing_row(&b.org)?.and_then(|r| r.subscription).as_deref() != Some(b.subscription.id.as_str()) {
                     return Ok(false);

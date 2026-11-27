@@ -452,6 +452,28 @@ pub fn ledger_lane(s: &mut Suite, api: &Api) -> Result<()> {
         skipped,
         json!({ "cards": super::site::cards(api, &guest_app), "events": super::site::event_kinds(api, &guest, &guest_app), "skipsBefore": skips_before }),
     );
+    // a canceled seat makes no new fragment (`permit::guest`), but an app
+    // made before is written to and shot as before: its card is a write's
+    if s.shoots_cards() {
+        let lapsed = api.person()?;
+        let comped = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&lapsed), "kind": "seat" })))?;
+        let seat = comped.body["seat"]["id"].as_str().unwrap_or("").to_string();
+        anyhow::ensure!(comped.status == 200 && s.eventually(wait, || ledger(api, &lapsed)["seat"] == "active"), "a comped seat: {comped}");
+        let app = s.named(api, &lapsed, "ledger-lapsed")?;
+        let c = s.create(api, &lapsed, &app)?;
+        ship(s, &c, LEDGER_APP, LEDGER_JSON);
+        landed(s, api, &lapsed, &app, wait);
+        let ended = api.signed(&s.operator, "DELETE", &format!("/api/admin/seats/{seat}"), None)?;
+        anyhow::ensure!(ended.status == 200 && s.eventually(wait, || ledger(api, &lapsed)["seat"] == "canceled"), "its comp ended: {ended}");
+        s.commit(&c, &[("notes/lapsed.md", Some(b"a canceled seat deploys"))]);
+        let live = s.deploy(&c);
+        let card = super::site::card_showing(s, api, &lapsed, &app, &live);
+        s.ok(
+            "a canceled seat's app, made before, still gets its deploy's preview card (a write's, not a new fragment's)",
+            card.is_some(),
+            json!({ "ledger": ledger(api, &lapsed), "events": super::site::event_kinds(api, &lapsed, &app) }),
+        );
+    }
 
     // ---- an AI step: gated, then charged after it from the usage it reported
     let name = s.named(api, &owner, "ledger")?;

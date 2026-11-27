@@ -84,6 +84,7 @@
 //! when I do it myself in the UI." The target is in `the_rule_table`'s
 //! comment.
 
+use fragment_proto::ledger::{Plan, SeatState};
 use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Member, Role, Visibility};
 use serde_json::Value;
 
@@ -641,6 +642,37 @@ pub fn access_agents(listed: Vec<String>, entity: Option<&[String]>, others: boo
         (None, true) => vec![],
         (None, false) => listed,
     }
+}
+
+/// Whether someone is one of the deployment's operators (decision 59;
+/// `FRAGMENT_OPERATORS`, keys): an identity it lists (one of its keys is
+/// the identity's own), or anyone who has proven a key it lists. A signed
+/// request proves its own key; a platform session proves its person, and
+/// with them each live key they hold. The one operator test (FIN-615):
+/// each caller passes what it holds; how a request must be proven (a wipe
+/// takes a signed one alone) is the caller's.
+pub fn operator<'a>(listed: &[String], identity: Option<&str>, proven: impl IntoIterator<Item = &'a str>) -> bool {
+    identity.is_some_and(|id| listed.iter().any(|l| crate::npub::identity_of(l) == id)) || proven.into_iter().any(|k| listed.iter().any(|l| l == k))
+}
+
+/// Whether a person's place in an org (`of`, `admin`: their row there) is
+/// an admin's of `org`, when one is named: who offers its seats and
+/// admins' places, sees it, and pays for it (docs/billing.md). The one
+/// billing-admin test (FIN-615).
+pub fn org_admin(admin: bool, of: &str, org: Option<&str>) -> bool {
+    admin && org.is_none_or(|o| o == of)
+}
+
+/// Whether a person's ledger makes them a guest (decision 49: they make
+/// no fragment, and are offered a seat): it gives them no plan of its own
+/// (`guest`, a new person's on a deployment whose plan is guest), or their
+/// seat is canceled: it ended, or its org stopped paying, the plan it left
+/// kept (decision 53). What is theirs stays, and takes writes. A
+/// deployment's plan for everyone (dev, the e2e) is a seat to them. The
+/// one guest test (FIN-615): the ledger's, as it decides a new fragment,
+/// and the seat page's for someone who holds no seat (`GET /api/seat`).
+pub fn guest(plan: Plan, seat: SeatState) -> bool {
+    plan == Plan::Guest || seat == SeatState::Canceled
 }
 
 #[cfg(test)]
@@ -1358,5 +1390,44 @@ mod tests {
         ] {
             assert!(named(bad.clone()).is_some_and(|r| r.is_err()), "{bad}");
         }
+    }
+
+    /// Goal: one operator test (FIN-615). Method: a key listed, the
+    /// identity that is a listed key, a session's person holding one among
+    /// their keys; and what proves nothing.
+    #[test]
+    fn an_operator_is_a_listed_identity_or_a_proven_listed_key() {
+        let (k1, k2, k3) = ("1".repeat(64), "2".repeat(64), "3".repeat(64));
+        let listed = vec![k1.clone()];
+        let ana = crate::npub::identity_of(&k1);
+        assert!(operator(&listed, None, [k1.as_str()]), "a listed key, held by no one");
+        assert!(operator(&listed, Some(&ana), [k2.as_str()]), "the identity it lists, signing with another of its keys");
+        assert!(operator(&listed, Some("npub1ben"), [k3.as_str(), k1.as_str()]), "a session's person, holding a listed key");
+        assert!(!operator(&listed, Some("npub1ben"), [k2.as_str()]), "someone else, with a key it doesn't list");
+        assert!(!operator(&listed, None, []), "nothing proven");
+        assert!(!operator(&[], Some(&ana), [k1.as_str()]), "a deployment that lists none");
+    }
+
+    /// Goal: one billing-admin test (FIN-615). Method: an admin's row, of
+    /// their own org or another, and a seat holder's.
+    #[test]
+    fn an_org_admin_is_an_admins_row_of_that_org() {
+        assert!(org_admin(true, "org-a", None), "an admin, of their org");
+        assert!(org_admin(true, "org-a", Some("org-a")), "of the org named");
+        assert!(!org_admin(true, "org-a", Some("org-b")), "never of another org");
+        assert!(!org_admin(false, "org-a", Some("org-a")), "a seat holder is no admin");
+    }
+
+    /// Goal: one guest test (FIN-615; decisions 49 and 53). Method: a plan
+    /// of its own or none, and a seat good, past due or canceled.
+    #[test]
+    fn a_guest_has_no_plan_or_a_canceled_seat() {
+        assert!(guest(Plan::Guest, SeatState::Active), "never had a plan");
+        assert!(!guest(Plan::Seat, SeatState::Active), "a seat, or the deployment's plan for everyone");
+        assert!(!guest(Plan::SeatAlwaysOn, SeatState::PastDue), "past due is good");
+        let ended = crate::org::desired(None);
+        assert!(guest(Plan::SeatAlwaysOn, ended.seat) && guest(Plan::Seat, ended.seat), "a seat that ended: whatever plan it left");
+        let lapsed = crate::org::desired(Some(crate::org::Held { kind: fragment_proto::org::SeatKind::Seat, comped: false, status: Some(crate::org::Status::Canceled), sleeps: false }));
+        assert!(guest(Plan::Seat, lapsed.seat), "a seat whose org stopped paying");
     }
 }

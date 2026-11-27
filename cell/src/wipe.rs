@@ -76,11 +76,12 @@ async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, body: &[u8]
         return Err(CellError::invalid(crate::FOR_HONORED));
     }
     let key = authenticate(req, url, Payload::Read(body))?;
-    if cfg.is_operator(Some(&key), "")? {
+    let listed = cfg.operators()?;
+    if fragment_core::permit::operator(listed, None, [key.as_str()]) {
         return Ok(Operator { key, identity: None });
     }
     let who = ask_registry(env, &calls::Resolve { key: key.clone() }).await?;
-    match cfg.is_operator(Some(&key), &who.id)? {
+    match fragment_core::permit::operator(listed, Some(&who.id), [key.as_str()]) {
         true => Ok(Operator { key, identity: Some(who.id) }),
         false => Err(CellError::new(ErrorCode::Forbidden, "only the deployment's operators wipe a person")),
     }
