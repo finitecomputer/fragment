@@ -263,7 +263,15 @@ impl FragmentCell {
 
     /// `append`, written by the platform for `asker` (a schedule's fire:
     /// its maker, FIN-720), whose ask the record then names.
-    pub(crate) fn append_asked(&self, channel: &str, (principal, author, asker): (&str, Author, Option<&str>), kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+    pub(crate) fn append_asked(&self, channel: &str, by: (&str, Author, Option<&str>), kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+        self.append_with(channel, by, None, kind, body, op)
+    }
+
+    /// `append`, its words said on the ask `carried` names (an agent's post
+    /// on someone's proven ask: `records.carried`), kept in the same step,
+    /// so the asks it hands (asks.rs) and an agent of the same owner's it
+    /// asks here (`mandated`) carry it on (FIN-615, PR 16a).
+    fn append_with(&self, channel: &str, (principal, author, asker): (&str, Author, Option<&str>), carried: Option<&str>, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
         assert!(author != Author::Other, "the platform stamps an author it knows");
         assert!(asker.is_none() || author == Author::Platform, "only the platform writes a record for someone's ask");
         let now = js::now_ms();
@@ -298,8 +306,8 @@ impl FragmentCell {
             (false, _) => None,
         };
         let rows = self.rows(
-            "INSERT INTO records (channel, seq, at, principal, author, asker, kind, body, op, idx, outboxed)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            "INSERT INTO records (channel, seq, at, principal, author, asker, carried, kind, body, op, idx, outboxed)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
             vec![
                 channel.into(),
@@ -308,6 +316,7 @@ impl FragmentCell {
                 principal.into(),
                 author.as_str().into(),
                 asker.map_or(SqlStorageValue::Null, Into::into),
+                carried.map_or(SqlStorageValue::Null, Into::into),
                 kind.into(),
                 raw.get().into(),
                 op_id,
@@ -641,8 +650,11 @@ impl FragmentCell {
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
         let asked = self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
+        // an agent's words on someone's proven ask keep that ask, in the
+        // append's own step (`append_with`)
+        let carried = caller.signed.as_ref().filter(|s| author == Author::Agent && s.mandated).and_then(|s| s.mandate.as_deref());
         // the append and the look for an earlier one are one step (no await between)
-        let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
+        let (record, appended) = match self.append_with(channel, (principal, author, None), carried, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
         };
@@ -974,16 +986,20 @@ impl FragmentCell {
     /// are a person's own here (`mandate::asker_of`), to this agent
     /// (`mandate::addressed`) and within a mandate's life, carries their
     /// mandate for it (docs/api.md, "Who asked: mandates"): the proof that
-    /// they asked it, which its calls carry in place of `for`. Whose words
-    /// each is and the membership are read before the await, as the page
-    /// was.
+    /// they asked it, which its calls carry in place of `for`. And beside
+    /// each an agent of the same owner's said to it on their owner's own
+    /// proven ask (a `fragment ask`, a hand-off: `carried_to`), that ask
+    /// carried on (`Mandate::carried`): the same asker, place, record and
+    /// day. Anyone else's ask is carried to no one (it is lent and capped
+    /// per agent: the agent asked goes on as itself). Whose words each is
+    /// and the membership are read before the await, as the page was.
     async fn mandated(&self, caller: &Caller, page: &mut ChannelPage) -> CellResult<()> {
         let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) else { return Ok(()) };
         if self.member_role(&agent.id)?.is_none() {
             return Ok(());
         }
         let (place, now) = (self.must(MetaKey::Npub)?, js::now_ms());
-        let mandates: Vec<Option<Mandate>> = page
+        let firsts: Vec<Option<Mandate>> = page
             .records
             .iter()
             .map(|r| {
@@ -991,14 +1007,53 @@ impl FragmentCell {
                 Mandate::of_record(&asker, &agent.id, &place, &r.channel, r.seq, r.at).filter(|m| m.until >= now)
             })
             .collect();
-        if mandates.iter().all(Option::is_none) {
+        let carried = self.carried_to(page, agent)?;
+        if firsts.iter().all(Option::is_none) && carried.iter().all(Option::is_none) {
             return Ok(());
         }
         let keys = crate::keys::mandate_keys(&self.env).await?;
-        for (record, m) in page.records.iter_mut().zip(mandates) {
-            record.mandate = m.map(|m| m.text(&keys[0]));
+        for ((record, first), carried) in page.records.iter_mut().zip(firsts).zip(carried) {
+            // an ask carried on is its poster's own, unexpired, and their
+            // owner's own words (its owner this agent's too: `carried_to`)
+            let owners = |m: &Mandate| agent.owner.as_deref().is_some_and(|o| npub::display(o) == npub::display(&m.asker));
+            let carried_on = || -> Option<Mandate> {
+                let m = mandate::open(&keys, carried.as_deref()?, now).ok().filter(|m| npub::display(&m.agent) == record.principal && owners(m))?;
+                m.carried(&agent.id)
+            };
+            record.mandate = first.or_else(carried_on).map(|m| m.text(&keys[0]));
         }
         Ok(())
+    }
+
+    /// For each record of `page`, the ask its poster's words were said on
+    /// (`records.carried`), where `reader` may carry it on: an agent's own
+    /// words to it here (`addressed`), the poster an agent of the same
+    /// owner's as `reader` (their member rows say so; another owner's agent
+    /// carries nothing on, and goes on as itself, SHIP IT 2026-11-26). One
+    /// query, over the page's span.
+    fn carried_to(&self, page: &ChannelPage, reader: &crate::routed::Signed) -> CellResult<Vec<Option<String>>> {
+        let mut out = vec![None; page.records.len()];
+        let asked = |r: &ChannelRecord| r.author == Some(Author::Agent) && mandate::addressed(r.body.get(), &reader.id);
+        let (Some(owner), Some(first), Some(last)) = (reader.owner.as_deref(), page.records.iter().filter(|r| asked(r)).map(|r| r.seq).min(), page.records.iter().filter(|r| asked(r)).map(|r| r.seq).max()) else {
+            return Ok(out);
+        };
+        let channel = page.records[0].channel.as_str();
+        #[derive(Deserialize)]
+        struct Row {
+            seq: i64,
+            carried: String,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT r.seq, r.carried FROM records r JOIN members m ON m.principal = r.principal
+             WHERE r.channel = ? AND r.seq BETWEEN ? AND ? AND r.carried IS NOT NULL AND m.owner = ?",
+            vec![channel.into(), SqlStorageValue::Integer(first), SqlStorageValue::Integer(last), owner.into()],
+        )?;
+        for row in rows {
+            if let Some(i) = page.records.iter().position(|r| r.seq == row.seq && asked(r)) {
+                out[i] = Some(row.carried);
+            }
+        }
+        Ok(out)
     }
 
     /// `GET /api/f/<name>/channels/<channel>/newest` (`channel_newest`):

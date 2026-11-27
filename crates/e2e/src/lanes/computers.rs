@@ -3329,8 +3329,47 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
         let question = asked.iter().any(|r| r["principal"] == identity.as_str() && r["body"]["to"][0] == maple_id.as_str() && r["body"]["return_to"] == chat_name.as_str());
         let echoed = agent_replies(&asked, &maple_id).len() == 1;
         s.ok(label, said.starts_with("asked ") && question && echoed && answered, json!({ "said": said, "pair": pair, "asked": asked.iter().map(|r| &r["body"]).collect::<Vec<_>>() }));
+
+        // only its owner's own ask is carried across a hand-off (FIN-615 PR
+        // 16a): asked by its owner, the lead's question carries their ask, and
+        // the second agent acts for them; asked by Ben, its question goes as
+        // Ben, who is no member of their chat with their owner: refused, and
+        // the second agent is handed none of his
+        let carry = s.named(api, &owner, "carry-app")?;
+        let c = s.create(api, &owner, &carry)?;
+        s.commit(&c, &[("applib/format.mjs", Some(FORMAT_MJS))]);
+        super::app::ship(s, &c, WHOAMI_APP, WHOAMI_JSON);
+        let r = api.signed(&owner, "PUT", &format!("/api/f/{carry}/members/{maple_id}"), Some(&json!({ "role": "editor" })))?;
+        anyhow::ensure!(r.status == 200, "the second agent in its owner's app: {r}");
+        let owner_id = api.identity(&owner)?;
+        let whoami = |id: &str| format!("fetch http://api.fragment.internal/api/f/{carry}/ops/whoami?for={owner_id} with {maple_name} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}");
+        let maples = || agent_replies(&records(api, &owner, &pair, "chat"), &maple_id).into_iter().filter_map(|r| r["body"]["text"].as_str().map(str::to_string)).collect::<Vec<_>>();
+        let before = maples().len();
+        let carried = fetched(s, 26, &format!("ask {maple_label} {}", whoami("carried-owner")))?;
+        replies_so_far += 2;
+        s.eventually(wake, || maples().len() > before);
+        let owners = maples().into_iter().skip(before).find(|t| t.contains("fetched")).unwrap_or_default();
+        let ben = api.person()?;
+        let ben_id = api.identity(&ben)?;
+        let r = api.share(&chat_name, &ben_id, "editor")?;
+        anyhow::ensure!(r.status == 200, "Ben in the chat: {r}");
+        let asked = api.signed(&ben, "POST", &format!("/api/f/{chat_name}/channels/chat"), Some(&json!({ "id": "carry-ben", "body": { "text": format!("ask {maple_label} {}", whoami("carried-ben")) } })))?;
+        let bens_turn = turn_of(&agent_name, &chat_name, "chat", asked.body["record"]["seq"].as_i64().unwrap_or(0));
+        let leads = || agent_replies(&records(api, &owner, &chat_name, "chat"), &identity).into_iter().find(|r| r["body"]["turn"] == bens_turn.as_str()).and_then(|r| r["body"]["text"].as_str().map(str::to_string));
+        s.eventually(wake, || leads().is_some());
+        replies_so_far += 1;
+        let bens = leads().unwrap_or_default();
+        let after = maples().len();
+        let _ = api.signed(&owner, "DELETE", &format!("/api/f/{chat_name}/members/{ben_id}"), None)?;
+        let fetched_as = |said: &str| serde_json::from_str::<Value>(said.split("fetched 200: ").nth(1).unwrap_or("")).map(|v| v["result"]["principal"].clone()).unwrap_or(Value::Null);
+        s.ok(
+            "only its owner's own ask is carried across a hand-off: asked by its owner, the second agent acts for them; asked by Ben, the lead's question goes as Ben, who is no member of their chat with their owner, and is refused, handing the second agent none of his",
+            carried.starts_with("asked ") && fetched_as(&owners) == json!(owner_id) && bens.starts_with("ask refused") && after == before + 1,
+            json!({ "owner": carried, "second's answer": owners, "ben": bens, "second's answers": after - before }),
+        );
     } else {
         s.skip(label, "it needs the stub's scripted runtime");
+        s.skip("only its owner's own ask is carried across a hand-off: asked by its owner, the second agent acts for them; asked by Ben, the lead's question goes as Ben, who is no member of their chat with their owner, and is refused, handing the second agent none of his", "it needs the stub's scripted runtime");
     }
 
     // a placeholder names its agent, not whoever sends it: the second

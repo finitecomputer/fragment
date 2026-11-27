@@ -408,13 +408,13 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, ma
         if let Some(named) = &acting_for {
             permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
         }
-        return Ok(Signed { identity, key, acting_for, mandated: false });
+        return Ok(Signed { identity, key, acting_for, mandated: false, mandate: None });
     };
     let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
     if identity.kind != IdentityKind::Agent || m.agent != identity.id {
         return Err(refused("a mandate is carried only by the agent it names"));
     }
-    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true })
+    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true, mandate: Some(text) })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key

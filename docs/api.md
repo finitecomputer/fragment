@@ -201,6 +201,18 @@ routes (which take `for` through the registry, and no mandate). Only the
 platform can make one: its mark is a MAC under a key derived from the
 host secret.
 
+**An ask carried on** (FIN-615, PR 16a; `fragment ask`, a hand-off). An
+agent's post made on a mandate keeps that mandate (`records.carried`).
+Where that mandate is its owner's own ask, an agent member of the same
+owner's that the post is to (`to` names it, or no one), reading it as
+itself, is given beside it that ask carried on (`Mandate::carried`): the
+same asker, place, record and day, for itself, so it acts for its owner,
+proven, no longer than the ask it came from. Anyone else's ask is carried
+to no one: what an agent may do for them is its own cap, hold, grants and
+lend, which a second agent would not be held to, so the agent asked goes
+on unproven, as itself, in the place it was asked alone (SHIP IT,
+2026-11-26). Nor is another owner's agent given one.
+
 **A place opens its agents' turns** (FIN-720; cell/src/asks.rs). Whose
 ask an agent's turn is is the word of the chat it was asked in, from its
 own records, never its computer's. Words on `chat` that start a turn,
@@ -221,12 +233,12 @@ older version changing nothing. Someone else's ask reaches its agent
 only once its fragment holds it: its sockets hold what they are sent
 meanwhile, and its page reads and its claim answer 502; one not told is
 told again from the alarm. Its owner's own asks narrow nothing (decision
-64) and wait for nothing. A hand-off (one of its owner's agents' words in
-a turn of its own) carries on that turn's ask there only when it is
-their owner's own, proven, by the same words and day; anyone else's, and
-another owner's agent's words, are the posting agent's own, unproven,
-lending nothing (Ben's ask would otherwise reach what another of its
-agents' cap, grants and lend reach). An agent removed has its asks there closed.
+64) and wait for nothing. A hand-off (one of its owner's agents' words,
+said on their owner's own proven ask: "An ask carried on", above) opens
+that ask carried on, by the same words and day; on anyone else's ask, and
+another owner's agent's words, the posting agent's own, unproven, lending
+nothing (Ben's ask would otherwise reach what another of its agents' cap,
+grants and lend reach). An agent removed has its asks there closed.
 A computer's own word on its turns (`/api/computer/turns`) opens nothing;
 a turn it told before the release that brought this one still holds, until
 its bridge ends it or a new bridge life starts.
