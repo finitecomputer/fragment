@@ -585,7 +585,7 @@ impl FragmentCell {
         self.created()?;
         // its sharing read once: its reach, its link, and past its owner
         let sharing = self.sharing_counts()?;
-        let shared = self.alone()?.is_some() && crate::alone::past_owner(&sharing);
+        let shared = self.alone()?.is_some() && !sharing.only_you();
         Ok(Reach { kind: self.kind()?, reach: sharing.reach, beyond: sharing.beyond(), shared })
     }
 

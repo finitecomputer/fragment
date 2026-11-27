@@ -864,23 +864,30 @@ navigator.serviceWorker?.addEventListener("message", (event) => {
 navigator.serviceWorker?.startMessages();
 
 // ---- sharing: the platform's own sheet, framed (it is this origin's) ----
+// "Only you" or "Shared" (FIN-615 PR 18): the list's own word for a
+// fragment of theirs (`onlyYou`, `Sharing::only_you`), never worked out
+// here; someone else's is shared with them; one of theirs whose sharing has
+// not come yet says nothing.
+const sharedWord = (f) => (!own(f) ? "Shared" : f.sharing ? (f.onlyYou ? "Only you" : "Shared") : null);
+// A window's word, and the globe while a link opens it: the one warning
+// worth more than a word.
 function badges(f) {
   const out = [];
-  const { guests = 0, invites = 0, visibility } = f.sharing ?? {};
-  if (guests > 0 || invites > 0) {
-    const b = el("span", "shared");
-    b.replaceChildren(icon("people"));
-    b.append(String(guests + invites));
+  const word = sharedWord(f);
+  if (word) {
+    const b = el("span", "shared", word);
+    const { guests = 0, invites = 0 } = f.sharing ?? {};
     b.title = [
       guests > 0 ? `Shared with ${guests} ${guests === 1 ? "person" : "people"}` : "",
       invites > 0 ? `${invites} ${invites === 1 ? "invite waits" : "invites wait"} on an email` : "",
     ].filter(Boolean).join("; ");
     out.push(b);
   }
-  if (visibility === "public") {
+  const visibility = f.sharing?.visibility;
+  if (visibility === "link" || visibility === "public") {
     const b = el("span", "shared");
     b.replaceChildren(icon("globe"));
-    b.title = "Anyone can open it";
+    b.title = visibility === "public" ? "Anyone can open it" : "Anyone with the link can open it";
     out.push(b);
   }
   return out;
@@ -1331,6 +1338,7 @@ function openApp(name, path = "/") {
   if (shown && path !== "/") go(shown, framed(name, path));
   const frame = named(frameOf(framed(name, path), titleOf(name), name, { lends: true }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
+  status.dataset.fragment = name;
   if (f) status.append(...badges(f));
   show({
     key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
@@ -2087,6 +2095,7 @@ addEventListener("popstate", () => {
 // page one shelf of the same module ----
 const shelfHelpers = {
   api,
+  sharedWord,
   asks,
   el,
   icon,
@@ -2387,6 +2396,11 @@ async function load(changed = false) {
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
   if (list) relend();
+  // each open window's word, as its row says now (a share made since)
+  if (list) for (const s of document.querySelectorAll(".pane-sharing[data-fragment]")) {
+    const f = byName(s.dataset.fragment);
+    s.replaceChildren(...(f ? badges(f) : []));
+  }
   // what a message of theirs may carry (the launcher's files): the platform's
   if (list) state.limits = list.limits ?? null;
   // a chat being made, made, opens once the list has it (making.js `listed`)

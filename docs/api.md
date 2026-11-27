@@ -790,6 +790,21 @@ it. Narrowing is never refused, and one shared before the rule keeps what
 it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
 offers no invite, and no switch but one to close a link from before.
 
+**One reason the link stays shut** (FIN-615 PR 18). Both rules above
+come to one answer, the fragment's own (`link_shut` in cell/src/reach.rs):
+`alone` for an agent's own, else `reach`, else none. Its visibility
+refuses `link` and `public` with it, its status says it (`linkShut`), and
+the sheet shows it, never deciding for itself.
+
+**"Only you" or "Shared"** (FIN-615 PR 18). Each fragment says which,
+derived as it is read and never kept. It's "Only you" when its owner's
+list row says `onlyYou` (`Sharing::only_you`: members only, with no one
+else in it or invited). Any other of theirs is "Shared", and so is
+anyone else's. The shell reads it from the list alone, so the word
+changes when the list does. It shows the word on the Apps page's row,
+then what shares it, and in each open window's header, with a globe
+while its link or public opens it.
+
 On a chat one of the owner's agents is in, `fragment members add` says
 "People here can ask your agent for things. It does them as that person,
 and anyone here can see what it finds." (`fragment_core::permit::
