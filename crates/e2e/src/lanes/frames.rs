@@ -384,6 +384,18 @@ fn over_http(s: &mut Suite, api: &Api, (owner_session, guest_session, stranger_s
         public.status == 200 && public.text.contains("inside open") && public.header("content-security-policy") == format!("frame-ancestors 'self' {platform}"),
         format!("{public} {:?}", public.header("content-security-policy")),
     );
+    // ---- with no Fetch Metadata (a browser from before 2023, a scan)
+    let bare = |path: &str| api.call(Call { method: "GET", url: api.site_url(n.open, path), cookie: Some(String::new()), ..Call::default() });
+    let (embedded, refused) = (bare("")?, bare("__signin?token=0")?);
+    s.ok(
+        "with no Fetch Metadata, a published fragment's own page names no frame-ancestors, so a publisher's page may still embed it, while the platform's own answer on its host (a refused redemption) may be framed by its own pages and the platform's alone",
+        embedded.status == 200
+            && embedded.text.contains("inside open")
+            && !embedded.header("content-security-policy").contains("frame-ancestors")
+            && refused.status >= 400
+            && refused.header("content-security-policy") == format!("frame-ancestors 'self' {platform}"),
+        format!("{embedded} {:?} / {refused} {:?}", embedded.header("content-security-policy"), refused.header("content-security-policy")),
+    );
     Ok(())
 }
 

@@ -5377,7 +5377,7 @@ pub(crate) async fn serve_host(req: Request, env: &Env, url: &Url, id: &str, sig
 /// would widen a service worker's scope here
 /// (`fragment_core::computer::origin`). A socket's upgrade shows nothing,
 /// and keeps the answer it had.
-fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
+pub(crate) fn framed_by(resp: Response, platform: &str) -> CellResult<Response> {
     assert!(fragment_core::frames::is_origin(platform), "frame-ancestors names the platform's origin alone");
     if resp.status_code() == 101 {
         return Ok(resp);

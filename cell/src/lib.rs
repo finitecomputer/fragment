@@ -178,10 +178,26 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 #[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
-    match route(req, &env, &ctx).await {
-        Ok(resp) => Ok(resp),
-        Err(e) => e.response(),
-    }
+    let url = fragment_nip98::arrived_url(req.url()?, req.headers().get("x-forwarded-proto")?.as_deref());
+    let resp = match route(req, &env, &ctx).await {
+        Ok(resp) => resp,
+        Err(e) => e.response()?,
+    };
+    strict_transport(resp, url.scheme())
+}
+
+/// Every answer reached over HTTPS, on every host the cell answers (the
+/// platform's, each fragment's, each computer's, an error's), tells the
+/// browser to come back only over HTTPS (`answer_headers::hsts`), set
+/// over any value an app or image sent. Over plain HTTP the answer is
+/// left as it came, an app's own header included: a browser ignores HSTS
+/// there. Cloned,
+/// as `platform_origin` does, which keeps a socket's 101 and its WebSocket.
+fn strict_transport(resp: Response, scheme: &str) -> Result<Response> {
+    let Some(hsts) = fragment_core::answer_headers::hsts(scheme) else { return Ok(resp) };
+    let h = resp.headers().clone();
+    h.set("strict-transport-security", hsts)?;
+    Ok(resp.with_headers(h))
 }
 
 /// The admin Worker's `fetch` (admin.rs): the requests the cell hands it.
@@ -1086,6 +1102,8 @@ async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, res
 /// guessed from them), and no referrer beyond the origin (a page's URL may
 /// hold its share link, `?view=`, and every fragment is another origin;
 /// a page's own `<meta name="referrer">` still governs its own links).
+/// No other policy here: a fragment's scripts and styles are its app's to
+/// decide (its framing floor is `route`'s, `framing_floor`).
 /// Scriptable media (an SVG, the XML types: `site::opened_as`) is sandboxed
 /// besides, so opened directly it runs no script and has an opaque origin,
 /// while a page's `<img>` of it is unaffected (a subresource's policy is
@@ -1187,7 +1205,8 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
     let extra = identity.map(|id| vec![(address::IDENTITY_HEADER.to_string(), id.to_string())]).unwrap_or_default();
     let mut resp = forward(env, &req, body, Forward { routed, inner: format!("/serve/{rest}"), extra }).await?;
     // the fragment's own refusal, never its app's answer
-    if resp.headers().has(serve::REFUSAL)? {
+    let app = !resp.headers().has(serve::REFUSAL)?;
+    if !app {
         resp = match page {
             true => {
                 let e: ErrorBody = resp.read_json().await?;
@@ -1196,10 +1215,30 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
             false => unmarked(resp)?,
         };
     }
-    match fetched.navigation {
-        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
+    let resp = match fetched.navigation {
+        true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref())?,
+        false => resp,
+    };
+    match app {
+        true => app_answer(resp),
         false => Ok(resp),
     }
+}
+
+/// The mark `site` puts on its app's own answer, so `route`'s
+/// `framing_floor` leaves its framing to the app
+/// (`answer_headers::Answered::FragmentApp`). A header rather than a value
+/// passed back, since `serve`'s answer goes through `updating::answer`
+/// before the floor; `framing_floor` takes it off every answer, so it never
+/// leaves `route`, and an app that sends it gains nothing: its own answers
+/// are marked anyway.
+const APP_ANSWER: &str = "x-fragment-app-answer";
+
+/// An app's own answer, marked (`APP_ANSWER`). Cloned, as `bound` does.
+fn app_answer(resp: Response) -> CellResult<Response> {
+    let h = resp.headers().clone();
+    h.set(APP_ANSWER, "1")?;
+    Ok(resp.with_headers(h))
 }
 
 /// A URL's path and query, as a redirect to another host keeps them.
@@ -1229,12 +1268,59 @@ fn moved(to: &str) -> CellResult<Response> {
 
 pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let navigation = updating::navigation(&req)?;
-    let platform = Config::from_env(env).is_platform_host(req.url()?.host_str().unwrap_or_default());
+    let cfg = Config::from_env(env);
+    let host = req.url()?.host_str().unwrap_or_default().to_string();
+    let platform = cfg.is_platform_host(&host);
     let resp = match route_inner(req, env, ctx).await {
         Ok(resp) => resp,
         Err(e) => e.response()?,
     };
-    if navigation { updating::answer(resp, env, platform).await } else { Ok(resp) }
+    let resp = if navigation { updating::answer(resp, env, platform).await? } else { resp };
+    framing_floor(resp, cfg, &host)
+}
+
+/// Who may frame an answer that names no one itself
+/// (`answer_headers::floor`), by the host it answers on, told apart as
+/// `route_inner` tells them, and on a fragment's (its own host, a claimed
+/// address's) by who made it: the platform's answer there may be framed by
+/// the fragment's own pages and the platform's (the shell shows every
+/// fragment in a frame); an app's own answer (`APP_ANSWER`) is the app's to
+/// frame, so a published page stays embeddable as it was. A computer's
+/// gets nothing here (`computer::framed_by` frames its every answer). The
+/// platform's, and any other host's, may be framed by the platform's own
+/// pages, with `X-Frame-Options` where the answer sent none. Last, after
+/// the updating notice (`updating::answer`) has its own policy, so each
+/// answer carries one: the floor joins the answer's policy, and an answer
+/// whose policy names `frame-ancestors` (a frame's `bound`, a page any page
+/// may frame, an app's own) keeps it as it came
+/// (`answer_headers::with_frame_floor`). Cloned, as `platform_origin`
+/// does, which keeps a socket's 101 and its WebSocket.
+fn framing_floor(resp: Response, cfg: &Config, host: &str) -> CellResult<Response> {
+    use fragment_core::answer_headers::{floor, with_frame_floor, Answered};
+    let h = resp.headers().clone();
+    let app = h.has(APP_ANSWER)?;
+    h.delete(APP_ANSWER)?;
+    let own = Some(host).filter(|h| !cfg.is_platform_host(h));
+    let fragment = |app: bool| if app { Answered::FragmentApp } else { Answered::FragmentPlatform };
+    let answered = if own.is_some_and(|h| cfg.fragment_of_host(h).is_some()) {
+        fragment(app)
+    } else if own.is_some_and(|h| cfg.computer_of_host(h).is_some()) {
+        Answered::Computer
+    } else if own.is_some_and(|h| cfg.address_of_host(h).is_some()) {
+        fragment(app)
+    } else {
+        Answered::Platform
+    };
+    if let Some((ancestors, options)) = floor(answered, &cfg.platform()) {
+        if let Some(policy) = with_frame_floor(h.get("content-security-policy")?.as_deref(), &ancestors) {
+            h.set("content-security-policy", &policy)?;
+        }
+        match options {
+            Some(options) if !h.has("x-frame-options")? => h.set("x-frame-options", options)?,
+            _ => {}
+        }
+    }
+    Ok(resp.with_headers(h))
 }
 
 async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
@@ -1253,14 +1339,25 @@ async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Respo
     // a computer's own origin: its ports, for its owner (computer.rs)
     if let Some(id) = host.and_then(|h| cfg.computer_of_host(h)) {
         let signer = match req.headers().get("authorization")? {
-            Some(_) => Some(signer(env, &req, &url, &[]).await?.identity.id),
+            // a refused signature is still this origin's answer, framed as its others are
+            Some(_) => match signer(env, &req, &url, &[]).await {
+                Ok(signed) => Some(signed.identity.id),
+                Err(e) => return computer::framed_by(e.response()?, &cfg.platform()),
+            },
             None => None,
         };
         return computer::serve_host(req, env, &url, &id, signer).await;
     }
     if let Some(label) = host.and_then(|h| cfg.address_of_host(h)) {
-        let address = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await?
-            .ok_or_else(|| CellError::new(ErrorCode::NotFound, "no fragment here: no app has claimed this address"))?;
+        let looked_up = ask_registry(env, &crate::registry::calls::AddressOf::Label { label }).await
+            .and_then(|a| a.ok_or_else(|| CellError::new(ErrorCode::NotFound, "no fragment here: no app has claimed this address")));
+        let address = match looked_up {
+            Ok(address) => address,
+            // an unclaimed address, or a registry that did not answer, is
+            // still a fragment's host: its answer gets the headers `serve`
+            // gives every other one there
+            Err(e) => return fragment_origin(e.response()?),
+        };
         let rest = path.trim_start_matches('/').to_string();
         return serve(req, env, cfg, &url, &address.fragment, &rest, Some(&address.npub)).await;
     }
