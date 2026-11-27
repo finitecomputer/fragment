@@ -318,7 +318,7 @@ export function createMovePage(root, h) {
     const t0 = Date.now();
     for (;;) {
       const ledger = await api("GET", "/api/ledger");
-      if (ledger.plan !== "guest") return h.setGuest(false);
+      if (ledger.plan !== "guest" && ledger.seat !== "canceled") return h.setGuest(false);
       if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat isn't ready yet. Try again in a moment.");
       await new Promise((r) => timers.setTimeout(r, 1000));
     }

@@ -221,6 +221,8 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         v["seat"] == "active" && v["plan"] == "seat"
     });
     s.ok("a seatless admin comped again takes the seat in their own org, active again", r.status == 200 && r.body["seat"]["id"] == bob_seat.as_str() && pushed, ledger(api, &bob));
+    let made = api.create(&bob, "comped-again")?;
+    s.ok("and, the seat active again, makes fragments again", made.status == 200, &made);
 
     // ---- the registry is the seat's one writer: a ledger an operator's
     // `seat` command (gone 2026-10-16) left at an order an hour ahead of

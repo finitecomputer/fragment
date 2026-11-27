@@ -260,7 +260,9 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
     const t0 = Date.now();
     for (;;) {
       const ledger = await api("GET", "/api/ledger").catch(() => null);
-      if (ledger && ledger.plan !== "guest") return;
+      // as the ledger decides a create (`permit::guest`): a plan, and a
+      // seat not canceled (a restored seat's push may lag the registry's)
+      if (ledger && ledger.plan !== "guest" && ledger.seat !== "canceled") return;
       if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat has not reached your account yet: try again in a moment.");
       await new Promise((r) => setTimeout(r, 500));
     }
