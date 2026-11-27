@@ -550,7 +550,8 @@ fn org_acts(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, page: &cr
     let theirs = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&elsewhere), "kind": "seat" })))?;
     anyhow::ensure!(theirs.status == 200, "a comp of their own: {theirs}");
     submit(b, 1, &[&Api::email_of(&elsewhere), "seat_always_on"])?;
-    let offered = b.until(page, &format!("document.getElementById('status').textContent === 'comped: {} in {email}, offered: theirs once they accept it'", Api::email_of(&elsewhere)), wait);
+    // mailed too, where the deployment sends mail
+    let offered = b.until(page, &format!("/^comped: {} in {email}, offered: theirs once they accept it(, mailed)?$/.test(document.getElementById('status').textContent)", regex_text(&Api::email_of(&elsewhere))), wait);
     let seat = api.signed(&elsewhere, "GET", "/api/seat", None)?;
     s.ok(
         "it comps a seat into the org for someone in another org: offered it, they stay where they are",
@@ -568,8 +569,10 @@ fn org_acts(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, page: &cr
         credited && budgeted && ledger.body["balanceMicros"] == 12_500_000 && ledger.body["budgetMicros"] == 40_000_000,
         json!([status(b)?, ledger.body]),
     );
-    submit(b, 4, &[email])?;
-    let named = b.until(page, &format!("document.getElementById('status').textContent === \"{email}'s credit is invoiced to {email}\""), wait);
+    // a person who signs in (the comp's email waits on its yes, no one's yet)
+    let payer = Api::email_of(&elsewhere);
+    submit(b, 4, &[&payer])?;
+    let named = b.until(page, &format!("document.getElementById('status').textContent === \"{email}'s credit is invoiced to {payer}\""), wait);
     let content = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
     let logged = |action: &str| content.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == action).count();
     s.ok(
@@ -584,6 +587,11 @@ fn org_acts(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, page: &cr
     let seats = view.body["members"].as_array().map_or(0, |m| m.iter().filter(|m| m["seat"].is_string()).count());
     s.ok("it clears the mark, saying its seats stay: the org's seat and the offer are there still", cleared && view.body["invoiced"].is_null() && seats == 2, json!([status(b)?, view.body]));
     Ok(())
+}
+
+/// `text`, matched as itself in a JavaScript regular expression.
+fn regex_text(text: &str) -> String {
+    text.chars().flat_map(|c| if ".+*?^$()[]{}|\\/".contains(c) { vec!['\\', c] } else { vec![c] }).collect()
 }
 
 /// The operators' glance (`GET /api/admin/glance`), the admin Worker's:
