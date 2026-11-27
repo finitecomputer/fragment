@@ -9,7 +9,9 @@
 //! its row goes once the queue has it, so a failure between the record and
 //! the queue delays a delivery but never loses it. Receivers see a
 //! delivery at least once. The consumer here, a stateless isolate, sends
-//! it. A push service that answers 404 or 410 has dropped the
+//! it, a record only once its fragment says, again, that its subscriber
+//! may read it now (subscriptions.rs `deliverable`), before its first send
+//! and each retry. A push service that answers 404 or 410 has dropped the
 //! subscription, so the fragment drops it too; a 429, 5xx, or network
 //! failure is retried with a delay that grows with the message's age; one
 //! that runs out of retries lands on the dead-letter queue and in the
@@ -23,6 +25,7 @@
 
 use std::time::Duration;
 
+use fragment_core::subscription::{self, Asked, AtSend};
 use fragment_core::webpush::Tokens;
 use fragment_proto::{limits, ErrorCode};
 use serde::{Deserialize, Serialize};
@@ -32,7 +35,7 @@ use worker::*;
 use crate::config::Config;
 use crate::cs::FetchFailed;
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{Outcome, Report};
+use crate::fragment::calls::{Deliverable, Outcome, Report};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 
@@ -208,7 +211,7 @@ impl FragmentCell {
         for row in &rows {
             let (id, attempts) = (row["id"].as_i64().expect("delivery_outbox.id"), row["attempts"].as_i64().expect("delivery_outbox.attempts"));
             match decode(row) {
-                Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation) {
+                Pending::Record { sub, channel, seq } => match self.record_delivery(sub, &channel, seq, &fragment, &incarnation).await {
                     Ok(Some(d)) if d.url.starts_with(WAKE_PREFIX) => {
                         let at = self.record_at(&channel, seq);
                         wakes.push(Wake { id, attempts, computer: d.url, channel, seq, at })
@@ -446,13 +449,43 @@ async fn consume_one(raw: RawMessage, env: &Env, cfg: &Config, dead: bool) {
         message.ack();
         return;
     }
-    match send(env, d).await {
-        Ok(None) => message.ack(),
-        Ok(Some(_)) | Err(_) => {
-            // no attempt count in workers-rs 0.8.5: the delay grows with the message's age
-            let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
-            let delay = age_s.clamp(cfg.delivery_retry_s, cfg.delivery_retry_max_s);
-            message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
+    if d.kind == DeliveryKind::Record {
+        match subscription::at_send(asked(env, d).await) {
+            AtSend::Send => {}
+            AtSend::Withhold => {
+                console_log!("{}", json!({ "event": "delivery.withheld", "fragment": d.fragment, "sub": d.sub }));
+                message.ack();
+                return;
+            }
+            AtSend::Retry => return retry(&message, cfg),
         }
     }
+    match send(env, d).await {
+        Ok(None) => message.ack(),
+        Ok(Some(_)) | Err(_) => retry(&message, cfg),
+    }
+}
+
+/// Asks a record delivery's fragment whether its subscriber may still be
+/// sent it (`calls::Deliverable`): the queue holds the URL and the record,
+/// and access may have narrowed since the outbox queued it. `None`: a
+/// delivery that names no subscription, which no one can be asked about.
+async fn asked(env: &Env, d: &Delivery) -> Option<Asked> {
+    let sub = d.sub?;
+    Some(match crate::fragment::call(env, &d.fragment, &Deliverable { incarnation: d.incarnation.clone(), sub }).await {
+        Ok(true) => Asked::Yes,
+        Ok(false) => Asked::No,
+        Err(e) => {
+            console_error!("{}", json!({ "event": "delivery.unasked", "fragment": d.fragment, "sub": sub, "message": e.message }));
+            Asked::Unanswered
+        }
+    })
+}
+
+/// Tries a message again: no attempt count in workers-rs 0.8.5, so the
+/// delay grows with the message's age.
+fn retry(message: &Message<Delivery>, cfg: &Config) {
+    let age_s = ((js::now_ms() - message.timestamp().as_millis() as i64) / 1000).max(0) as u32;
+    let delay = age_s.clamp(cfg.delivery_retry_s, cfg.delivery_retry_max_s);
+    message.retry_with_options(&QueueRetryOptionsBuilder::new().with_delay_seconds(delay).build());
 }

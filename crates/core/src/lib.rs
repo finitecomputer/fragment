@@ -84,6 +84,7 @@ pub mod webpush;
 pub mod site;
 pub mod steps;
 pub mod stripe;
+pub mod subscription;
 pub mod wipe;
 pub mod swap;
 pub mod transcribe;

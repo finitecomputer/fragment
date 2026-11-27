@@ -296,6 +296,21 @@ impl Call for Report {
     type Answer = ();
 }
 
+/// What the delivery consumer asks a fragment before it sends a record
+/// delivery, and before each retry (subscriptions.rs `deliverable`):
+/// whether subscription `sub` of its life `incarnation` may still be sent
+/// its channel's records.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Deliverable {
+    pub incarnation: String,
+    pub sub: i64,
+}
+
+impl Call for Deliverable {
+    const PATH: &'static str = "/call/delivery/deliverable";
+    type Answer = bool;
+}
+
 /// What the meter's consumer tells the fragment its batch `seq` came to
 /// (meter.rs `meter_acked`).
 #[derive(Debug, Serialize, Deserialize)]

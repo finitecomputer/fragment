@@ -5,40 +5,59 @@
 //! channel, record}` (`fragment_proto::Delivery`), unsigned: the URL is
 //! the subscriber's capability; a computer's wake goes from the outbox to
 //! the computer itself. A member's subscriptions end with its membership.
+//! Whether a subscriber may read its channel is asked when it subscribes
+//! and again for each delivery, when the outbox is drained and when the
+//! queue's consumer is about to send it (`Deliverable`): one lowered
+//! since, held since, or on a channel a deploy raised or dropped since,
+//! is sent nothing, its subscription kept for when it may read again
+//! (`fragment_core::subscription`).
 
-use fragment_core::{egress, npub};
-use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode};
+use fragment_core::permit::Standing;
+use fragment_core::{egress, npub, subscription};
+use fragment_proto::{valid_channel_name, ChannelRecord, DeliveryType, ErrorCode, IdentityKind, Role};
 use serde_json::{json, Value};
 use worker::*;
 
 use crate::deliveries::{Delivery, DeliveryKind};
 use crate::error::{CellError, CellResult};
+use crate::fragment::calls::Deliverable;
 use crate::fragment::{json_response, Caller, FragmentCell, MetaKey};
+
+/// Where a subscriber's hold comes from: its signed request's, when it
+/// subscribes itself; else the registry's, asked only of an agent beside
+/// its person (the one standing a hold caps: `permit` rule 4).
+pub(crate) enum Hold {
+    Signed(Option<Role>),
+    Registry,
+}
 
 /// The subscriptions one fragment holds, and a URL's length.
 const SUBS_MAX: u64 = 32;
 const SUB_URL_MAX_BYTES: usize = 1024;
 
 impl FragmentCell {
-    /// The subscriber: a member whose role may read `channel`.
-    fn subscriber(&self, caller: &Caller, channel: &str) -> CellResult<String> {
-        let principal = caller.principal().map(str::to_string).ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
-        let Some(role) = self.member_role(&principal)? else {
+    /// The subscriber: a member who may read `channel` (`may_read`, with
+    /// the hold its signed request carries).
+    async fn subscriber(&self, caller: &Caller, channel: &str) -> CellResult<String> {
+        let signed = caller.signed.as_ref().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "subscribing needs a signed request"))?;
+        let principal = signed.id.clone();
+        if self.member_role(&principal)?.is_none() {
             return Err(CellError::new(ErrorCode::Forbidden, "only a member subscribes to a channel"));
-        };
+        }
         if !valid_channel_name(channel) {
             return Err(CellError::invalid("a channel name must match ^[a-z][a-z0-9_-]{0,63}$"));
         }
-        if role < self.channel_read_role(channel)? {
+        self.channel_read_role(channel)?;
+        if !self.may_read(&principal, channel, Hold::Signed(signed.held)).await? {
             return Err(CellError::new(ErrorCode::Forbidden, format!("your role may not read {channel}")));
         }
         Ok(principal)
     }
 
     /// `POST /api/subscriptions` `{channel, url}` → `{id, channel, url}`.
-    pub(crate) fn subscribe(&self, caller: &Caller, body: &Value) -> CellResult<Response> {
+    pub(crate) async fn subscribe(&self, caller: &Caller, body: &Value) -> CellResult<Response> {
         let channel = body["channel"].as_str().unwrap_or("");
-        let principal = self.subscriber(caller, channel)?;
+        let principal = self.subscriber(caller, channel).await?;
         let url = body["url"].as_str().unwrap_or("");
         if url.len() > SUB_URL_MAX_BYTES {
             return Err(CellError::invalid(format!("a subscription URL is at most {SUB_URL_MAX_BYTES} bytes")));
@@ -97,6 +116,69 @@ impl FragmentCell {
         json_response(&json!({ "ok": true, "removed": gone.len() }))
     }
 
+    /// Whether `principal`, as itself, may read `channel` now: a member
+    /// whose standing reads the channel as it is declared now
+    /// (`subscription::delivers`), with its hold where one applies. Asked
+    /// when it subscribes and before each delivery.
+    pub(crate) async fn may_read(&self, principal: &str, channel: &str, hold: Hold) -> CellResult<bool> {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            role: Option<String>,
+            kind: Option<String>,
+            person_role: Option<String>,
+            door: Option<String>,
+            owner: Option<String>,
+        }
+        let rows: Vec<Row> = self.typed(
+            "SELECT m.role, m.kind, (SELECT role FROM members WHERE principal = m.owner) AS person_role, \
+             (SELECT value FROM meta WHERE key = ?) AS door, (SELECT value FROM meta WHERE key = ?) AS owner FROM members m WHERE m.principal = ?",
+            vec![MetaKey::DoorTemplate.key().into(), MetaKey::Owner.key().into(), principal.into()],
+        )?;
+        let Some(row) = rows.into_iter().next() else { return Ok(false) };
+        let read = match self.channel_read_role(channel) {
+            Ok(read) => Some(read),
+            Err(gone) if gone.code == ErrorCode::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        let role = |r: Option<String>| r.as_deref().and_then(Role::parse);
+        // an agent's row names its person (members.rs `entity_of`): one in
+        // here, not as its owner, is beside it (fragment.rs `standing`)
+        let beside_person = role(row.person_role).is_some_and(|r| r != Role::Owner);
+        let held = match (beside_person, hold) {
+            (false, _) => None,
+            (true, Hold::Signed(held)) => held,
+            (true, Hold::Registry) => crate::ask_registry(&self.env, &crate::registry::calls::Lookup { who: principal.to_string() }).await?.held,
+        };
+        let person = row.kind.as_deref() == Some(IdentityKind::Person.as_str());
+        let owner_in_person = person && row.owner.as_deref().is_some_and(|o| o == principal || npub::display(o) == principal);
+        let standing = Standing {
+            member: role(row.role),
+            signed: true,
+            held,
+            beside_person,
+            connector: row.door.is_some(),
+            owner_in_person,
+            ..Standing::default()
+        };
+        Ok(subscription::delivers(self.visibility()?, standing, read))
+    }
+
+    /// The queue's consumer asks before it sends a record delivery
+    /// (deliveries.rs `consume_one`): whether subscription `sub` of this
+    /// fragment's life `incarnation` is still there and its subscriber may
+    /// read its channel now (`may_read`). A fragment made again since, or
+    /// none at all, answers no.
+    pub(crate) async fn deliverable(&self, d: Deliverable) -> CellResult<bool> {
+        if self.meta(MetaKey::CreatedAt)?.as_deref() != Some(d.incarnation.as_str()) {
+            return Ok(false);
+        }
+        let subs = self.rows("SELECT principal, channel FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(d.sub)])?;
+        let Some(row) = subs.first() else { return Ok(false) };
+        let principal = row["principal"].as_str().expect("subs.principal is TEXT");
+        let channel = row["channel"].as_str().expect("subs.channel is TEXT");
+        self.may_read(principal, channel, Hold::Registry).await
+    }
+
     /// A member's subscriptions end with its membership.
     pub(crate) fn drop_subscriptions(&self, principal: &str) -> CellResult<()> {
         self.exec("DELETE FROM subs WHERE principal = ?", vec![principal.into()])
@@ -142,17 +224,23 @@ impl FragmentCell {
         Ok(row["outboxed"].as_i64().expect("records.outboxed is INTEGER NOT NULL") != 0)
     }
 
-    /// The delivery of record `seq` of `channel` to subscription `sub`, or
-    /// `None` when there is nothing to send: the subscription ended, or the
-    /// record is past its retention.
     /// When record `seq` of `channel` was posted (ms), if it is there.
     pub(crate) fn record_at(&self, channel: &str, seq: i64) -> Option<i64> {
         self.read_channel(channel, seq - 1, 1).ok()?.into_iter().find(|r| r.seq == seq).map(|r| r.at)
     }
 
-    pub(crate) fn record_delivery(&self, sub: i64, channel: &str, seq: i64, fragment: &str, incarnation: &str) -> CellResult<Option<Delivery>> {
-        let subs = self.rows("SELECT url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
-        let Some(url) = subs.first().map(|r| r["url"].as_str().expect("subs.url is TEXT").to_string()) else { return Ok(None) };
+    /// The delivery of record `seq` of `channel` to subscription `sub`, or
+    /// `None` when there is nothing to send: the subscription ended, its
+    /// subscriber may not read the channel now (`may_read`), or the
+    /// record is past its retention.
+    pub(crate) async fn record_delivery(&self, sub: i64, channel: &str, seq: i64, fragment: &str, incarnation: &str) -> CellResult<Option<Delivery>> {
+        let subs = self.rows("SELECT principal, url FROM subs WHERE id = ?", vec![SqlStorageValue::Integer(sub)])?;
+        let Some(row) = subs.first() else { return Ok(None) };
+        let principal = row["principal"].as_str().expect("subs.principal is TEXT");
+        let url = row["url"].as_str().expect("subs.url is TEXT").to_string();
+        if !self.may_read(principal, channel, Hold::Registry).await? {
+            return Ok(None);
+        }
         let Some(record) = self.read_channel(channel, seq - 1, 1)?.into_iter().next().filter(|r| r.seq == seq) else { return Ok(None) };
         // serialized as it is: the record's body goes out as the text the cell stored
         let delivery = fragment_proto::Delivery { kind: DeliveryType::Record, fragment: fragment.to_string(), channel: channel.to_string(), record };

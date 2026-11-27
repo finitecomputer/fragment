@@ -1178,6 +1178,7 @@ impl FragmentCell {
                 })
             }
             Report::PATH => reply::<Report>(self.delivery_report(&decode(body)?)),
+            calls::Deliverable::PATH => reply::<calls::Deliverable>(self.deliverable(decode(body)?).await),
             calls::Acked::PATH => reply::<calls::Acked>(self.meter_acked(&decode(body)?).await),
             Whose::PATH => reply::<Whose>(self.whose(&decode::<Whose>(body)?.principal)),
             Routine::PATH => reply::<Routine>(self.move_routine(decode(body)?).await),
@@ -1439,7 +1440,7 @@ impl FragmentCell {
             (Method::Get, ["api", "search", "status"]) => self.search_status(&caller).await,
             (Method::Post, ["api", "subscriptions"]) => {
                 let body: Value = body_json(&mut req).await?;
-                self.subscribe(&caller, &body)
+                self.subscribe(&caller, &body).await
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
