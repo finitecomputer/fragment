@@ -43,6 +43,11 @@ const SLACK = "https://slack.com";
 const PAIRING_MS = 10 * 60_000;
 // A pairing code: what its owner sends the bot, alone, in a DM.
 const PAIR = /^pair\s+([0-9a-f]{16})$/i;
+// What a DM may be to be looked at for one: its 21 characters and the
+// marks a paste keeps around them (`pair …`, *pair …*). A longer one is
+// never a code, and its marks are never scanned (a pasted log's long
+// separator cost the trim a scan per character).
+const PAIRING_TEXT_MAX = 64;
 // What one message's text is cut to: in, 4,000 characters (at most 16 KB
 // of UTF-8, with its context's CONTEXT_MAX_BYTES well within a record's
 // RECORD_BODY_MAX_BYTES, 64 KiB, and the bridge's MESSAGE_TEXT_MAX_BYTES,
@@ -424,7 +429,7 @@ export class App extends DurableObject {
     const thread = m.dm ? m.thread : (m.thread ?? m.ts);
     // pasted into Slack, the code keeps the page's formatting (inline
     // code, `pair …`): its marks around the line are not the code's
-    const pairing = m.dm ? PAIR.exec(m.text.trim().replace(/^[`*_~\s]+|[`*_~\s]+$/g, "")) : null;
+    const pairing = m.dm && m.text.length <= PAIRING_TEXT_MAX ? PAIR.exec(m.text.trim().replace(/^[`*_~\s]+|[`*_~\s]+$/g, "")) : null;
     if (pairing) {
       const who = await names(job, api, [m.user]);
       const { proposed, conflict } = await job.call("propose", { code: pairing[1], user: m.user, dm: m.channel, name: who.get(m.user) ?? "someone" });

@@ -194,6 +194,22 @@ test("pairing: a code pasted into Slack keeps its formatting (inline code, as th
   assert.deepEqual(await w.app.intake({ record: dm(PAUL, `*pair ${bold}*`, "1790000015.000100") }, w.job()), { proposed: true, conflict: false });
 });
 
+test("pairing: only a short DM is looked at for a code; a long one (a pasted log) is the agent's, at once", async () => {
+  const w = await paired(await connected(world()));
+  const { code } = w.app.pair({}, w.owner);
+  // its code, padded past what a pasted code could carry: not a pairing
+  const padded = await w.app.intake({ record: dm(PAUL, `pair ${code}${" ".repeat(64)}\``, "1790000016.000100") }, w.job());
+  assert.equal(padded.proposed, undefined, "a message longer than a pairing one is never taken as one");
+  assert.equal(w.published.length, 1);
+  // a long separator before more text: its marks scanned once, not per character
+  const log = `the log:\n${" ".repeat(39_000)}x`;
+  const t = performance.now();
+  await w.app.intake({ record: dm(PAUL, log, "1790000017.000100") }, w.job());
+  const ms = performance.now() - t;
+  assert.equal(w.published.length, 2);
+  assert.ok(ms < 200, `a 39 KB DM is taken in ${ms.toFixed(0)} ms`);
+});
+
 test("a room takes others' messages up to its cap an hour, then says once that the agent rests; its owner's are never counted", async () => {
   const w = await paired(await connected(world()));
   for (let i = 0; i < 30; i += 1) await w.app.intake({ record: mention(MAPLE, `<@U0BOT> q${i}`, `17900001${String(i).padStart(2, "0")}.000100`) }, w.job());
