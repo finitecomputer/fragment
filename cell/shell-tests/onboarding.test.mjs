@@ -54,7 +54,7 @@ function platform({ first: seeded = true } = {}) {
       return { agents: computer.agents };
     }
     if (path === "/api/computers/c1/wake") return computer;
-    if (method === "GET" && path === "/api/migrations/offers") return { offers: [...moves].map(([old, agent]) => ({ old, state: "asked", agent })) };
+    if (method === "GET" && path === "/api/migrations/offers") return { offers: [...moves].map(([old, { agent, state }]) => ({ old, state, agent })) };
     if (!(m = path.match(/^\/api\/f\/([^/]+)\/([^?]+)(?:\?(.*))?$/))) throw new Error(`no route: ${method} ${path}`);
     const [, name, rest, query] = m;
     assert.ok(row(name), `${method} ${path}: no such fragment`);
@@ -121,8 +121,8 @@ function platform({ first: seeded = true } = {}) {
     tasks: (name) => tasks.get(name),
     members: (name) => members.get(name),
     make,
-    // a move's Yes landed: its offer names the agent `id`
-    yes: (old, id) => moves.set(old, id),
+    // a move's Yes landed: its offer names the agent `id`, in `state`
+    yes: (old, id, state = "asked") => moves.set(old, { agent: id, state }),
     // what was asked to change since the last ask
     writes: () => writes.splice(0),
     // the next call `when` names fails; `done`, after it was done
@@ -379,6 +379,23 @@ test("a move's Yes that never arrived: no page says its upgrade is under way; on
   await page(world).opened();
   madeWhole(world);
   assert.match(said(world), /your upgrade is under way/);
+});
+
+// The move's hello says its upgrade is under way, so it is said only while
+// that is so: not before the move names its agent, and not once it imports
+// (an archived one's Yes imports at once, its routine before any hello) or
+// is held; asked or staging, it is.
+test("a move's hello is due only while its move names its agent and is asked or staging", async () => {
+  for (const [state, due] of [[null, false], ["importing", false], ["held", false], ["asked", true], ["staging", true]]) {
+    const world = platform();
+    const p = page(world, { at: "move" });
+    await p.load();
+    const made = await moving(p);
+    if (state) world.yes("old1", made.id, state);
+    await p.onboarding.moveHello(made, "old1");
+    await page(world).opened();
+    madeWhole(world, { said: due });
+  }
 });
 
 // Each place a move's Add may be cut once its chat is made: the page opened

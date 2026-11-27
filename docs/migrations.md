@@ -140,11 +140,13 @@ it, the offer's cover stands aside: it is answered there.
   bringing itself over (`onboarding.js` `helloText`; FIN-492, 11-22: one
   greeted its person as a stranger, in a language not theirs). Every
   agent's hello names the language their browser is set to.
-- That hello is said only once its Yes has landed (FIN-817): the page
-  posts it after the Yes, and a page opened later posts one lost only
-  once the move names the agent (the offer's `agent`). Its making says
-  no hello of its own, so a Yes that never arrived promises nothing: the
-  chat stays quiet, and Upgrade, pressed again, goes on with the same
+- That hello is said only while it is true (FIN-817): the move names the
+  agent (the offer's `agent`, its Yes landed) and is still `asked` or
+  `staging`. Once it imports, the import's routine speaks for itself (an
+  archived one's Yes imports at once). The page asks after each Yes, its
+  answer lost too, and a page opened later asks for one lost. Its making
+  says no hello of its own, so a Yes that never arrived promises nothing:
+  the chat stays quiet, and Upgrade, pressed again, goes on with the same
   agent, then its Yes, then its hello.
 
 ## The comp (F5)

@@ -1087,7 +1087,11 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         let named = |kind: &str| -> Vec<String> { list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == kind).filter_map(|f| f["name"].as_str().map(str::to_string)).collect() };
         let (agents, chats) = (named("agent"), named("chat"));
         let routines = match agents.as_slice() {
-            [agent] => super::shell::shell(api, session, "GET", &format!("/api/f/{agent}/channels/tasks"), None, &[])?.body["records"].as_array().cloned().unwrap_or_default().into_iter().filter(|r| r["body"]["kind"] == "routine").collect(),
+            [agent] => {
+                let read = super::shell::shell(api, session, "GET", &format!("/api/f/{agent}/channels/tasks"), None, &[])?;
+                let records = read.body["records"].as_array().filter(|_| read.status == 200).with_context(|| format!("its tasks: {read}"))?;
+                records.iter().filter(|r| r["body"]["kind"] == "routine").cloned().collect()
+            }
             _ => vec![],
         };
         Ok((routines, agents, chats))

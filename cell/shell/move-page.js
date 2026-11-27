@@ -11,14 +11,14 @@
 // one (onboarding.js `addAgent`, its chat not opened) and its Yes posted
 // (`…/offers/{old}/yes {agent}`), which stops the old agent and starts the
 // move, and only then its hello, which tells its person their upgrade is
-// under way (`hello`, FIN-817: never before the Yes has landed, so no one
-// is promised an import that never began). One new agent an old one: the
-// agent keeps which old one it was made for (agent.json `from`), so a Yes
-// that never arrived, or a reload, is gone on with that agent, never a
-// second (`madeFor`). A Never'd one has Ask again. Nothing is drawn ahead
-// of the server: each step shows while its call is out, and every line
-// after is the server's, read again while a move is under way. A refusal
-// is the server's words.
+// under way (`hello`, FIN-817: said only once the move names its agent, so
+// no one is promised an import that never began). One new agent an old
+// one: the agent keeps which old one it was made for (agent.json `from`),
+// so a Yes that never arrived, or a reload, is gone on with that agent,
+// never a second (`madeFor`). A Never'd one has Ask again. Nothing is
+// drawn ahead of the server: each step shows while its call is out, and
+// every line after is the server's, read again while a move is under way.
+// A refusal is the server's words.
 //
 // Someone who has an agent here already (one who moved by hand, Paul
 // 11-19) is asked, for each old agent: a new one, or one of theirs
@@ -397,14 +397,17 @@ export function createMovePage(root, h) {
       if (!made?.id) throw new Error(`${name}'s upgrade didn't start. Try again.`);
       doing = { old: o.old, said: `Starting ${o.name}'s upgrade…` };
       draw();
-      await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id });
-      // its import begun, its hello says so; one lost is said by the next
-      // page opened at home, which asks the move (onboarding.js `resumeAdd`)
-      await h.hello(made, o.old).catch(() => {});
+      const unanswered = await api("POST", `/api/migrations/offers/${o.old}/yes`, { agent: made.id }).then(() => null, (e) => e);
+      // its hello, if the move now says it is due (onboarding.js
+      // `moveHello`): a Yes whose answer was lost may have landed. Never
+      // waited for; one lost is said by the next page opened at home.
+      h.hello(made, o.old).catch(() => {});
       doing = null;
       await read();
       now = offers ?? [];
       draw();
+      // a Yes failed only if the move does not name its agent
+      if (unanswered && !now.some((x) => x.old === o.old && x.agent === made.id)) throw unanswered;
     }
   }
 
