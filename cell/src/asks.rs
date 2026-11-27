@@ -6,8 +6,8 @@
 //!
 //! - **An ask handed** (`asks_handed`): words on `chat` that start a turn
 //!   (`mandate::starts_turn`), someone's (`mandate::asked_of`: their own;
-//!   an agent's in a turn of its own, to another of its owner's agents,
-//!   its owner's own ask that turn carries on here, and no one else's), to
+//!   an agent's to another of its owner's agents, said on their owner's
+//!   own proven ask, that ask carried on, and no one else's: ask_of), to
 //!   an agent member there since before
 //!   they were said (`mandate::heard_by`: as its bridge hears them), open
 //!   that agent's ask of them
@@ -85,23 +85,23 @@ struct Open {
     until: i64,
 }
 
-/// One ask's proof: whether there is one, and the words it names (a
-/// carried ask's, its owner's earlier record) and their time.
+/// One ask's proof: whether there is one, its time, and the ask it
+/// carries on (a hand-off's: `records.carried`).
 #[derive(Deserialize)]
 struct Proved {
     proven: i64,
-    words: i64,
     at: i64,
+    carried: Option<String>,
 }
 
 /// Whose ask a record hands an agent (`ask_of`): its asker, whether a
-/// mandate proves it, and the words it carries on (a hand-off's: its
-/// owner's own earlier record here) with their time; none, the record's own.
+/// mandate proves it, its time, and the ask it carries on (a hand-off's:
+/// its owner's own mandate the words were said on).
 struct Ask {
     asker: String,
     proven: bool,
-    words: Option<i64>,
     at: i64,
+    carried: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -186,7 +186,7 @@ impl FragmentCell {
                 continue;
             }
             let Some(asked) = mandate::asked_of(&r.principal, r.author, r.asker.as_deref(), r.body.get()) else { continue };
-            let ask = self.ask_of(&asked, m, &members, r.at)?;
+            let ask = self.ask_of(&asked, m, &members, (r.seq, r.at))?;
             if ask.asker == agent {
                 continue;
             }
@@ -260,7 +260,7 @@ impl FragmentCell {
                 let Some(s) = said.filter(|s| s.at >= m.added_at) else { return Ok(()) };
                 let author = s.author.as_deref().and_then(Author::parse);
                 let Some(asked) = mandate::asked_of(&npub::display(&s.principal), author, s.asker.as_deref(), &s.body) else { return Ok(()) };
-                let ask = self.ask_of(&asked, m, &members, s.at)?;
+                let ask = self.ask_of(&asked, m, &members, (seq, s.at))?;
                 if ask.asker == agent {
                     return Ok(());
                 }
@@ -298,33 +298,31 @@ impl FragmentCell {
         self.asks_settled(&agent).await
     }
 
-    /// Whose ask `asked` is to `to` here (`Ask`): someone's own words; an
-    /// agent's in a turn of its own, to another of their owner's agents (a
-    /// hand-off), its owner's own proven ask that turn carried here (open,
-    /// or ended within `ENDED_KEPT_MS`), with those words and their day;
-    /// else the posting agent's own, unproven, lending nothing. Only the
-    /// owner's own ask is ever carried on: anyone else's, through another
-    /// of its agents, would reach what that agent's cap, grants and lend
-    /// reach (FIN-615 PR 16a).
-    fn ask_of(&self, asked: &Asked, to: &Member, members: &[Member], at: i64) -> CellResult<Ask> {
-        let own = |asker: &str| Ask { asker: asker.to_string(), proven: false, words: None, at };
+    /// Whose ask `asked` (record `seq` of `chat`, said `at`) is to `to`
+    /// here (`Ask`): someone's own words; an agent's to another of their
+    /// owner's agents, said on their owner's own proven ask
+    /// (`records.carried`, kept in the append's own step), that ask
+    /// carried on: the same asker, place, record and day; else the posting
+    /// agent's own, unproven, lending nothing. Only the owner's own ask is
+    /// ever carried on: anyone else's, through another of its agents,
+    /// would reach what that agent's cap, grants and lend reach (FIN-615 PR
+    /// 16a).
+    fn ask_of(&self, asked: &Asked, to: &Member, members: &[Member], (seq, at): (i64, i64)) -> CellResult<Ask> {
+        let own = |asker: &str| Ask { asker: asker.to_string(), proven: false, at, carried: None };
         Ok(match asked {
             Asked::By(asker) => Ask { proven: true, ..own(asker) },
-            Asked::Unproven(agent) => own(agent),
-            Asked::Handed { agent, .. } if !members.iter().any(|m| npub::display(&m.principal) == *agent && m.owner.is_some() && m.owner == to.owner) => own(agent),
-            Asked::Handed { agent, turn } => {
+            Asked::Agent(agent) if !members.iter().any(|m| npub::display(&m.principal) == *agent && m.owner.is_some() && m.owner == to.owner) => own(agent),
+            Asked::Agent(agent) => {
                 #[derive(Deserialize)]
                 struct Row {
-                    asker: String,
-                    proven: i64,
-                    words: i64,
-                    at: i64,
+                    carried: Option<String>,
                 }
-                let rows: Vec<Row> =
-                    self.typed("SELECT asker, proven, COALESCE(words, seq) AS words, at FROM asks WHERE agent = ? AND turn = ? LIMIT 1", vec![agent.as_str().into(), turn.as_str().into()])?;
-                match rows.into_iter().next() {
-                    Some(r) if r.proven == 1 && is_owner(to, &r.asker) => Ask { asker: r.asker, proven: true, words: Some(r.words), at: r.at },
-                    _ => own(agent),
+                let rows: Vec<Row> = self.typed("SELECT carried FROM records WHERE channel = ? AND seq = ?", vec![CHAT.into(), SqlStorageValue::Integer(seq)])?;
+                let carried = rows.into_iter().next().and_then(|r| r.carried);
+                let m = carried.as_deref().and_then(mandate::kept).filter(|m| npub::display(&m.agent) == *agent && is_owner(to, &npub::display(&m.asker)) && m.until >= js::now_ms());
+                match m {
+                    Some(m) => Ask { asker: npub::display(&m.asker), proven: true, at: m.until - limits::MANDATE_LIFE_MS, carried },
+                    None => own(agent),
                 }
             }
         })
@@ -334,7 +332,7 @@ impl FragmentCell {
     /// turn), as `ask_of` says whose it is.
     fn open_ask(&self, agent: &str, seq: i64, ask: &Ask, claimed: Option<&str>) -> CellResult<()> {
         self.exec(
-            "INSERT INTO asks (agent, channel, seq, asker, proven, at, turn, words) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            "INSERT INTO asks (agent, channel, seq, asker, proven, at, turn, carried) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             vec![
                 agent.into(),
                 CHAT.into(),
@@ -343,7 +341,7 @@ impl FragmentCell {
                 SqlStorageValue::Integer(i64::from(ask.proven)),
                 SqlStorageValue::Integer(ask.at),
                 claimed.map_or(SqlStorageValue::Null, Into::into),
-                ask.words.map_or(SqlStorageValue::Null, SqlStorageValue::Integer),
+                ask.carried.as_deref().map_or(SqlStorageValue::Null, Into::into),
             ],
         )
     }
@@ -494,7 +492,7 @@ impl FragmentCell {
         let mut proved: Vec<Proved> = vec![];
         for o in &open {
             let p: Vec<Proved> =
-                self.typed("SELECT proven, COALESCE(words, seq) AS words, at FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![t.agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(o.seq)])?;
+                self.typed("SELECT proven, at, carried FROM asks WHERE agent = ? AND channel = ? AND seq = ?", vec![t.agent.as_str().into(), CHAT.into(), SqlStorageValue::Integer(o.seq)])?;
             proved.push(p.into_iter().next().ok_or_else(|| CellError::host("an ask read twice in one step is there both times"))?);
         }
         let keys = if proved.iter().any(|p| p.proven == 1) { crate::keys::mandate_keys(&self.env).await? } else { vec![] };
@@ -502,7 +500,12 @@ impl FragmentCell {
             .iter()
             .zip(&proved)
             .map(|(o, p)| {
-                let mandate = (p.proven == 1).then(|| Mandate::of_record(&o.asker, &t.agent, &place_key, CHAT, p.words, p.at)).flatten().map(|m| m.text(&keys[0]));
+                // a carried ask names its own words' place, record and day (`Mandate::carried`)
+                let made = match &p.carried {
+                    Some(text) => mandate::kept(text).and_then(|m| m.carried(&t.agent)),
+                    None => Mandate::of_record(&o.asker, &t.agent, &place_key, CHAT, o.seq, p.at),
+                };
+                let mandate = made.filter(|_| p.proven == 1).map(|m| m.text(&keys[0]));
                 PlaceTurn { turn: mandate::turn_id(&fragment, &place, CHAT, o.seq), asker: o.asker.clone(), mandate, until: o.until }
             })
             .collect();

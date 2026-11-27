@@ -59,12 +59,18 @@ pub struct Signed {
     /// anyone, not only the agent's owner.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mandated: bool,
+    /// That mandate's text, as it came: what a post it makes keeps, so an
+    /// agent of the same owner's it asks there carries the same ask
+    /// (FIN-615, PR 16a; channels.rs `mandated`). None from a router
+    /// before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate: Option<String>,
 }
 
 impl Signed {
     /// Who signed, acting as themselves.
     pub fn new(identity: Identity, key: Option<String>) -> Signed {
-        Signed { identity, key, acting_for: None, mandated: false }
+        Signed { identity, key, acting_for: None, mandated: false, mandate: None }
     }
 
     /// Whom an agent's request acts for when that is not its owner, proven

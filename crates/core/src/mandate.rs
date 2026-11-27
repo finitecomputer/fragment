@@ -16,6 +16,13 @@
 //! it. An agent's computer can neither make nor alter one, and one names
 //! its agent, so no other key may carry it. It holds from its record's
 //! writing for `limits::MANDATE_LIFE_MS`, so old words start nothing new.
+//!
+//! **Carried** (FIN-615, PR 16a: `fragment ask`, a hand-off): an agent on
+//! its owner's own proven ask that asks another agent of its owner's hands
+//! that agent the same ask (`Mandate::carried`), so it too acts for its
+//! owner, proven, for as long as the ask holds. Only its owner's own ask is
+//! carried (the caller checks): anyone else's is lent and capped per agent,
+//! and goes on unproven, the agent acting as itself (docs/api.md).
 
 pub use fragment_proto::Lend;
 use fragment_proto::{limits, valid_channel_name, Author};
@@ -108,6 +115,15 @@ impl Mandate {
         well_formed(&m).then_some(m)
     }
 
+    /// This ask carried by its agent to `agent`, another agent of the same
+    /// owner's it asked, the ask its owner's own (the caller checks both):
+    /// the same asker, place, record and day, so it holds no longer and says
+    /// no more than the ask it came from. None for a name not of its kind.
+    pub fn carried(&self, agent: &str) -> Option<Mandate> {
+        let m = Mandate { agent: agent.into(), ..self.clone() };
+        well_formed(&m).then_some(m)
+    }
+
     /// Its text: `fm1.<asker>.<agent>.<place>.<channel>.<seq>.<until>.<mark>`,
     /// its mark of all before it. No field holds a dot (each is of its
     /// kind: `well_formed`), so the text reads back as made.
@@ -154,6 +170,17 @@ pub fn open(keys: &[MandateKey], text: &str, now: i64) -> Result<Mandate, Refuse
         return Err(Refused::Expired);
     }
     Ok(m)
+}
+
+/// A mandate's fields read from a text the platform kept after it opened
+/// it (`records.carried`): no mark is checked, so never a text from a
+/// request.
+pub fn kept(text: &str) -> Option<Mandate> {
+    let fields = text.strip_prefix(PREFIX)?.rsplit_once('.')?.0;
+    let parts: Vec<&str> = fields.split('.').collect();
+    let [asker, agent, place, channel, seq, until] = parts[..] else { return None };
+    let m = Mandate { asker: asker.into(), agent: agent.into(), place: place.into(), channel: channel.into(), seq: seq.parse().ok()?, until: until.parse().ok()? };
+    well_formed(&m).then_some(m)
 }
 
 /// The place a mandate's text names (its key), read from a text already
@@ -217,28 +244,17 @@ fn mentions_anyone(text: &str) -> bool {
 pub enum Asked {
     /// Someone's own words (`asker_of`), proven by their mandate.
     By(String),
-    /// An agent's words in a turn of its own (`turn`, its body's): the ask
-    /// that turn carries on, as its place opened it, else the agent's own.
-    Handed { agent: String, turn: String },
-    /// An agent's words in no turn: its own, with nothing to prove them.
-    Unproven(String),
+    /// An agent's words: the ask they were said on carried on, where that
+    /// is their owner's own (`records.carried`, `Mandate::carried`), else
+    /// the agent's own, with nothing to prove it.
+    Agent(String),
 }
 
 /// Whose ask a record is (`Asked`), or no one's: app code's words, the
 /// platform's own, an anonymous visitor's.
 pub fn asked_of(principal: &str, author: Option<Author>, asker: Option<&str>, body: &str) -> Option<Asked> {
     if author == Some(Author::Agent) {
-        if !crate::npub::is_identity(principal) {
-            return None;
-        }
-        let turn = match serde_json::from_str::<serde_json::Value>(body) {
-            Ok(serde_json::Value::Object(o)) => o.get("turn").and_then(|t| t.as_str()).filter(|t| fragment_proto::valid_op_id(t)).map(str::to_string),
-            _ => None,
-        };
-        return Some(match turn {
-            Some(turn) => Asked::Handed { agent: principal.to_string(), turn },
-            None => Asked::Unproven(principal.to_string()),
-        });
+        return crate::npub::is_identity(principal).then(|| Asked::Agent(principal.to_string()));
     }
     asker_of(principal, author, asker, body).map(Asked::By)
 }
@@ -415,8 +431,7 @@ mod tests {
         }
         let (ben, juniper) = (crate::npub::display(&"b".repeat(64)), crate::npub::display(&"a".repeat(64)));
         assert_eq!(asked_of(&ben, Some(Author::Person), None, r#"{"text":"hi"}"#), Some(Asked::By(ben.clone())), "a person's own words: theirs");
-        assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"over to you","turn":"t1"}"#), Some(Asked::Handed { agent: juniper.clone(), turn: "t1".into() }), "an agent's words in its turn carry that turn's ask on");
-        assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"hello"}"#), Some(Asked::Unproven(juniper.clone())), "an agent's words in no turn: its own, unproven");
+        assert_eq!(asked_of(&juniper, Some(Author::Agent), None, r#"{"text":"over to you","turn":"t1"}"#), Some(Asked::Agent(juniper.clone())), "an agent's words: the ask they were said on, else its own");
         assert_eq!(asked_of(&juniper, Some(Author::Code), None, r#"{"text":"hi"}"#), None, "app code's words are no one's");
         assert_eq!(asked_of("anon:x", Some(Author::Person), None, r#"{"text":"hi"}"#), None, "an anonymous visitor asks no one");
         let agents = ["npub1lead", "npub1maple"];
@@ -442,6 +457,8 @@ mod tests {
         assert_eq!(until_of(&text), Some(1_000 + limits::MANDATE_LIFE_MS));
         assert_eq!(place_of(&text), Some(place.as_str()));
         assert_eq!(until_of("not a mandate"), None);
+        assert_eq!(kept(&text), Some(m.clone()), "a kept text reads back as made");
+        assert_eq!(kept("fm1.not.a.mandate"), None);
     }
 
     /// Goal (FIN-720): one list says what of an agent's calls is its
@@ -624,5 +641,22 @@ mod tests {
         assert_eq!(proof(&ana, &[turn("room", &ben, b), turn("hall", &ben, None)]), Proof::Itself(vec!["hall", "room"]), "one other with a turn unproven");
         // replay: the same turns decide the same
         assert_eq!(proof(&ana, &[turn("room", &ben, b)]), proof(&ana, &[turn("room", &ben, b)]));
+    }
+
+    /// Goal (FIN-615, PR 16a): an ask carried to another agent is the same
+    /// ask: its asker, place, record and day, made for that agent alone, so
+    /// it opens for it under the same keys, says nothing more, and the agent
+    /// that carried it can't carry the text made for the other.
+    #[test]
+    fn a_carried_ask_is_the_same_ask_for_another_agent() {
+        let key = vec![MandateKey::derive(HOST)];
+        let rowan = crate::npub::encode(&"f".repeat(64));
+        let m = ben_asks_juniper(1_000);
+        let c = m.carried(&rowan).expect("carried");
+        assert_eq!(c, Mandate { agent: rowan.clone(), ..m.clone() });
+        assert_eq!(open(&key, &c.text(&key[0]), 2_000), Ok(c.clone()));
+        assert_eq!(open(&key, &c.text(&key[0]), c.until + 1), Err(Refused::Expired), "no longer than the ask it came from");
+        assert_ne!(c.text(&key[0]), m.text(&key[0]), "made for the agent asked alone");
+        assert_eq!(m.carried("npub1short"), None);
     }
 }
