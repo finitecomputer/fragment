@@ -1027,7 +1027,8 @@ answer." Two calls ask:
 - **Someone else's ask that needs what its place doesn't lend** (the swap's
   credit or accounts: Who asked, mandates) asks the agent's owner: **Allow
   once** lends it to the asker's first words there after the answer (each
-  of that request's calls) and no other, **Always here** turns it on in
+  of that request's calls) and no other, bound to that record as it is
+  posted, so a record retention drops passes it on to none, **Always here** turns it on in
   that place's lend, and **No** writes nothing. An answer's write is made
   once: the same answer again (a retry) writes nothing more.
 

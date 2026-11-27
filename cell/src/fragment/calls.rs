@@ -158,6 +158,9 @@ impl Call for PostAsk {
 /// `by` is the agent's owner.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LendAnswer {
+    /// The card that asked (its chat's own key and its seq): what a retry of
+    /// its answer writes again is nothing.
+    pub ask: String,
     pub agent: String,
     pub asker: String,
     pub key: String,

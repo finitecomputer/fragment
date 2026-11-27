@@ -659,6 +659,11 @@ impl FragmentCell {
             None => (self.posted(&key, channel, body)?, false),
         };
         laps.lap("append");
+        // a person's words: the first of theirs since an Allow once here is
+        // its one request, bound in this step (owner_ask.rs `bind_lent_once`)
+        if appended && channel == "chat" && author == Author::Person {
+            self.bind_lent_once(principal, record.seq)?;
+        }
         // the platform's card answered: taken in this step too, so a second
         // answer finds it answered, then written where its fact lives
         if let Some((ask, answer)) = asked {

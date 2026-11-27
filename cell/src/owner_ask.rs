@@ -20,7 +20,9 @@
 //! card never lands where its answerer can't see it. That chat posts the
 //! card (`post_ask`: `kind: "ask"` on `work`, the platform's own record)
 //! and takes its answer (`ask_answered`). A lend's place keeps what the answer
-//! lends (`lend_answer`, `lent_once`).
+//! lends (`lend_answer`): an Allow once, by its card, is bound to the asker's
+//! first words there after it as they are posted (`bind_lent_once`), and lent
+//! to that request alone (`lent_once`), whatever retention later drops.
 
 use fragment_core::mandate;
 use fragment_core::npub;
@@ -252,8 +254,14 @@ impl FragmentCell {
         let until = now + limits::ASK_LIFE_MS;
         let mut body = json!({
             "kind": "ask", "turn": p.turn, "agent": p.agent, "asker": p.asker, "asks": p.asks,
-            "what": p.card.what, "fragment": p.card.fragment, "options": answers, "expiresAt": until,
+            "what": p.card.what, "options": answers, "expiresAt": until,
         });
+        // a confirm names what it is about, which its Confirm does as its
+        // answerer; a lend's place is no one's to read here (one in another
+        // chat would name it to this chat's people): its private row keeps it
+        if Lent::of_what(&p.card.what).is_none() {
+            body["fragment"] = json!(p.card.fragment);
+        }
         if elsewhere {
             body["elsewhere"] = json!(true);
         }
@@ -319,7 +327,17 @@ impl FragmentCell {
     pub(crate) async fn ask_answered(&self, ask: &Asked, answer: Answer, by: &str) -> CellResult<()> {
         self.exec("UPDATE owner_asks SET answer = ? WHERE seq = ? AND answer IS NULL", vec![answer.as_str().into(), SqlStorageValue::Integer(ask.seq)])?;
         if let (Some(key), Answer::Once | Answer::Always, None) = (&ask.key, answer, ask.done) {
-            let lent = LendAnswer { agent: ask.agent.clone(), asker: ask.asker.clone(), key: key.clone(), what: ask.what.clone(), always: answer == Answer::Always, by: by.to_string() };
+            // the card (this chat's own key, of its life, and its seq) names
+            // the answer: its write, retried, is the same one
+            let lent = LendAnswer {
+                ask: format!("{}:{}", self.must(MetaKey::Npub)?, ask.seq),
+                agent: ask.agent.clone(),
+                asker: ask.asker.clone(),
+                key: key.clone(),
+                what: ask.what.clone(),
+                always: answer == Answer::Always,
+                by: by.to_string(),
+            };
             match ask.about == self.name()? {
                 true => self.lend_answer(&lent).await?,
                 false => crate::fragment::call(&self.env, &ask.about, &lent).await?,
@@ -349,38 +367,50 @@ impl FragmentCell {
                 self.exec("UPDATE members SET lend = ? WHERE principal = ?", vec![SqlStorageValue::Integer(i64::from(lend.bits())), agent.as_str().into()])?;
                 self.event("member.lend", &format!("{agent} lent spend {}, accounts {}, on a card", lend.spend, lend.accounts), json!({ "agent": agent, "spend": lend.spend, "accounts": lend.accounts }));
             }
-            // lent to the asker's first words here from now: after the chat's
-            // newest record now
+            // lent to the asker's first words here from now (after the chat's
+            // newest record now), bound as they are posted (`bind_lent_once`);
+            // by its card, once, its row kept for good (one per owner's press):
+            // the same answer again, however late, writes nothing more
             false => {
                 let newest = self.rows("SELECT seq FROM records WHERE channel = ? ORDER BY seq DESC LIMIT 1", vec![CHAT.into()])?;
                 let after = newest.first().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
                 self.exec(
-                    "INSERT OR REPLACE INTO lent_once (agent, asker, what, after) VALUES (?, ?, ?, ?)",
-                    vec![agent.as_str().into(), asker.as_str().into(), a.what.as_str().into(), SqlStorageValue::Integer(after)],
+                    "INSERT OR IGNORE INTO lent_once (ask, agent, asker, what, after) VALUES (?, ?, ?, ?, ?)",
+                    vec![a.ask.as_str().into(), agent.as_str().into(), asker.as_str().into(), a.what.as_str().into(), SqlStorageValue::Integer(after)],
                 )?;
-                self.event("member.lent-once", &format!("{agent} lent {} once, for {asker}", a.what), json!({ "agent": agent, "asker": asker, "what": a.what }));
+                self.event("member.lent-once", &format!("{agent} lent {} once, for {asker}", a.what), json!({ "agent": agent, "asker": asker, "what": a.what, "ask": a.ask }));
             }
         }
         Ok(())
     }
 
+    /// `asker`'s words on `chat`, record `seq`, just appended: the first of
+    /// theirs since an Allow once for them here binds it to this request
+    /// alone (`lent_once`), now, so a record retention later drops never
+    /// passes the grant on to their next.
+    pub(crate) fn bind_lent_once(&self, asker: &str, seq: i64) -> CellResult<()> {
+        self.exec(
+            "UPDATE lent_once SET request = ? WHERE asker = ? AND request IS NULL AND after < ?",
+            vec![SqlStorageValue::Integer(seq), npub::display(asker).into(), SqlStorageValue::Integer(seq)],
+        )
+    }
+
     /// `lend` with what its owner allowed once for `asked`'s asker: lent to
-    /// their first words in the chat after the answer, that request alone
-    /// (each of its calls), and to no other, before or after.
+    /// the request it was bound to (their first words in the chat after the
+    /// answer, `bind_lent_once`), each of its calls, and to no other.
     pub(crate) fn lent_once(&self, asked: &LendOf, mut lend: Lend) -> CellResult<Lend> {
-        let Some((channel, seq)) = asked.request.as_ref().filter(|(c, _)| c == CHAT) else { return Ok(lend) };
+        let Some((_, seq)) = asked.request.as_ref().filter(|(c, _)| c == CHAT) else { return Ok(lend) };
         #[derive(Deserialize)]
         struct Row {
             what: String,
-            after: i64,
         }
         let (agent, asker) = (npub::display(&asked.agent), npub::display(&asked.asker));
-        let rows: Vec<Row> = self.typed("SELECT what, after FROM lent_once WHERE agent = ? AND asker = ?", vec![agent.as_str().into(), asker.as_str().into()])?;
+        let rows: Vec<Row> = self.typed(
+            "SELECT what FROM lent_once WHERE agent = ? AND asker = ? AND request = ?",
+            vec![agent.as_str().into(), asker.as_str().into(), SqlStorageValue::Integer(*seq)],
+        )?;
         for r in rows {
-            let Some(lent) = Lent::of_what(&r.what) else { continue };
-            // their first record since: a seek from `after`, to their next words
-            let first = self.rows("SELECT seq FROM records WHERE channel = ? AND seq > ? AND principal = ? ORDER BY seq LIMIT 1", vec![channel.as_str().into(), SqlStorageValue::Integer(r.after), asker.as_str().into()])?;
-            if first.first().and_then(|f| f["seq"].as_i64()) == Some(*seq) {
+            if let Some(lent) = Lent::of_what(&r.what) {
                 lend = lent.added_to(lend);
             }
         }
