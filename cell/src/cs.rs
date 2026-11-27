@@ -76,9 +76,11 @@ pub struct FileHead {
     pub last_commit_sha: String,
 }
 
+/// code.storage's refusal: its status for whoever asked, its body for
+/// the logs alone (`error::vendor_said`).
 fn upstream(what: &str, status: u16, body: &[u8]) -> CellError {
-    let detail: String = String::from_utf8_lossy(body).chars().take(300).collect();
-    CellError::new(ErrorCode::UpstreamFailed, format!("code.storage {what}: {status} {detail}"))
+    crate::error::vendor_said("code.storage", what, status, &String::from_utf8_lossy(body));
+    CellError::new(ErrorCode::UpstreamFailed, format!("code.storage {what}: {status}"))
 }
 
 fn encode_q(s: &str) -> String {

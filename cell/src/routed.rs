@@ -571,4 +571,15 @@ impl InternalRoute {
         // the handle, not JavaScript's `Request.clone()` (which tees the body)
         Ok(Clone::clone(req.inner()))
     }
+
+    /// What a refusal the fragment answered (`headers`, `body`) says to
+    /// the app's own code, for its `Files` and `Search` capabilities
+    /// (`error::app_said`): the platform's own failure as a fixed sentence
+    /// and a reference, else nothing, and the app reads its body's own.
+    /// The JavaScript names no header here either.
+    pub fn refused(headers: JsValue, body: &str) -> Option<String> {
+        let headers: worker::web_sys::Headers = headers.unchecked_into();
+        let mark = headers.get(crate::error::PLATFORM_REFUSAL).ok().flatten();
+        crate::error::app_said(mark.as_deref(), body)
+    }
 }

@@ -229,7 +229,9 @@ impl FragmentCell {
                 }
                 Embedding::Refused { status, text, retry_after_ms } => {
                     let code = if status == 429 { ErrorCode::RateLimited } else { ErrorCode::UpstreamFailed };
-                    let refused = CellError::new(code, format!("the embeddings model refused ({status}): {text}"));
+                    // the provider's words are the logs' alone
+                    crate::error::vendor_said("embeddings", "embed", status, &text);
+                    let refused = CellError::new(code, format!("the embeddings model refused ({status})"));
                     // its rate limit: the writer waits this long, then writes again
                     return Err(match retry_after_ms {
                         Some(ms) => refused.retry_after(ms),

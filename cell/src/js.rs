@@ -285,7 +285,8 @@ impl Facet {
         init.set_status(resp.status());
         init.set_headers(&headers);
         let copy = worker_sys::web_sys::Response::new_with_opt_readable_stream_and_init(resp.body().as_ref(), &init).map_err(|e| CellError::host(js_message(&e)))?;
-        Ok(worker::Response::from(copy))
+        // the app's answer is never the platform's refusal, whatever it sent
+        Ok(crate::error::foreign(worker::Response::from(copy))?)
     }
 
     /// Calls a platform method on the facet (a job's `__job`). An

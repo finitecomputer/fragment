@@ -178,9 +178,14 @@ async fn queue(batch: MessageBatch<Value>, env: Env, _ctx: Context) -> Result<()
 #[cfg(not(feature = "admin"))]
 #[event(fetch)]
 async fn fetch(req: Request, env: Env, ctx: Context) -> Result<Response> {
+    let reference = error::reference_of(&req)?;
     match route(req, &env, &ctx).await {
-        Ok(resp) => Ok(resp),
-        Err(e) => e.response(),
+        // The one door every answer of the cell's leaves by: a refusal
+        // still marked as an object's (`CellError::response`), on any host,
+        // an early return's among them, is said here as at the edges
+        // within, and the mark leaves no answer (`error::public_answer`).
+        Ok(resp) => error::public_answer(resp, &reference).await,
+        Err(e) => e.public_response(&reference),
     }
 }
 
@@ -1073,9 +1078,10 @@ fn unmarked(resp: Response) -> CellResult<Response> {
 /// headers (`fragment_origin`). An error is answered here, not at `fetch`,
 /// so its JSON carries them too.
 async fn serve(req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, rest: &str, identity: Option<&str>) -> CellResult<Response> {
+    let reference = error::reference_of(&req)?;
     let resp = match served(req, env, cfg, url, name, rest, identity).await {
         Ok(resp) => resp,
-        Err(e) => e.response()?,
+        Err(e) => e.public_response(&reference)?,
     };
     fragment_origin(resp)
 }
@@ -1196,6 +1202,10 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
             false => unmarked(resp)?,
         };
     }
+    // any other failure of the fragment's own (its facts' storage, say),
+    // said as the edge says one; its app's answer carries no mark and
+    // passes as it is (`error::PLATFORM_REFUSAL`)
+    let resp = error::public_answer(resp, &error::reference_of(&req)?).await?;
     match fetched.navigation {
         true => bound(resp, fetched.framed.then(|| frames::ancestors(framed, &platform)).as_deref()),
         false => Ok(resp),
@@ -1230,9 +1240,10 @@ fn moved(to: &str) -> CellResult<Response> {
 pub(crate) async fn route(req: Request, env: &Env, ctx: &Context) -> CellResult<Response> {
     let navigation = updating::navigation(&req)?;
     let platform = Config::from_env(env).is_platform_host(req.url()?.host_str().unwrap_or_default());
+    let reference = error::reference_of(&req)?;
     let resp = match route_inner(req, env, ctx).await {
         Ok(resp) => resp,
-        Err(e) => e.response()?,
+        Err(e) => e.public_response(&reference)?,
     };
     if navigation { updating::answer(resp, env, platform).await } else { Ok(resp) }
 }
@@ -1267,10 +1278,13 @@ async fn route_inner(req: Request, env: &Env, ctx: &Context) -> CellResult<Respo
     // everything else is the platform's own answer, an error's included,
     // with the platform's headers (`platform_origin`)
     let release = levers::answered_release(cfg, &req);
+    let reference = error::reference_of(&req)?;
     let answered = match platform_answer(req, env, ctx, cfg, url).await {
         Ok(resp) => resp,
-        Err(e) => e.response()?,
+        Err(e) => e.public_response(&reference)?,
     };
+    // an object's refusal the platform's routes passed on as it came
+    let answered = error::public_answer(answered, &reference).await?;
     platform_origin(answered, &release, cfg.cli_version.as_deref())
 }
 

@@ -1142,7 +1142,11 @@ impl FragmentCell {
         // the app facet's capabilities: each call one of its subrequests,
         // to a fragment that is
         if calls::CAPABILITIES.contains(&path) {
-            self.facet_calls_lever()?;
+            if let Some(limit) = self.facet_calls_lever()? {
+                // the runtime's refusal, not the platform's: unmarked, so the
+                // app reads its words, as it reads Cloudflare's own throw
+                return Ok(limit.unmarked_response()?);
+            }
             self.name()?;
         }
         match path {

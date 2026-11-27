@@ -225,22 +225,21 @@ impl FragmentCell {
     /// Test fleets only: one capability call, counted against the
     /// `facet-calls` lever's budget for the facet's current start and
     /// refused past it in the runtime's words (`facet::at_limit`), as
-    /// Cloudflare refuses a facet's subrequests past its life's limit.
-    pub(crate) fn facet_calls_lever(&self) -> CellResult<()> {
+    /// Cloudflare refuses a facet's subrequests past its life's limit: the
+    /// refusal to answer, which is the runtime's and never the platform's
+    /// own failure (the caller answers it unmarked).
+    pub(crate) fn facet_calls_lever(&self) -> CellResult<Option<CellError>> {
         if !self.cfg.test_hooks {
-            return Ok(());
+            return Ok(None);
         }
         let Some(limit) = self.meta(MetaKey::TestFacetCalls)?.and_then(|n| n.parse::<u64>().ok()) else {
-            return Ok(());
+            return Ok(None);
         };
         let start = self.app.starts();
         let (at, made) = self.facet_calls.get();
         let made = if at == start { made + 1 } else { 1 };
         self.facet_calls.set((start, made));
-        if made > limit {
-            return Err(CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)")));
-        }
-        Ok(())
+        Ok((made > limit).then(|| CellError::host(format!("Too many subrequests by single Worker invocation (a test lever: {limit} capability calls a facet start)"))))
     }
 
     /// The installed app code's identity (its stored loader id), when live has an app.
@@ -635,6 +634,22 @@ impl FragmentCell {
                 }
                 self.exec("UPDATE paid SET settled = 0 WHERE run = ?", vec![SqlStorageValue::Integer(run)])?;
                 json!({ "receipts": keys.len() })
+            }
+            Some("forget-repo") => {
+                // a fragment whose facts lost its repository, as a storage
+                // fault might leave it: its files' reads fail as the
+                // platform's own (`fragment::missing`), which the app's
+                // `Files` must not hand its code word for word
+                self.del_meta(MetaKey::Repo)?;
+                json!({ "ok": true })
+            }
+            Some("host-failed") => {
+                // the platform's own failure with a diagnostic of `bytes`,
+                // past what the edge reads of a refusal (error.rs
+                // `public_answer`): it says a sentence all the same
+                let bytes = body["bytes"].as_u64().unwrap_or(0).min(1 << 20) as usize;
+                let diagnostic = format!("D1_ERROR: a test hook's failure {}", "at worker.js:1:2345 ".repeat(bytes / 20 + 1));
+                return Err(CellError::host(diagnostic));
             }
             Some("forget-steps") => {
                 // the kept answers of every run in flight go

@@ -364,8 +364,16 @@ async fn begin(env: &Env, cfg: &Config, url: &Url, trip: Trip) -> CellResult<Res
 async fn callback(req: &Request, env: &Env, cfg: &Config, url: &Url) -> CellResult<Response> {
     let workos = crate::keys::workos(env, cfg).await?;
     if let Some(error) = query(url, "error") {
+        // why, in the words of this browser's own sign-in's provider (the
+        // identity door's explanations, WorkOS's); a link's that no sign-in
+        // here began are its maker's, and the logs' alone
+        // (`public_error::oauth_description`)
         let why = query(url, "error_description").unwrap_or_default();
-        return page(400, "Sign-in did not finish", &format!("<p>WorkOS said <code>{}</code>: {}</p><p><a href=\"/auth/login\">Try again</a></p>", esc(&error), esc(&why)));
+        crate::error::vendor_said("WorkOS", "sign-in redirect", 400, &format!("{error}: {why}"));
+        let bound = trip_bound(req, url, &[Trip::SignIn, Trip::Switch])?.is_some();
+        let named = fragment_core::public_error::oauth_error(&error).map(|c| format!(" (<code>{c}</code>)")).unwrap_or_default();
+        let said = fragment_core::public_error::oauth_description(&why, bound).map(|w| format!("<p>{}</p>", esc(&w))).unwrap_or_default();
+        return page(400, "Sign-in did not finish", &format!("<p>The sign-in was not completed{named}.</p>{said}<p><a href=\"/auth/login\">Try again</a></p>"));
     }
     let Some(bound) = trip_bound(req, url, &[Trip::SignIn, Trip::Switch])? else {
         return page(400, "Sign-in did not start here", "<p>This sign-in began in another browser, or too long ago.</p><form method=\"get\" action=\"/auth/login\"><button type=\"submit\">Start again</button></form>");

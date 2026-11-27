@@ -64,6 +64,7 @@ pub mod connection_signin;
 pub mod org;
 pub mod permit;
 pub mod price;
+pub mod public_error;
 pub mod ratelimit;
 pub mod retention;
 pub mod run_retention;
