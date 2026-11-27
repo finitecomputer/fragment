@@ -83,12 +83,13 @@ async fn seat_itself(env: &Env, cfg: &Config, bytes: &[u8], by: By, method: Meth
     match method {
         Method::Get => {
             let Mined { person, mine } = ask_registry(env, &Mine { by }).await?;
-            // holding none, their ledger says whether a plan of its own gives them one
+            // holding one, good or lapsed, they are told of it (pay again);
+            // holding none, their ledger says whether they are a guest
             let guest = match mine.seat {
                 Some(_) => false,
                 None => {
                     let ledger = crate::ledger::ask(env, &person, &crate::ledger::Status {}).await?;
-                    fragment_core::org::guest(false, ledger.plan, ledger.seat)
+                    permit::guest(ledger.plan, ledger.seat)
                 }
             };
             json_answer(&SeatStatus { mine, guest, offer: cfg.stripe().is_ok().then(fragment_core::stripe::offer) })

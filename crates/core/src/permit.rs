@@ -84,6 +84,7 @@
 //! when I do it myself in the UI." The target is in `the_rule_table`'s
 //! comment.
 
+use fragment_proto::ledger::{Plan, SeatState};
 use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Member, Role, Visibility};
 use serde_json::Value;
 
@@ -660,6 +661,18 @@ pub fn operator<'a>(listed: &[String], identity: Option<&str>, proven: impl Into
 /// billing-admin test (FIN-615).
 pub fn org_admin(admin: bool, of: &str, org: Option<&str>) -> bool {
     admin && org.is_none_or(|o| o == of)
+}
+
+/// Whether a person's ledger makes them a guest (decision 49: they make
+/// no fragment, and are offered a seat): it gives them no plan of its own
+/// (`guest`, a new person's on a deployment whose plan is guest), or their
+/// seat is canceled: it ended, or its org stopped paying, the plan it left
+/// kept (decision 53). What is theirs stays, and takes writes. A
+/// deployment's plan for everyone (dev, the e2e) is a seat to them. The
+/// one guest test (FIN-615): the ledger's, as it decides a new fragment,
+/// and the seat page's for someone who holds no seat (`GET /api/seat`).
+pub fn guest(plan: Plan, seat: SeatState) -> bool {
+    plan == Plan::Guest || seat == SeatState::Canceled
 }
 
 #[cfg(test)]
@@ -1403,5 +1416,18 @@ mod tests {
         assert!(org_admin(true, "org-a", Some("org-a")), "of the org named");
         assert!(!org_admin(true, "org-a", Some("org-b")), "never of another org");
         assert!(!org_admin(false, "org-a", Some("org-a")), "a seat holder is no admin");
+    }
+
+    /// Goal: one guest test (FIN-615; decisions 49 and 53). Method: a plan
+    /// of its own or none, and a seat good, past due or canceled.
+    #[test]
+    fn a_guest_has_no_plan_or_a_canceled_seat() {
+        assert!(guest(Plan::Guest, SeatState::Active), "never had a plan");
+        assert!(!guest(Plan::Seat, SeatState::Active), "a seat, or the deployment's plan for everyone");
+        assert!(!guest(Plan::SeatAlwaysOn, SeatState::PastDue), "past due is good");
+        let ended = crate::org::desired(None);
+        assert!(guest(Plan::SeatAlwaysOn, ended.seat) && guest(Plan::Seat, ended.seat), "a seat that ended: whatever plan it left");
+        let lapsed = crate::org::desired(Some(crate::org::Held { kind: fragment_proto::org::SeatKind::Seat, comped: false, status: Some(crate::org::Status::Canceled), sleeps: false }));
+        assert!(guest(Plan::Seat, lapsed.seat), "a seat whose org stopped paying");
     }
 }

@@ -910,14 +910,15 @@ fn available(money: &Money) -> i64 {
 }
 
 /// Whether `spend` may start on these means. Making a fragment is a write
-/// to one of the payer's own: it goes as a write does, but a guest, whose
-/// fragments would be billed nothing, makes none.
+/// to one of the payer's own: it goes as a write does, but a guest
+/// (`permit::guest`: no plan, or a canceled seat) makes none (decision
+/// 49). A ledger with no plan of its own pays for nothing.
 fn gate(money: &Money, spend: Spend) -> Result<(), Refused> {
+    if spend == Spend::Create && crate::permit::guest(money.plan, money.seat) {
+        return Err(Refused::GuestCreates);
+    }
     if money.plan == Plan::Guest {
-        return Err(match spend {
-            Spend::Create => Refused::GuestCreates,
-            Spend::AgentTurn | Spend::AiStep | Spend::Wake | Spend::Write => Refused::GuestPayer,
-        });
+        return Err(Refused::GuestPayer);
     }
     allowed(money.standing(), spend)
 }
