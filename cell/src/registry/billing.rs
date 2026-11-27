@@ -232,8 +232,13 @@ impl RegistryCell {
     }
 
     /// Who pays for `org`: the buyer whose Checkout made the subscription
-    /// it has now, if one did (`None`: never paid, or comped only).
+    /// it has now, if one did (`None`: never paid, comped only, or paid by
+    /// invoice: no card pays for it, so its old buyer opens nothing of its
+    /// billing, nor takes a payer's place in it).
     pub(super) fn payer_of(&self, org: &str) -> CellResult<Option<String>> {
+        if self.invoiced(org)?.is_some() {
+            return Ok(None);
+        }
         #[derive(Deserialize)]
         struct Row {
             person: String,
@@ -486,7 +491,12 @@ impl RegistryCell {
 
     fn apply_subscription(&self, b: ApplySubscription) -> CellResult<Applied> {
         let orphan = org::valid_org_id(&b.org) && self.org_row(&b.org)?.is_none();
-        Ok(Applied { applied: self.apply_subscription_copy(&b.org, &b.subscription, b.at)?, orphan })
+        let applied = self.apply_subscription_copy(&b.org, &b.subscription, b.at)?;
+        // a card's an org paid by invoice refused (a Checkout opened before
+        // its mark) is an orphan's too: its Checkout is found and applied, a
+        // stray, so it is canceled though its completion never comes
+        let refused = !applied && !orphan && self.billing_row(&b.org)?.is_some_and(|r| r.subscription.as_deref() != Some(b.subscription.id.as_str())) && self.invoiced(&b.org)?.is_some();
+        Ok(Applied { applied, orphan: orphan || refused })
     }
 
     /// The seat a completed Checkout bought its buyer, once by its session:

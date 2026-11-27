@@ -560,24 +560,32 @@ fn by_invoice(s: &mut Suite, api: &Api) -> Result<()> {
         let v = seat(api, &carded);
         v["seat"]["comped"] == true && v["seat"]["good"] == true && v["invoiced"] == true && v["pays"] == false && ledger(api, &carded)["seat"] == "active"
     });
+    let portal = api.signed(&carded, "POST", "/api/billing/portal", Some(&json!({})))?;
     s.ok(
-        "its card lapsed, marked paid by invoice: its paid seat is a comp, good again, its holder's plan active, and no one is its payer",
-        lapsed && open.status == 200 && marked.status == 200 && marked.body["payer"].is_null() && comped,
-        json!([marked.body, seat(api, &carded), ledger(api, &carded)]),
+        "its card lapsed, marked paid by invoice: its paid seat is a comp, good again, its holder's plan active, and no one is its payer: its old payer opens no portal (403 not_payer)",
+        lapsed && open.status == 200 && marked.status == 200 && marked.body["payer"].is_null() && comped && portal.status == 403 && portal.body["reason"] == "not_payer",
+        json!([marked.body, seat(api, &carded), ledger(api, &carded), portal.body]),
     );
-    // the Checkout opened before the mark is paid: it seats no one, and its
-    // subscription is canceled at once (a stray: refunded by hand, as any)
+    // the Checkout opened before the mark is paid, its completion lost and
+    // no return: the subscription's own event finds it, and it seats no
+    // one, its subscription canceled at once (a stray: refunded by hand)
     let asked = s.stripe.requests().len();
+    s.stripe.hold_events(true);
     s.stripe.complete(open.body["session"].as_str().unwrap_or("")).map_err(anyhow::Error::msg)?;
+    s.stripe.drop_held("checkout.session.completed");
+    s.stripe.release_events(false);
     let mut stray = None;
+    // its cancel done: the subscription deleted, then its pending items read
     let canceled = s.eventually(PUSHED, || {
-        stray = s.stripe.requests()[asked..].iter().find(|a| a.method == "DELETE" && a.path.starts_with("/v1/subscriptions/")).map(|a| a.path.clone());
-        stray.is_some()
+        let after = s.stripe.requests().split_off(asked);
+        let at = after.iter().position(|a| a.method == "DELETE" && a.path.starts_with("/v1/subscriptions/"));
+        stray = at.map(|i| after[i].path.clone());
+        at.is_some_and(|i| after[i..].iter().any(|a| a.path.starts_with("/v1/invoiceitems")))
     });
     let stray_sub = stray.as_deref().and_then(|p| p.strip_prefix("/v1/subscriptions/")).and_then(|id| s.stripe.subscription(id));
     let after = api.signed(&operator, "GET", &format!("/api/admin/orgs/{carded_org}"), None)?;
     s.ok(
-        "the Checkout its payer opened before the mark, paid, takes no hold of it: its new subscription is canceled at once, and the org is still paid by invoice, its seat a comp",
+        "the Checkout its payer opened before the mark, paid with its completion lost, takes no hold of it: its new subscription is canceled at once, and the org is still paid by invoice, its seat a comp",
         canceled
             && stray_sub.as_ref().is_some_and(|x| x.status == "canceled" && x.metadata.get("fragment_org").map(String::as_str) == Some(carded_org.as_str()) && x.id != sub)
             && after.body["invoiced"].is_object()

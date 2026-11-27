@@ -498,14 +498,12 @@ impl RegistryCell {
                 (seat, Some(o.reference()), m.admin != 0)
             }
         };
-        // paid by invoice, no card pays for it: its old payer (a
-        // subscription that ended) opens nothing of its billing
         let invoiced = match &m {
             Some(m) => self.invoiced(&m.org)?.is_some(),
             None => false,
         };
         let pays = match &m {
-            Some(m) => !invoiced && self.payer_of(&m.org)?.as_deref() == Some(person),
+            Some(m) => self.payer_of(&m.org)?.as_deref() == Some(person),
             None => false,
         };
         // every offer to an email of theirs, an admin's place alone too:
@@ -552,11 +550,7 @@ impl RegistryCell {
         )?;
         let members = rows.into_iter().map(|r| r.m.wire(r.latest)).collect::<CellResult<Vec<_>>>()?;
         let invoiced = self.invoiced(&org_row.id)?;
-        // paid by invoice, no card pays for it: no one is its payer
-        let payer = match invoiced {
-            Some(_) => None,
-            None => self.payer_of(&org_row.id)?,
-        };
+        let payer = self.payer_of(&org_row.id)?;
         Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer, invoiced })
     }
 
