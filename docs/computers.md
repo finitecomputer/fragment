@@ -430,6 +430,7 @@ What every image may rely on, and must do.
 | `FRAGMENT_IMAGE` | the pinned image's name and digest |
 | `RESTORE_PENDING` | `1` when `/data` is being restored |
 | `FRAGMENT_DISK` | `fpac` when it mounts `/data` from its disk (below, "A disk") |
+| `FRAGMENT_DISK_FLUSH_MS` | on a disk, how long its boot waits for its final flush at its stop: past the platform's own wait (below, "A disk") |
 
 The guest holds no credential. Every request to those hosts, and to a
 provider's host (below, "Connections and operator keys"), goes through
@@ -594,9 +595,22 @@ put on disks.
   programs and its daemon's final flush ships what is left and posts a
   clean head; the DO waits for the container to exit
   (`DISK_EXIT_WAIT_MS`), destroys it, and logs its sleep's line. A final
-  flush that posted no clean head (its store unreachable as it stopped)
-  ends its life unsaved, saying its last moments' writes may not have
-  shipped. A crash loses at most what its daemon had not shipped, about a
+  flush that cannot land (its store unreachable: FPAC tries again) keeps
+  the container (FIN-783): signalled once (its runtime's idle stop moved
+  past its guest's wait first, so that safety net doesn't cut it short),
+  each wait for its exit never past what it keeps, its stop looked at
+  every minute, until the flush lands and it exits, or what it keeps
+  passes from that signal: the unsaved bound its start told its guest
+  (`fpac::flush_kept_ms`: never under its exit wait, at most five
+  hours). Its boot waits longer still (`FRAGMENT_DISK_FLUSH_MS`), so the
+  platform's destroy, not the guest, ends one that never lands; a destroy
+  that fails keeps the stop on while its guest's own wait lasts, then its
+  life ends and the next start waits for that container to go, as any
+  start after a failed destroy does. That one, or any final
+  flush that posted no clean head, ends its life unsaved, saying its last
+  moments' writes may not have shipped. A wake meanwhile starts once the
+  stop has ended. A disk's stop is never its owner's time: its awake
+  time is metered to its stop's beginning (docs/ledger.md). A crash loses at most what its daemon had not shipped, about a
   second of synced writes: the next mount replays the life's segments
   past its last checkpoint.
 - **No saves of its own.** A disk is saved only for its owner's export:
@@ -1026,25 +1040,13 @@ sleep answers within 14 minutes.
     `diskMountMs`, `diskMisses` and `diskRefetches` (each a number, any
     left out), what its mount did, which the start's line takes from its
     first read.
-  - `PUT /api/computer/turns {life, generation, turn, place, asker?,
-    mandate?}`, as the agent its header names: a turn it runs, before its
-    runtime hears of it: whose ask it is (none, app code's words) and the
-    mandate its record carried. `DELETE /api/computer/turns {life,
-    generation, turn}` as it ends, and `{life, generation}` at the
-    bridge's start. Each names the bridge life it is and its computer's
-    start (`generation`, as `GET /api/computer` said it when the bridge
-    started; `mandate::heard`): a new life of that start or a later one
-    takes the agent's turns (every other life's forgotten: one computer
-    runs one bridge), and any other is retired, its word refused (409)
-    and changing nothing, a late first word from a container gone among
-    them. Lives are ordered within the computer the agent runs on (another
-    computer's starts are not comparable): run on another, its bridge's
-    first word takes over. The agent's
-    fragment holds at most `TURNS_HELD_MAX`, each for at most
-    `TURN_HELD_MS`; a mandate that does not check holds that turn
-    unproven, never refused. A platform from before sends it on to its
-    API, which has no such route (404): a bridge takes that as nothing to
-    tell.
+  - `PUT` and `DELETE /api/computer/turns`, as the agent its header
+    names, from a bridge that tells its turns: answered, and opening
+    nothing. Whose ask a turn is is its place's word (docs/api.md, "A
+    place opens its agents' turns"); a turn told before that release
+    still holds until its bridge ends it (`DELETE` with its turn) or a
+    new life takes them (`DELETE` with none). The route goes once no
+    computer runs an image that calls it (the debt ledger).
 - **A wake subscription**: `{channel, wake: true}` (in place of `url`),
   sent as an agent to `POST /f/<fragment>/api/subscriptions`, wakes the
   computer on each new record from anyone but that computer's own agents.

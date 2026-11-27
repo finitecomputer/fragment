@@ -42,9 +42,23 @@ const LOG_BYTES_MAX: usize = 1 << 20;
 /// A mount is waited for this long: inside the cell's wait for the guest's
 /// first read (`DISK_ALIVE_MS`, 120 s), which its boot makes after.
 pub const MOUNT_MS_MAX: u64 = 100_000;
-/// Its final flush is waited for this long: inside the cell's wait for the
-/// container's exit (`DISK_EXIT_WAIT_MS`, 150 s), less the boot's own stop.
+/// Its final flush is waited for this long when the platform names no
+/// bound (one from before `FRAGMENT_DISK_FLUSH_MS`): inside that platform's
+/// wait for the container's exit (`DISK_EXIT_WAIT_MS`, 150 s), less the
+/// boot's own stop.
 pub const FLUSH_MS_MAX: u64 = 140_000;
+/// The most a platform's `FRAGMENT_DISK_FLUSH_MS` asks it to wait: a flush
+/// that cannot land (R2 unreachable: FPAC tries again) keeps the container
+/// that long at most (`fragment_core::computer::fpac::guest_flush_ms`, the
+/// deployment's unsaved bound and its stop's waits; FIN-783).
+pub const FLUSH_MS_CAP: u64 = 6 * 3_600_000;
+
+/// How long its final flush is waited for: the platform's bound
+/// (`FRAGMENT_DISK_FLUSH_MS`), within `FLUSH_MS_MAX..=FLUSH_MS_CAP`; none
+/// named, or not a number, `FLUSH_MS_MAX`.
+pub fn flush_ms(named: Option<&str>) -> u64 {
+    named.and_then(|v| v.trim().parse::<u64>().ok()).map_or(FLUSH_MS_MAX, |ms| ms.clamp(FLUSH_MS_MAX, FLUSH_MS_CAP))
+}
 /// A boot that told the platform its head is unusable waits this long to
 /// be destroyed by that start, rather than exit: an exit heard first would
 /// be a failed start of its own, a strike, and the same head again.
@@ -192,7 +206,7 @@ fn unmounted(events: &[Value], status: &str) -> Unmounted {
 
 /// Ends its life's disk: SIGTERM to its daemon, which unmounts (or
 /// freezes) `/data`, ships what is left and posts a clean head, then waits
-/// for it to be gone, at most `FLUSH_MS_MAX`. Answers whether it ended
+/// for it to be gone, at most `flush_ms`. Answers whether it ended
 /// within that, and how long it took; a computer on no disk, or one whose
 /// daemon is gone already, `None`. Its own child or not: a daemon that
 /// exited is gone once it is a zombie.
@@ -202,10 +216,11 @@ pub fn flush() -> Option<(bool, u64)> {
         return None;
     }
     let t0 = Instant::now();
+    let bound = flush_ms(std::env::var("FRAGMENT_DISK_FLUSH_MS").ok().as_deref());
     // SAFETY: a signal to a pid this boot started.
     unsafe { libc::kill(pid, libc::SIGTERM) };
-    // bounded by FLUSH_MS_MAX
-    while alive(pid) && t0.elapsed() < Duration::from_millis(FLUSH_MS_MAX) {
+    // bounded by `bound`, at most FLUSH_MS_CAP
+    while alive(pid) && t0.elapsed() < Duration::from_millis(bound) {
         std::thread::sleep(Duration::from_millis(20));
     }
     let flushed = events_of(LOG).iter().any(|e| e["fpac"] == "flushed" && e["error"].is_null());
@@ -284,6 +299,17 @@ fn tmpfs(dir: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn its_final_flush_waits_as_long_as_the_platform_names_within_its_cap() {
+        assert_eq!(flush_ms(None), FLUSH_MS_MAX, "a platform from before names none: the old bound");
+        assert_eq!(flush_ms(Some("2400000")), 2_400_000, "valid: the platform's");
+        assert_eq!(flush_ms(Some(" 2400000\n")), 2_400_000);
+        assert_eq!(flush_ms(Some("1000")), FLUSH_MS_MAX, "never under the old bound");
+        assert_eq!(flush_ms(Some("999999999999")), FLUSH_MS_CAP, "never past its cap");
+        assert_eq!(flush_ms(Some("soon")), FLUSH_MS_MAX, "not a number: the old bound");
+        assert_eq!(flush_ms(Some("-5")), FLUSH_MS_MAX);
+    }
 
     #[test]
     fn a_read_says_what_the_mount_did_and_what_the_daemon_counts_now() {

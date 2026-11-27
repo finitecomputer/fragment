@@ -59,12 +59,18 @@ pub struct Signed {
     /// anyone, not only the agent's owner.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mandated: bool,
+    /// That mandate's text, as it came: what a post it makes keeps, so an
+    /// agent of the same owner's it asks there carries the same ask
+    /// (FIN-615, PR 16a; channels.rs `mandated`). None from a router
+    /// before it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mandate: Option<String>,
 }
 
 impl Signed {
     /// Who signed, acting as themselves.
     pub fn new(identity: Identity, key: Option<String>) -> Signed {
-        Signed { identity, key, acting_for: None, mandated: false }
+        Signed { identity, key, acting_for: None, mandated: false, mandate: None }
     }
 
     /// Whom an agent's request acts for when that is not its owner, proven
@@ -265,6 +271,24 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     }
     let mut init = RequestInit::new();
     init.with_method(Method::Post).with_headers(headers).with_body(Some(body.into()));
+    Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
+}
+
+/// `internal_request`, its body a stream (or none) and its `headers` the
+/// caller's: a SimpleX door's import, a computer's handover answer passed
+/// on (simplex_move.rs), always through a stream of its own
+/// (`js::passed_on`, Cloudflare's reorder).
+pub(crate) fn internal_stream(path: &str, method: Method, headers: &[(&str, &str)], body: Option<worker::wasm_bindgen::JsValue>) -> CellResult<Request> {
+    let body = body.map(crate::js::passed_on);
+    let h = Headers::new();
+    for (k, v) in headers {
+        h.set(k, v)?;
+    }
+    if let Some((header, value)) = marker(path)? {
+        h.set(header, value)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(h).with_body(body);
     Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
 }
 

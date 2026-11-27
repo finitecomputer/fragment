@@ -28,6 +28,7 @@ pub mod door;
 pub mod http;
 pub mod link;
 pub mod run;
+pub mod save;
 pub mod socks;
 pub mod stage;
 pub mod wire;

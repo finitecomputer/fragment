@@ -13,6 +13,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { register } from "node:module";
 import { DatabaseSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+
+const hex = (text) => createHash("sha256").update(text).digest("hex");
+// a door's answer as a job's fetch has it, named by its SHA-256 as the door names each
+const answered = (status, body) => ({ ok: status < 300, status, json: () => body, text: () => JSON.stringify(body), headers: new Headers({ "x-door-sha256": hex(JSON.stringify(body)) }) });
 
 const BASE = "export class DurableObject { constructor(ctx, env) { this.ctx = ctx; this.env = env; } }";
 const HOOKS = `export async function resolve(specifier, context, next) {
@@ -22,6 +28,11 @@ const HOOKS = `export async function resolve(specifier, context, next) {
 register("data:text/javascript," + encodeURIComponent(HOOKS));
 const { App } = await import(new URL("../../../templates/simplex/app.mjs", import.meta.url).href);
 
+// its operations' roles, as the platform checks a job's calls: a
+// trigger's run acts as an editor (crates/core manifest.rs), so an owner's
+// operation it calls is refused, as `step_call` refuses it
+const OPS = JSON.parse(readFileSync(new URL("../../../templates/simplex/fragment.json", import.meta.url), "utf8")).operations;
+
 const AGENT = "npub1juniper";
 // its door, its life's, as its connect was told it
 const DOOR = "juniper-sx--k3x9--0123456789ab";
@@ -29,16 +40,20 @@ const BOUND = { relayed: { via: "simplex", for: "npub1paul", agent: "juniper--k3
 
 // an app on a fresh store, and its door as `answers` say: each ask's
 // (status, body) in turn by its name, else 200 {}
-function world(answers = {}) {
+function world(answers = {}, connected = true) {
   const db = new DatabaseSync(":memory:");
   const sql = { exec: (q, ...p) => { const st = db.prepare(q); const rows = /^\s*select\b|\breturning\b/i.test(q) ? st.all(...p) : (st.run(...p), []); return { toArray: () => rows }; } };
   const app = new App({ storage: { sql } }, {});
-  app.connected({ door: DOOR });
+  if (connected) app.connected({ door: DOOR });
   const w = { app, asked: [], published: [], slept: [], calls: [] };
   w.job = (via, door = BOUND) => ({
     via,
     door,
-    call: async (op, input) => (w.calls.push(op), app[op](input, { agent: null })),
+    call: async (op, input) => {
+      if (via === "channel" && OPS[op]?.role === "owner") throw new Error(`${op} needs the owner role: a trigger's run acts as an editor`);
+      w.calls.push(op);
+      return app[op](input, { agent: null });
+    },
     publish: async (channel, body, kind) => void w.published.push({ channel, body, kind }),
     sleep: async (ms) => void w.slept.push(ms),
     fetch: async (url, init = {}) => {
@@ -46,8 +61,9 @@ function world(answers = {}) {
       w.asked.push({ url, ask, method: init.method ?? "GET", headers: init.headers, body: init.body ? JSON.parse(init.body) : null, ...(init.blob ? { blob: init.blob } : {}), ...(init.keep ? { keep: true } : {}) });
       const next = answers[ask]?.shift() ?? [200, {}];
       if (next instanceof Error) throw next;
-      const [status, body, blob] = next;
-      return { ok: status < 300, status, json: () => body, blob: blob ?? null };
+      // its answer named by its SHA-256, as the door names each (`named`: another's, as one damaged on its way)
+      const [status, body, blob, named = hex(JSON.stringify(body))] = next;
+      return { ok: status < 300, status, json: () => body, text: () => JSON.stringify(body), headers: new Headers({ "x-door-sha256": named }), blob: blob ?? null };
     },
   });
   w.delivered = (payload) => ({ record: { body: { source: "simplex", payload } } });
@@ -83,6 +99,19 @@ test("nothing is relayed but its inbox's own message, while bound, of text", asy
     throw new Error("this connector is bound as a simplex door that is shut");
   };
   assert.deepEqual(await shut.app.intake(shut.delivered(message("m4")), job), { ignored: "not linked" });
+});
+
+test("a message its door delivers before its connect recorded that door (a moved link's runs linked at once) is relayed, once, when the door its own fetch reaches is that one", async () => {
+  // its connect under way: the door has begun, linked, and delivers
+  const w = world({ state: [[200, { door: { door: DOOR } }]] }, false);
+  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "sent as it moved")), w.job("channel")), { relayed: true, file: false });
+  assert.deepEqual(w.published.map((p) => p.body.text), ["sent as it moved"]);
+  assert.deepEqual(w.app.state().connected, true, "its door recorded");
+  assert.deepEqual(await w.app.intake(w.delivered(message("m1", "sent as it moved")), w.job("channel")), { ignored: "taken already" });
+  // one its own fetch does not reach (another life's), still no one's
+  const v = world({ state: [[200, { door: { door: DOOR } }]] }, false);
+  assert.deepEqual(await v.app.intake(v.delivered(message("m2", "from before", "text", "juniper-sx--k3x9--fedcba987654")), v.job("channel")), { ignored: "not its door's" });
+  assert.deepEqual([v.published, v.app.state().connected], [[], false]);
 });
 
 test("its bound agent's reply goes through the door by its record's key, asked again until sent", async () => {
@@ -152,6 +181,15 @@ test("connect gives the door the inbox's secret as a placeholder the platform fi
   assert.deepEqual([none.app.state().why.text, none.app.state().why.code, none.app.state().why.step], ["the door answered 409: this deployment runs no doors (no container for them)", "no_doors", "connect"], "said to its setup page, with the door's code and its step");
 });
 
+test("a door holding its owner's chat with their old agent waits for their word: connect says so, and carries it", async () => {
+  const w = world({ connect: [[409, { error: "staged", message: "its owner's SimpleX chat with their old agent waits" }], [200, { started: 1, door: "juniper-sx--k3x9--00112233aabb" }]] });
+  assert.equal((await w.app.connect({ name: "Juniper" }, w.job("call"))).connected, false);
+  assert.deepEqual([w.app.state().why.code, w.app.state().why.step], ["staged", "connect"], "its setup page asks them");
+  assert.deepEqual(await w.app.connect({ name: "Juniper", keep: true }, w.job("call")), { connected: true, started: 1 });
+  assert.deepEqual(w.asked.map((a) => a.body), [{ name: "Juniper" }, { name: "Juniper", keep: true }], "their word given to the door");
+  assert.equal(w.app.state().why, null);
+});
+
 test("the invitation for its owner's app is kept for its owner's query alone, never in a run's output", async () => {
   const link = "https://simplex.chat/invitation#/?v=2-7&smp=a-secret-invitation";
   const w = world({ link: [[202, {}]], unlink: [[202, {}]], state: [[200, { runner: { phase: "wanting" } }], [200, { runner: { link, short: "https://smp.example/i#short" } }]] });
@@ -218,7 +256,7 @@ test("a door linked already keeps whom it linked; check looks once, for its own 
   job.fetch = async (url) => {
     assert.ok(url.endsWith("/state"));
     await late.app.asking();
-    return { ok: true, status: 200, json: () => ({ runner: { phase: "linked", name: "Robin" } }) };
+    return answered(200, { runner: { phase: "linked", name: "Robin" } });
   };
   assert.deepEqual(await late.app.check({}, job), { linked: false, why: "unlinked since" });
   assert.equal(late.app.state().linked, null);
@@ -260,7 +298,7 @@ test("an invitation found after an unlink was asked is kept by no one", async ()
   job.fetch = async (url, init) => {
     if (!url.endsWith("/state")) return fetch(url, init);
     const [status, body] = await (typeof answers[0] === "function" ? answers.shift()() : answers.shift());
-    return { ok: true, status, json: () => body };
+    return answered(status, body);
   };
   assert.deepEqual(await w.app.link({}, job), { invited: false, why: "unlinked since" });
   assert.equal(w.app.state().invitation, null);
@@ -292,6 +330,16 @@ test("a file kept by none (gone from its door, not what it names, a step that fa
   assert.deepEqual([bad.asked.length, bad.published[0].body.text], [0, "(I sent a file over SimpleX that did not arrive.)"], "a file named by no SHA-256 is asked of no one");
 });
 
+test("its asks of its door each name their body's SHA-256, and an answer damaged on its way is asked again, never used (Codex's round on 8cacd32d1)", async () => {
+  const w = world({ reply: [[200, { done: true }, null, hex("another answer")], [200, { done: true }]] });
+  assert.deepEqual(await w.app.mirror(w.reply(46), w.job("channel")), { sent: 1 });
+  const replies = w.asked.filter((a) => a.ask === "reply");
+  assert.equal(replies.length, 2, "asked again, the same ask");
+  assert.ok(replies.every((a) => a.headers["x-door-sha256"] === hex(JSON.stringify(a.body))), "its body named");
+  const worse = world({ reply: [1, 2, 3].map(() => [200, { done: true }, null, hex("another answer")]) });
+  await assert.rejects(worse.app.mirror(worse.reply(47), worse.job("channel")), /damaged on its way 3 times/, "still damaged: its step fails, to be tried again");
+});
+
 test("its agent's reply's files are given to the door first, then sent with its text; one the door does not take stays in the chat, said so", async () => {
   const one = { sha256: "01".repeat(32), name: "plan.pdf", type: "application/pdf", size: 8 };
   const two = { sha256: "02".repeat(32), name: "photo.png", type: "image/png", size: 9 };
@@ -309,6 +357,16 @@ test("its agent's reply's files are given to the door first, then sent with its 
     assert.deepEqual(await o.app.mirror(o.reply(43, { attachments: [one] }), o.job("channel")), { sent: 1 });
     assert.deepEqual(o.asked.slice(1).map((a) => a.body), [{ key: "chat:43", text: "It'll be sunny.", files: [one] }, { key: "chat:43", text: "It'll be sunny.\n\n(I sent a file in our chat.)" }], error);
   }
+  // a copy the door found damaged on its way (422) is given again, its
+  // reply going with it (Codex's round on 45fc87eee); damaged every time,
+  // after a few, it stays in the chat, said so
+  const hurt = world({ [`file/${one.sha256}`]: [[422, { error: "damaged" }], [200, { kept: one.sha256 }]], reply: [[200, { done: true }]] });
+  assert.deepEqual(await hurt.app.mirror(hurt.reply(44, { attachments: [one] }), hurt.job("channel")), { sent: 1 });
+  assert.deepEqual(hurt.asked.map((a) => a.ask), [`file/${one.sha256}`, `file/${one.sha256}`, "reply"]);
+  assert.deepEqual(hurt.asked[2].body, { key: "chat:44", text: "It'll be sunny.", files: [one] }, "its file goes with it");
+  const worse = world({ [`file/${one.sha256}`]: [[422, {}], [422, {}], [422, {}], [200, {}]], reply: [[200, { done: true }]] });
+  await worse.app.mirror(worse.reply(45, { attachments: [one] }), worse.job("channel"));
+  assert.deepEqual([worse.asked.filter((a) => a.ask === `file/${one.sha256}`).length, worse.asked.at(-1).body.text], [3, "It'll be sunny.\n\n(I sent a file in our chat.)"]);
   // at most a message's files
   const many = world({ reply: [[200, { done: true }]] });
   await many.app.mirror(many.reply(44, { attachments: Array.from({ length: 12 }, (_, n) => ({ ...one, sha256: String(n).padStart(2, "0").repeat(32) })) }), many.job("channel"));

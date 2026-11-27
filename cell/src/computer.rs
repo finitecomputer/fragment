@@ -88,6 +88,9 @@ pub const INTERNAL_HEADER: &str = "x-fragment-computer-internal";
 /// What an egress or a port request asks the cell (set by Rust inside the
 /// Worker only: the router drops every client `x-fragment-*`).
 const KIND_HEADER: &str = "x-fragment-computer";
+/// A SimpleX move record's set refused as another `go` moved it on: the
+/// one failure the operators' move never goes back from (simplex_move.rs).
+pub(crate) const MOVED_ON: &str = "another `go` moved it on";
 const PORT_HEADER: &str = "x-fragment-computer-port";
 const SESSION_HEADER: &str = "x-fragment-computer-session";
 const SIGNER_HEADER: &str = "x-fragment-computer-signer";
@@ -329,6 +332,9 @@ const PORT_MAX: u16 = 65_535;
 /// A port's request to a computer still starting is asked again after
 /// this: one held-up try's destroy wait (`DESTROY_MS`).
 const PORT_RETRY_MS: u64 = DESTROY_MS as u64;
+/// Its bridge's screen port, where an agent's SimpleX routes are
+/// (images/bridge simplex/http.rs): the operators' move calls them.
+const SIMPLEX_PORT: u16 = 6080;
 /// Awake intervals one flush sends (one is made every five minutes awake).
 const METER_ROWS_MAX: u64 = 64;
 
@@ -382,6 +388,15 @@ enum MetaKey {
     DiskFell,
     /// When its wipe first found its container gone (its disk's settle).
     WipeGone,
+    /// When its disk's sleep first signalled its guest: `<generation> <ms>`
+    /// (`fpac::flush_wait_ms` counts from it, its final flush awaited).
+    DiskFlushing,
+    /// How long a disk's start's sleep keeps its container for its final
+    /// flush, as that start told its guest: `<generation> <ms>`.
+    DiskFlushKept,
+    /// The test lever's outage of its disk's route at its next stop
+    /// (`fpac-refuse-at-stop`), in ms from that stop's signal.
+    RefuseAtStop,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
     SlowSnapshot,
@@ -416,6 +431,12 @@ enum MetaKey {
     /// it (`fragment_core::computer::sizes_of`, `ComputerSizes`): a cache
     /// its owner's view shows, its own row so its saves' stay small.
     Sizes,
+    /// The operators' moves of its agents' SimpleX links into doors of
+    /// their own (docs/bridge.md, "SimpleX"), by agent: `{connector, door,
+    /// step, moved, ticket, chat}`, kept until each is done or gone back.
+    /// One `moved` is never started on its computer again (`simplexMoved`
+    /// in its guest's view), whatever a save restored there says.
+    SimplexMoves,
 }
 
 impl MetaKey {
@@ -440,6 +461,9 @@ impl MetaKey {
             MetaKey::SlowStartTell => "slow_start_tell",
             MetaKey::DiskFell => "disk_fell",
             MetaKey::WipeGone => "wipe_gone",
+            MetaKey::DiskFlushing => "disk_flushing",
+            MetaKey::DiskFlushKept => "disk_flush_kept",
+            MetaKey::RefuseAtStop => "refuse_at_stop",
             MetaKey::SlowSnapshot => "slow_snapshot",
             MetaKey::SnapshotBound => "snapshot_bound",
             MetaKey::StallFailingStart => "stall_failing_start",
@@ -451,6 +475,7 @@ impl MetaKey {
             MetaKey::StallUnhold => "stall_unhold",
             MetaKey::FailRestore => "fail_restore",
             MetaKey::Sizes => "sizes",
+            MetaKey::SimplexMoves => "simplex_moves",
         }
     }
 }
@@ -596,6 +621,9 @@ pub struct ComputerCell {
     /// agents' Vault secrets name a host more. In memory only: a new
     /// isolate arms again at the next read.
     armed: RefCell<Option<(u64, Vec<String>)>>,
+    /// Until when its disk's route refuses, as R2 down would (the lever
+    /// `fpac-refuse-at-stop`'s, from a stop's signal). In memory only.
+    refuse_until: std::cell::Cell<Option<i64>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
     /// When its owner's next look hands over the uses it owes
@@ -603,6 +631,12 @@ pub struct ComputerCell {
     /// (a lever's plant asks again); a minute on after one failed. In memory
     /// only, shared with the task that hands them over.
     uses_due_ms: Rc<std::cell::Cell<i64>>,
+    /// The e2e's lever `fail-read`: how many more reads of its SimpleX
+    /// move records marked moved fail, as a computer gone unreachable once
+    /// its core stopped would. In memory only.
+    failing_reads: std::cell::Cell<u32>,
+    /// The e2e's lever `fail-set`: the step, and how many more sets to it fail.
+    failing_sets: RefCell<(String, u32)>,
 }
 
 #[cfg(not(feature = "admin"))]
@@ -633,9 +667,12 @@ impl DurableObject for ComputerCell {
             disk_handed: RefCell::new(None),
             starts: RefCell::default(),
             armed: RefCell::new(None),
+            refuse_until: std::cell::Cell::new(None),
             relays: RefCell::default(),
             schema,
             uses_due_ms: Rc::new(std::cell::Cell::new(0)),
+            failing_reads: std::cell::Cell::new(0),
+            failing_sets: RefCell::default(),
         }
     }
 
@@ -929,6 +966,10 @@ struct TestLever {
     /// `legacy-uses`': the month (`YYYY-MM`) it makes owed.
     #[serde(default)]
     month: Option<String>,
+    /// `damage`'s: its bridge's path whose next `times` answers through
+    /// its port come damaged on their way (FIN-775).
+    #[serde(default)]
+    path: Option<String>,
     /// `disk`'s read: its size and what is free, in bytes, and what its
     /// `/data` restores to (none: a start's read, which keeps the last).
     #[serde(default)]
@@ -1485,10 +1526,22 @@ impl ComputerCell {
                 Action::Hold { generation } => reported.extend(self.hold(generation, false).await),
                 Action::Save { generation, held, seq } => reported.push(self.save(generation, held, seq).await),
                 Action::Unhold { generation } => self.unhold(generation, after_held).await,
-                Action::Stop { generation, saved } => reported.push(self.stop(generation, saved, until_ms).await),
+                Action::Stop { generation, saved } => reported.extend(self.stop(generation, saved, until_ms).await),
                 Action::Look { generation } => {
                     if !self.container_running().await {
-                        reported.push(self.stopped(generation));
+                        // a disk's stop whose final flush it kept for ends here,
+                        // as its own stop's end would (`stop_disk`)
+                        let on_disk = self.lifecycle().is_ok_and(|l| l.disk());
+                        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+                        reported.push(match on_disk {
+                            true => self.stop_disk(generation, &id, true).await.unwrap_or_else(|| self.stopped(generation)),
+                            false => self.stopped(generation),
+                        });
+                    } else if self.lifecycle().is_ok_and(|l| l.disk()) && self.flushing_since(generation).is_some() {
+                        // a disk's stop kept for its flush, still running: past
+                        // what it keeps, it goes (`stop_disk`), looked at each minute
+                        let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
+                        reported.extend(self.stop_disk(generation, &id, true).await);
                     }
                 }
                 Action::Meter { from_ms, to_ms } => {
@@ -1679,7 +1732,13 @@ impl ComputerCell {
     async fn arm(&self, generation: u64, id: &str, hosts: Vec<String>) -> CellResult<bool> {
         let g = JsValue::from_f64(generation as f64);
         let disk = self.disk_props(id, generation)?;
-        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(RUNTIME_IDLE_MS as f64), js::to_js(&hosts), self.codestorage_through_egress(), disk]).await?;
+        // a disk's stop kept for its flush keeps its idle stop moved past
+        // what its guest waits, an adoption's arm too (Codex on #1567)
+        let idle = match self.flushing_since(generation) {
+            Some(_) => fpac::guest_flush_ms(self.flush_kept_for(generation)),
+            None => RUNTIME_IDLE_MS,
+        };
+        let armed = self.call("arm", &[g, id.into(), JsValue::from_f64(idle as f64), js::to_js(&hosts), self.codestorage_through_egress(), disk]).await?;
         let done = armed.as_bool() == Some(true);
         if done {
             *self.armed.borrow_mut() = Some((generation, hosts));
@@ -1833,8 +1892,12 @@ impl ComputerCell {
         });
         match plan {
             Restore::Backup => env["RESTORE_PENDING"] = json!("1"),
-            // its boot mounts /data from its disk (docs/computers.md, "A disk")
-            Restore::Disk => env["FRAGMENT_DISK"] = json!("fpac"),
+            // its boot mounts /data from its disk (docs/computers.md, "A disk"),
+            // and on SIGTERM waits for its final flush past the platform's own wait
+            Restore::Disk => {
+                env["FRAGMENT_DISK"] = json!("fpac");
+                env["FRAGMENT_DISK_FLUSH_MS"] = json!(fpac::guest_flush_ms(fpac::flush_kept_ms(self.rules().unsaved_max_ms)).to_string());
+            }
             Restore::Snapshot { .. } | Restore::Nothing => {}
         }
         env
@@ -1848,7 +1911,12 @@ impl ComputerCell {
         let Some(disk) = self.disk()? else { return Ok(JsValue::NULL) };
         let prefix = fpac::disk_prefix(id).ok_or_else(|| CellError::host(format!("{id} names no disk")))?;
         let name = prefix.trim_start_matches("disks/").trim_end_matches('/').to_string();
-        Ok(js::to_js(&json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) })))
+        let mut props = json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) });
+        // the lever's outage (`fpac-refuse-at-stop`): its route answers 503 until then
+        if let Some(until) = self.refuse_until.get().filter(|u| *u > js::now_ms()) {
+            props["refuseUntil"] = json!(until);
+        }
+        Ok(js::to_js(&props))
     }
 
     /// One start: from the snapshot when it caches the current save for the
@@ -2110,6 +2178,12 @@ impl ComputerCell {
     async fn try_start(&self, generation: u64, planned: &Planned) -> Result<(), Unstarted> {
         let id = self.must(MetaKey::Id)?;
         let g = JsValue::from_f64(generation as f64);
+        if planned.plan == Restore::Disk {
+            // what its sleep keeps its container for, as its guest is told
+            // (`flush_kept_for`): a bound changed later never outlasts it
+            let kept = fpac::flush_kept_ms(self.rules().unsaved_max_ms);
+            self.set_meta(MetaKey::DiskFlushKept, &format!("{generation} {kept}")).map_err(Unstarted::Failed)?;
+        }
         let env = js::to_js(&self.guest_env(&id, &planned.image, &planned.plan));
         let snapshot_js = match &planned.plan {
             Restore::Snapshot { id, .. } => JsValue::from_str(id),
@@ -2785,11 +2859,11 @@ impl ComputerCell {
     /// within its bound, its sleep's steps by `until_ms` (`snapshot_ms`). A
     /// snapshot that fails forgets nothing: the one kept is still its own
     /// save's.
-    async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Event {
+    async fn stop(&self, generation: u64, saved: bool, until_ms: i64) -> Option<Event> {
         let g = JsValue::from_f64(generation as f64);
         let id = self.meta(MetaKey::Id).ok().flatten().unwrap_or_default();
         if self.lifecycle().is_ok_and(|l| l.disk()) {
-            return self.stop_disk(generation, &id).await;
+            return self.stop_disk(generation, &id, false).await;
         }
         let t0 = js::now_ms();
         let mut exited = None;
@@ -2819,7 +2893,7 @@ impl ComputerCell {
         // one line per stop (lesson 14): whether its guest went on its
         // signal, whether the destroy took, and how long the stop took
         console_log!("{}", json!({ "computer": id, "stopped": generation, "saved": saved, "exited": exited, "gone": gone, "ms": js::now_ms() - t0 }));
-        Event::Asleep { generation }
+        Some(Event::Asleep { generation })
     }
 
     /// A disk's sleep's end (docs/computers.md, "A disk"): the signal, its
@@ -2827,36 +2901,130 @@ impl ComputerCell {
     /// snapshot: its disk is what it wakes on. Its line says what its wait
     /// left unshipped and whether its head is clean after it; what it left
     /// is kept for its next start's line.
-    async fn stop_disk(&self, generation: u64, id: &str) -> Event {
+    /// A guest still flushing past its wait (R2 unreachable: FPAC tries
+    /// again) keeps its container, nothing reported, its stop looked at
+    /// again (`Action::Look`, an overdue `Action::Stop`, which signals it no
+    /// more), until its flush lands and it exits, or `fpac::flush_kept`'s
+    /// bound passes from its first signal: then it goes, that life unsaved
+    /// (FIN-783).
+    async fn stop_disk(&self, generation: u64, id: &str, look: bool) -> Option<Event> {
         let g = JsValue::from_f64(generation as f64);
         let t0 = js::now_ms();
         let mut exited = false;
+        // what its start's guest was told it waits (`flush_kept_for`), and
+        // its first signal's time, a stop kept for its flush already begun
+        let kept = self.flush_kept_for(generation);
+        let mut signalled = self.flushing_since(generation);
+        let within = |since: i64| fpac::flush_wait_ms(since, js::now_ms(), kept) > 0;
         if self.container_running().await {
-            let _ = self.call("signal", &[g, JsValue::from_f64(15.0)]).await;
-            exited = self.call("exited", &[JsValue::from_f64(DISK_EXIT_WAIT_MS as f64)]).await.ok().and_then(|r| r.as_bool()) == Some(true);
+            if signalled.is_none() && !look {
+                // the lever's outage of its route, from this signal
+                self.refuse_at_stop(generation, id).await;
+                // its runtime's idle stop past what its guest waits, which it
+                // would otherwise cut short (`RUNTIME_IDLE_MS` from its last
+                // use, about 10 minutes into a sleep)
+                let idle = fpac::guest_flush_ms(kept);
+                if self.call("idleFor", &[g.clone(), JsValue::from_f64(idle as f64)]).await.ok().and_then(|r| r.as_bool()) != Some(true) {
+                    console_error!("{}", json!({ "computer": id, "disk": "idle stop unmoved", "generation": generation }));
+                }
+                // kept for its flush only once its signal went: one unsent is
+                // waited for, then destroyed, as before
+                let now = js::now_ms();
+                if self.call("signal", &[g.clone(), JsValue::from_f64(15.0)]).await.ok().and_then(|r| r.as_bool()) == Some(true) {
+                    match self.set_meta(MetaKey::DiskFlushing, &format!("{generation} {now}")) {
+                        Ok(()) => signalled = Some(now),
+                        Err(e) => console_error!("{}", json!({ "computer": id, "disk": "flushing unkept", "generation": generation, "error": e.message })),
+                    }
+                } else {
+                    console_error!("{}", json!({ "computer": id, "disk": "unsignalled", "generation": generation }));
+                }
+            }
+            // a look waits for nothing; a stop, its exit wait, never past what it keeps
+            let wait = match (look, signalled) {
+                (true, _) => 0,
+                (false, Some(since)) => fpac::flush_wait_ms(since, js::now_ms(), kept),
+                (false, None) => DISK_EXIT_WAIT_MS,
+            };
+            exited = wait > 0 && self.call("exited", &[JsValue::from_f64(wait as f64)]).await.ok().and_then(|r| r.as_bool()) == Some(true);
+            match signalled {
+                Some(since) if !exited && within(since) => {
+                    // one line per look while it flushes (lesson 14)
+                    console_log!("{}", json!({ "computer": id, "disk": "flushing", "generation": generation, "ms": js::now_ms() - since }));
+                    return None;
+                }
+                // a look at a stop that signalled nothing yet: its own stop's
+                None if look => return None,
+                _ => {}
+            }
+        } else if signalled.is_some() {
+            // a stop kept for its flush, its container gone on its own since
+            exited = true;
         }
         let gone = self.destroy(generation, "asleep").await.unwrap_or(false);
+        if !gone {
+            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
+            // still there: while its guest's own wait lasts from its signal
+            // (`fpac::guest_flush_ms`, past which it exits by itself), its
+            // stop goes on, its destroy asked again at each look (Codex on
+            // #1567). Past it, or with no signal sent, its life ends and the
+            // next start waits for the container to go, as any start after a
+            // destroy that failed does (`earlier_runs`, `StartBlocked`: no
+            // strike at first, and nothing starts beside it): bounded, its
+            // queued wake kept
+            if signalled.is_some_and(|since| js::now_ms() < since.saturating_add(fpac::guest_flush_ms(kept))) {
+                return None;
+            }
+        }
+        let _ = self.delete_meta(MetaKey::DiskFlushing);
         let (status, drain_ms) = match self.disk_drained.borrow_mut().take() {
             Some((d, status, ms)) if d == generation => (status, ms),
             _ => (None, 0),
         };
         // its final flush posts a clean head of its own life
         let clean = self.disk().ok().flatten().and_then(|d| d.head).is_some_and(|h| h.epoch == generation && h.clean);
-        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - t0, exited, clean };
+        // its stop's time from its first signal, a stop kept for its flush too
+        let facts = SleepFacts { generation, unshipped: status.map(|s| s.unshipped_bytes), misses: status.map(|s| s.misses), refetches: status.map(|s| s.refetches), drain_ms, stop_ms: js::now_ms() - signalled.unwrap_or(t0), exited, clean };
         console_log!("{}", start_line::sleep_line(id, &facts));
-        let kept = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
-        if let Err(e) = kept {
+        let kept_row = self.exec("UPDATE disk SET slept_unshipped = ? WHERE id = 0", vec![facts.unshipped.map_or(SqlStorageValue::Null, |u| SqlStorageValue::from(u as i64))]);
+        if let Err(e) = kept_row {
             console_error!("{}", json!({ "computer": id, "slept": "unkept", "generation": generation, "error": e.message }));
-        }
-        if !gone {
-            console_error!("{}", json!({ "computer": id, "stopped": generation, "gone": false }));
         }
         // a final flush that posted no clean head: its last moments' writes
         // may not have shipped, and its life ends unsaved, saying so
-        if clean {
-            Event::Asleep { generation }
-        } else {
-            Event::AsleepUnshipped { generation }
+        Some(if clean { Event::Asleep { generation } } else { Event::AsleepUnshipped { generation } })
+    }
+
+    /// When start `generation`'s disk's sleep first signalled its guest
+    /// (`MetaKey::DiskFlushing`), if it did.
+    fn flushing_since(&self, generation: u64) -> Option<i64> {
+        let kept = self.meta(MetaKey::DiskFlushing).ok().flatten()?;
+        let (g, ms) = kept.split_once(' ')?;
+        (g.parse::<u64>().ok()? == generation).then(|| ms.parse::<i64>().ok()).flatten()
+    }
+
+    /// How long start `generation`'s sleep keeps its container for its
+    /// final flush (`fpac::flush_kept_ms`), as its start told its guest
+    /// (`MetaKey::DiskFlushKept`): a bound changed since never outlasts
+    /// what the guest waits. A start that recorded none (a release before)
+    /// keeps its exit wait alone, as then.
+    fn flush_kept_for(&self, generation: u64) -> i64 {
+        let told = self.meta(MetaKey::DiskFlushKept).ok().flatten().and_then(|t| {
+            let (g, ms) = t.split_once(' ')?;
+            (g.parse::<u64>().ok()? == generation).then(|| ms.parse::<i64>().ok()).flatten()
+        });
+        told.map_or(DISK_EXIT_WAIT_MS, fpac::flush_kept_ms)
+    }
+
+    /// The test lever `fpac-refuse-at-stop`: its route refuses (503, as R2
+    /// down) for its ms from this stop's signal, its intercepts armed again
+    /// with that in their props. Taken once.
+    async fn refuse_at_stop(&self, generation: u64, id: &str) {
+        let Some(ms) = self.cfg.test_hooks.then(|| self.take_ms(MetaKey::RefuseAtStop)).flatten() else { return };
+        self.refuse_until.set(Some(js::now_ms() + ms));
+        let hosts = self.armed.borrow().as_ref().filter(|(a, _)| *a == generation).map(|(_, h)| h.clone()).unwrap_or_default();
+        match self.arm(generation, id, hosts).await {
+            Ok(true) => console_log!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "generation": generation, "ms": ms })),
+            other => console_error!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "armed": other.ok() })),
         }
     }
 
@@ -3070,6 +3238,8 @@ impl ComputerCell {
         let targets = self.relay_targets()?;
         view.relay = Some(fragment_proto::computer::RelayOffer { hosts: targets.iter().filter(|t| t.port == fragment_core::relay::PORT).map(|t| t.host.clone()).collect(), port: fragment_core::relay::PORT });
         view.relay_targets = Some(targets);
+        // the agents whose SimpleX link moved: their cores never start here
+        view.simplex_moved = self.simplex_moves()?.into_iter().filter(|(_, r)| r["moved"] == true).map(|(agent, _)| agent).collect();
         // the key each agent's fragment signs as: a door's ticket is checked with it
         for agent in &mut view.agents {
             agent.key = fragment_core::npub::parse(&agent.identity);
@@ -3273,6 +3443,7 @@ impl ComputerCell {
                     s
                 }),
             room_first: saves.update_waits(),
+            simplex_moved: vec![],
         }))
     }
 
@@ -3612,6 +3783,33 @@ impl ComputerCell {
                 let view = self.view().await?;
                 Ok(json!({ "computer": id, "simplex": view.simplex }))
             }
+            "damage" | "fail" => {
+                // `damage`: one byte of each flipped, its length kept, as
+                // FIN-775's handover came out of a container (its receiver's
+                // check refuses it); `fail`: each answered 500 once its
+                // container answered (a handover's answer lost after it packed)
+                let path = b.path.as_deref().filter(|p| p.starts_with('/')).ok_or_else(|| CellError::invalid("damage and fail name their bridge's path"))?;
+                let times = b.times.unwrap_or(1);
+                let method = if b.op == "damage" { "damagePort" } else { "failPort" };
+                self.call(method, &[JsValue::from_str(path), JsValue::from_f64(f64::from(times))]).await?;
+                Ok(json!({ "computer": id, "op": b.op, "path": path, "times": times }))
+            }
+            "fail-set" => {
+                // the next `times` sets of its move records to step `path` fail
+                let times = b.times.unwrap_or(1);
+                self.failing_sets.replace((b.path.clone().unwrap_or_default(), times));
+                Ok(json!({ "computer": id, "op": b.op, "times": times }))
+            }
+            "fail-read" => {
+                // the next `times` reads of its SimpleX move records marked
+                // moved fail, as a computer gone unavailable once its core
+                // stopped would (simplex_move.rs's failure handler, unable
+                // to read its mark); a move's first read, before its
+                // handover, reads as ever
+                let times = b.times.unwrap_or(1);
+                self.failing_reads.set(times);
+                Ok(json!({ "computer": id, "op": b.op, "times": times }))
+            }
             "always-on" => {
                 let on = b.on.ok_or_else(|| CellError::invalid("always-on names on: true or false"))?;
                 self.drive(Event::AlwaysOn { on }).await?;
@@ -3747,6 +3945,15 @@ impl ComputerCell {
             }
             // a head that will not open, its newest, the one it had kept as
             // the head before: asleep only, as a life's last post leaves it
+            // its disk's route refuses (503, as R2 down) for `ms` from its
+            // next stop's signal, at most `fpac::guest_flush_ms`'s bound: its
+            // final flush tried again until it lands (FIN-783)
+            "fpac-refuse-at-stop" => {
+                let max = fpac::guest_flush_ms(fpac::flush_kept_ms(self.rules().unsaved_max_ms));
+                let ms = b.ms.map(i64::from).filter(|ms| (1..=max).contains(ms)).ok_or_else(|| CellError::invalid(format!("fpac-refuse-at-stop names its ms, 1 to {max}")))?;
+                self.set_meta(MetaKey::RefuseAtStop, &ms.to_string())?;
+                Ok(json!({ "computer": id, "refuseAtStop": ms }))
+            }
             "fpac-head" => {
                 let line = b.head.as_deref().ok_or_else(|| CellError::invalid("fpac-head names a head"))?;
                 let head = fpac::Head::decode(line).ok_or_else(|| CellError::invalid("fpac-head's head is not one"))?;
@@ -3921,6 +4128,13 @@ impl ComputerCell {
                 json_response(&self.view().await?)
             }
             // an operator's pin (orgs.rs); its owner's is `PUT …/image`
+            // the operators' SimpleX move of one of its agents (admin.rs
+            // `simplex_move`): its record, and its bridge's word on its link
+            "computer/simplex-moves" => {
+                let b: Value = body_json(&mut req).await?;
+                json_response(&self.simplex_record(&b).await?)
+            }
+            "computer/simplex-hand" => self.simplex_hand(req).await,
             "computer/pin" => {
                 let b: Pin = body_json(&mut req).await?;
                 json_response(&self.pin(&b.image).await?)
@@ -4779,6 +4993,256 @@ impl ComputerCell {
 
     /// A request to one of its ports, from its owner (a session the router
     /// read from the cookie, or a signer it resolved).
+    /// The operators' SimpleX moves, by agent (`MetaKey::SimplexMoves`).
+    /// The record this object wrote; one that does not decode is
+    /// corruption, said so, never read as no moves (which would let a
+    /// computer start a core for a link its door runs).
+    fn simplex_moves(&self) -> CellResult<serde_json::Map<String, Value>> {
+        match self.meta(MetaKey::SimplexMoves)? {
+            None => Ok(serde_json::Map::new()),
+            Some(t) => crate::json_text::<serde_json::Map<String, Value>>(&t).map_err(|e| CellError::host(format!("its SimpleX move record does not decode: {e}"))),
+        }
+    }
+
+    fn set_simplex_moves(&self, moves: &serde_json::Map<String, Value>) -> CellResult<()> {
+        match moves.is_empty() {
+            true => self.exec("DELETE FROM meta WHERE key = ?", vec![MetaKey::SimplexMoves.key().into()]),
+            false => self.set_meta(MetaKey::SimplexMoves, &Value::Object(moves.clone()).to_string()),
+        }
+    }
+
+    /// A call to its bridge's SimpleX routes (images/bridge simplex/http.rs,
+    /// on its screen port), as the operators' move makes them, its answer
+    /// used only whole: each names its SHA-256 (`x-door-sha256`), a save's
+    /// its save's, which its door's bucket checks as it stores it (a
+    /// handover's, streamed on, never held here). None: damaged on its way
+    /// (FIN-775; Codex's round on f434be3bb), its bytes not what it names.
+    async fn simplex_call(&self, req: worker_sys::web_sys::Request) -> CellResult<Option<Response>> {
+        let out = self.call("port", &[JsValue::from_f64(f64::from(SIMPLEX_PORT)), JsValue::from(req), JsValue::from_f64(0.0)]).await?;
+        let resp: worker_sys::web_sys::Response = out.dyn_into().map_err(|_| CellError::host("the port answered no Response"))?;
+        let mut r = Response::from(resp);
+        if r.status_code() == 200 && r.headers().get("x-door-length")?.is_some() {
+            return Ok(Some(r));
+        }
+        let (status, headers) = (r.status_code(), r.headers().clone());
+        // an older image's bridge names none: no move begins on it
+        let named = headers.get("x-door-sha256")?.ok_or_else(|| CellError::new(ErrorCode::Conflict, "its bridge names no SHA-256 for its answers, as an older image's: restart its computer onto this release's image"))?;
+        let bytes = r.bytes().await?;
+        if named != hex::encode(Sha256::digest(&bytes)) {
+            return Ok(None);
+        }
+        Ok(Some(Response::from_bytes(bytes)?.with_status(status).with_headers(headers)))
+    }
+
+    /// One agent's SimpleX move record (`op`): `read` (it, whether its
+    /// computer is awake, and its bridge's word on its link then), `set`
+    /// (its connector, door, step and chat, as its move goes on; never its
+    /// mark, which only its handover and way back set), or `forget` (done
+    /// or gone back; never one still marked moved). A `set` names the step
+    /// it moves on from (`from`, "" for none: a `go` claiming it), and is
+    /// refused when the record stands elsewhere: two `go`s at once never
+    /// both act on one step (two connectors made, two cores of one link).
+    /// Whether the `fail-set` lever fails this set (to `step`), counted.
+    fn failing_set(&self, step: &Value) -> bool {
+        let mut f = self.failing_sets.borrow_mut();
+        let fails = f.1 > 0 && *step == f.0.as_str();
+        f.1 -= u32::from(fails);
+        fails
+    }
+
+    async fn simplex_record(&self, b: &Value) -> CellResult<Value> {
+        let agent = b["agent"].as_str().filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name its agent"))?;
+        if self.rows("SELECT 1 FROM agents WHERE fragment = ?", vec![agent.into()])?.is_empty() {
+            return Err(CellError::new(ErrorCode::NotFound, format!("{agent} is not on this computer")));
+        }
+        let mut moves = self.simplex_moves()?;
+        match b["op"].as_str().unwrap_or("") {
+            "read" if self.failing_reads.get() > 0 && moves.get(agent).is_some_and(|r| r["moved"] == true) => {
+                self.failing_reads.set(self.failing_reads.get() - 1);
+                Err(CellError::host("the test lever's failed read"))
+            }
+            "read" => {
+                // whether it is awake and always on, its own word (its
+                // bridge's view of always-on is read a minute late)
+                let life = self.lifecycle()?;
+                let awake = matches!(life.phase, Phase::Awake { .. });
+                let mut link = Value::Null;
+                if awake {
+                    let asked = worker_sys::web_sys::Request::new_with_str(&format!("http://computer/simplex/state?agent={agent}")).map_err(|_| CellError::host("a request"))?;
+                    // its bridge still starting answers nothing yet: said so;
+                    // one damaged on its way says so too, read as nothing
+                    link = match self.simplex_call(asked).await {
+                        Ok(Some(mut r)) => json!({ "status": r.status_code(), "said": r.read_json::<Value>().await.unwrap_or(Value::Null) }),
+                        Ok(None) => json!({ "status": 0, "said": "its answer came damaged on its way: ask again" }),
+                        Err(e) => json!({ "status": 0, "said": e.message }),
+                    };
+                }
+                Ok(json!({ "record": moves.get(agent), "awake": awake, "alwaysOn": life.always_on(), "link": link }))
+            }
+            "set" if self.failing_set(&b["record"]["step"]) => Err(CellError::host("the test lever's failed set")),
+            "set" => {
+                let from = b["from"].as_str().ok_or_else(|| CellError::invalid("a set names the step it moves on from (from)"))?;
+                let at = moves.get(agent).map(|r| r["step"].as_str().unwrap_or("").to_string());
+                if at.as_deref().unwrap_or("") != from || (at.is_some() && from.is_empty()) {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is at {:?}, not {from:?}: {MOVED_ON}; ask again", at.unwrap_or_default())));
+                }
+                // a `go`'s own claim, when it names one: another's claim
+                // (this one let go by a `back`, then claimed again) is not it
+                if let Some(claim) = b["claim"].as_str() {
+                    if moves.get(agent).is_some_and(|r| r["claim"].as_str() != Some(claim)) {
+                        return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move is another `go`'s now: this one stops")));
+                    }
+                }
+                let rec = moves.entry(agent.to_string()).or_insert_with(|| json!({ "moved": false }));
+                for k in ["connector", "door", "step", "chat", "staged", "claim"] {
+                    if let Some(v) = b["record"].get(k).filter(|v| v.is_string() || v.is_boolean()) {
+                        rec[k] = v.clone();
+                    }
+                }
+                let rec = rec.clone();
+                self.set_simplex_moves(&moves)?;
+                Ok(rec)
+            }
+            "forget" => {
+                if moves.get(agent).is_some_and(|r| r["moved"] == true) {
+                    return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX is marked moved: its way back first")));
+                }
+                moves.remove(agent);
+                self.set_simplex_moves(&moves)?;
+                Ok(json!({ "forgot": agent }))
+            }
+            op => Err(CellError::invalid(format!("no op {op:?}: read, set or forget"))),
+        }
+    }
+
+    /// An operator's SimpleX move of an agent (`x-door-agent`) at its
+    /// bridge, its computer awake (asleep, it is woken, and asked again):
+    /// its handover (`x-door-act: handover`), marked moved before its
+    /// bridge is asked, so no start after this one runs its core; its
+    /// ticket kept, so an answer lost is asked again with the same one,
+    /// which its bridge answers with the same save. Or its way back
+    /// (`back`): its door's newest save the
+    /// body (`x-door-behind` passed on), marked moved no more once its
+    /// bridge placed it. Its bridge's answer is passed on as it came; a
+    /// handover it refused at its first ask (a 4xx but `moved`: it changed
+    /// nothing) is marked moved no more, a retried one's never
+    /// (`fragment_core::door::handover_refusal_unmarks`).
+    async fn simplex_hand(&self, req: Request) -> CellResult<Response> {
+        let header = |k: &str| req.headers().get(k).ok().flatten().unwrap_or_default();
+        let (act, agent, behind) = (header("x-door-act"), header("x-door-agent"), header("x-door-behind"));
+        if !matches!(self.lifecycle()?.phase, Phase::Awake { .. }) {
+            self.wake(Wake::Tab).await?;
+            return Err(CellError::new(ErrorCode::Conflict, "its computer is waking: ask again in a moment").retry_after(PORT_RETRY_MS));
+        }
+        let rec = self.simplex_moves()?.get(&agent).cloned().ok_or_else(|| CellError::new(ErrorCode::Conflict, format!("no SimpleX move of {agent:?} begun here")))?;
+        let computer = self.must(MetaKey::Id)?;
+        let handover = match act.as_str() {
+            "handover" => true,
+            "back" => false,
+            _ => return Err(CellError::invalid("x-door-act: handover or back")),
+        };
+        // asked again with the ticket it was given (its first ask's answer
+        // lost, or its save damaged on its way)
+        let retried = handover && rec["moved"] == true && rec["ticket"].is_object();
+        let ticket = match rec["ticket"].clone() {
+            t if retried => t,
+            _ => crate::fragment::ask(&self.env, &agent, "computer/simplex-move", &json!({ "computer": computer, "act": act })).await?,
+        };
+        // a handover marked before its bridge is asked; a way back unmarked
+        // only once its bridge placed its door's save (until then a retry
+        // is the way back again, never a connector deleted beside a link
+        // still moved)
+        if handover {
+            // its record as it stands after that wait, looked at and marked
+            // with nothing awaited between: a `back` that let the move go
+            // meanwhile leaves no move to mark, so no core is stopped for
+            // none (Codex's round on 8cacd32d1)
+            if self.simplex_moves()?.get(&agent).map(|r| r["step"].clone()) != Some(json!("made")) {
+                return Err(CellError::new(ErrorCode::Conflict, format!("{agent}'s SimpleX move was let go, or went on, as its handover began: nothing handed over")));
+            }
+            self.simplex_move_update(&agent, |r| {
+                r["moved"] = json!(true);
+                r["ticket"] = ticket.clone();
+            })?;
+            // a snapshot from before its link moved is let go (it is only a
+            // cache): a start from it could boot an image whose bridge knows
+            // no move, its old core beside its door's (Codex's round on f434be3bb)
+            self.update_saves(|s| s.snapshot_failed())?;
+        }
+        let headers = worker_sys::web_sys::Headers::new().map_err(|_| CellError::host("headers"))?;
+        let init = worker_sys::web_sys::RequestInit::new();
+        init.set_method("POST");
+        if handover {
+            headers.set("content-type", "application/json").map_err(|_| CellError::host("a header"))?;
+            init.set_body(&JsValue::from_str(&ticket.to_string()));
+        } else {
+            headers.set("x-door-ticket", &ticket.to_string()).map_err(|_| CellError::host("a header"))?;
+            headers.set("x-door-behind", if behind == "1" { "1" } else { "0" }).map_err(|_| CellError::host("a header"))?;
+            // its SHA-256, the door's, which the bridge checks before it
+            // places it (a copy damaged on its way, seen once on Cloudflare,
+            // is refused and asked for again); streamed, never held whole
+            // here (a save may be 64 MiB, past what an isolate holds twice)
+            if let Some(sha) = req.headers().get("x-door-sha256")?.filter(|s| s.len() == 64) {
+                headers.set("x-door-sha256", &sha).map_err(|_| CellError::host("a header"))?;
+            }
+            if let Some(body) = req.inner().body() {
+                init.set_body(&body);
+            }
+        }
+        init.set_headers(&headers);
+        let path = if handover { "handover" } else { "back" };
+        let asked = worker_sys::web_sys::Request::new_with_str_and_init(&format!("http://computer/simplex/{path}?agent={agent}"), &init).map_err(|_| CellError::host("a request"))?;
+        // its answer damaged on its way: nothing marked or unmarked here (it
+        // may have placed its save, or refused), asked again as damaged, as
+        // its bridge's own refusal of a damaged save is
+        let Some(mut answer) = self.simplex_call(asked).await? else {
+            return Ok(json_response(&json!({ "error": "damaged", "message": "its bridge's answer came damaged on its way (FIN-775): ask again" }))?.with_status(422));
+        };
+        let status = answer.status_code();
+        let unmark = |r: &mut Value| {
+            r["moved"] = json!(false);
+            r["ticket"] = Value::Null;
+        };
+        // its bridge's link not moved: placed by a way back whose answer
+        // was lost before this one, or never handed over; either way its
+        // computer runs it, so the mark goes (a retry is never stuck)
+        let not_moved = !handover && status == 409 && {
+            let said: Value = answer.read_json().await.unwrap_or(Value::Null);
+            let not = said["error"] == "not_moved";
+            answer = json_response(&said)?.with_status(status);
+            not
+        };
+        if !handover && (status == 200 || not_moved) {
+            self.simplex_move_update(&agent, unmark)?;
+            if not_moved {
+                return json_response(&json!({ "back": "already" }));
+            }
+        } else if handover && status == 200 {
+            if let Some(chat) = answer.headers().get("x-simplex-chat")?.filter(|c| fragment_proto::valid_fragment_name(c)) {
+                self.simplex_move_update(&agent, |r| r["chat"] = json!(chat))?;
+            }
+        } else if handover && (400..500).contains(&status) {
+            let said: Value = answer.read_json().await.unwrap_or(Value::Null);
+            if fragment_core::door::handover_refusal_unmarks(said["error"].as_str().unwrap_or(""), retried) {
+                self.simplex_move_update(&agent, unmark)?;
+            }
+            return Ok(json_response(&said)?.with_status(status));
+        }
+        Ok(answer)
+    }
+
+    /// One agent's move record changed as it stands now: read again with
+    /// nothing awaited before its write, so another agent's move written
+    /// meanwhile (its own request's turn) is never put back as it was.
+    fn simplex_move_update(&self, agent: &str, change: impl FnOnce(&mut Value)) -> CellResult<()> {
+        let mut moves = self.simplex_moves()?;
+        if let Some(rec) = moves.get_mut(agent) {
+            change(rec);
+            self.set_simplex_moves(&moves)?;
+        }
+        Ok(())
+    }
+
     async fn port(&self, req: Request) -> CellResult<Response> {
         let owner = self.must(MetaKey::Owner)?;
         let who = match (req.headers().get(SESSION_HEADER)?, req.headers().get(SIGNER_HEADER)?) {

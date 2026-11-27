@@ -216,8 +216,9 @@ impl FragmentCell {
 
     /// The page a shot of this fragment opens now, or why it gets none: its
     /// kind and visibility (`card::visitor`), its own origin, and its
-    /// owner's ledger, asked as a create is (a guest makes nothing; past the
-    /// overdraft, nothing new is made). A ledger that does not answer
+    /// owner's ledger, asked as a write is (a ledger with no plan pays for
+    /// nothing; past the overdraft, nothing is written; a canceled seat's
+    /// app, made before, still gets its card). A ledger that does not answer
     /// refuses none, as for writes.
     async fn card_page(&self) -> CellResult<Result<card::Visit, Skip>> {
         let visitor = match card::visitor(self.kind()?, self.visibility()?) {
@@ -226,9 +227,9 @@ impl FragmentCell {
         };
         let origin = self.cfg.outside_origin(&self.name()?);
         let owner = self.must(MetaKey::Owner)?;
-        match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Create, fragment: None, by_owner: true }).await {
+        match crate::ledger::ask(&self.env, &owner, &MaySpend { spend: Spend::Write, fragment: None, by_owner: true }).await {
             Ok(_) => {}
-            Err(e) if matches!(e.refused, Some(Refused::GuestCreates | Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),
+            Err(e) if matches!(e.refused, Some(Refused::GuestPayer | Refused::ReadOnly { .. })) => return Ok(Err(Skip::OwnerPays)),
             Err(e) => console_error!("{}", json!({ "event": "card.standing-unknown", "message": e.message })),
         }
         Ok(Ok(card::visit(&origin, visitor, &self.must(MetaKey::ViewToken)?)))

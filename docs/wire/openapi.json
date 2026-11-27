@@ -1,6 +1,26 @@
 {
   "components": {
     "schemas": {
+      "AppUse": {
+        "additionalProperties": false,
+        "description": "An app of its person's that may use a secret, and the name its code\nfills it by: `{{KEY}}` in a job's fetch, which an app's own secret of\nthat name fills first (docs/secrets.md, \"A person's Vault\").",
+        "properties": {
+          "app": {
+            "description": "The app's fragment name.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The secret's name in its code (`^[A-Z][A-Z0-9_]{0,63}$`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "app",
+          "key"
+        ],
+        "type": "object",
+        "x-fragment-direction": "both"
+      },
       "Archived": {
         "description": "Its answer: the fragment, and whether it is archived now.",
         "properties": {
@@ -815,6 +835,21 @@
         ],
         "type": "object",
         "x-fragment-direction": "both"
+      },
+      "LendSecret": {
+        "additionalProperties": false,
+        "description": "`PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under\n`key`, the name its code fills, in place of any name it had for that\napp; nothing else of the secret changes, so a lend never puts back what\nits person changed meanwhile (FIN-615, PR 12).",
+        "properties": {
+          "key": {
+            "description": "The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
       },
       "ListWatchFrame": {
         "description": "A frame of `GET /api/fragments/watch`, the socket that follows a\nsigner's list. Frames name nothing: on `changed` the page reads its\nlist, and what it is told (`GET /api/notices`), again with its own\ncredential. The cell writes these as constant text\n(cell/src/principal.rs).\n\nOpen (`x-fragment-open`, docs/wire): a reader ignores a frame it does\nnot know (the shell's list, the iOS app).",
@@ -2474,6 +2509,39 @@
         "type": "object",
         "x-fragment-direction": "out"
       },
+      "PostsHeld": {
+        "description": "Its answer: those of them the channel holds as the asker's own posts,\nin the order asked. It never answers of another poster's.",
+        "properties": {
+          "held": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "held"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "PostsHeldAsk": {
+        "additionalProperties": false,
+        "description": "`POST /api/f/<name>/channels/<channel>/held`: the post ids (each one a\n`PostRecord::id`) the asker wonders whether it posted there, at most\n`limits::HELD_IDS_MAX`.",
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
       "Present": {
         "description": "One socket's presence (`data` is never `null` in a `hello`).",
         "properties": {
@@ -2519,9 +2587,17 @@
         "description": "`PUT /api/vault/{secret}`: a secret set (or set again), whole. Only its\nperson sets one, so only they say where its value goes; set again with\nno value, it keeps the one it holds and goes where this says. Its\n`Debug` shows the value, as the wire's checker needs: never print one.",
         "properties": {
           "agents": {
-            "description": "The agents that may use it, each by its fragment's name: at least\none (Paul, 2026-11-09: per agent).",
+            "description": "The agents that may use it, each by its fragment's name (Paul,\n2026-11-09: per agent). With `apps`, at least one between them.",
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "apps": {
+            "default": [],
+            "description": "The apps that may use it, each under the name its code fills\n(FIN-615, PR 12: per app, as per agent).",
+            "items": {
+              "$ref": "#/components/schemas/AppUse"
             },
             "type": "array"
           },
@@ -2862,6 +2938,13 @@
           "agents": {
             "items": {
               "type": "string"
+            },
+            "type": "array"
+          },
+          "apps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/AppUse"
             },
             "type": "array"
           },
@@ -3839,6 +3922,156 @@
           }
         ],
         "summary": "Show a record as it is written to the channel's live readers; never stored.",
+        "tags": [
+          "channels"
+        ]
+      }
+    },
+    "/api/f/{name}/channels/{channel}/held": {
+      "post": {
+        "operationId": "channels.held",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The channel's name.",
+            "in": "path",
+            "name": "channel",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PostsHeldAsk"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PostsHeld"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`too_large`",
+            "x-fragment-codes": [
+              "too_large"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.",
         "tags": [
           "channels"
         ]
@@ -7551,6 +7784,156 @@
           }
         ],
         "summary": "Sets a secret, whole: its value (sealed, never answered), the hosts it may go to, where it goes on a request, and the agents that may use it.",
+        "tags": [
+          "vault"
+        ]
+      }
+    },
+    "/api/vault/{secret}/apps/{app}": {
+      "put": {
+        "operationId": "vault.lend",
+        "parameters": [
+          {
+            "description": "The secret's name: 1 to 32 of a-z, 0-9 and -.",
+            "in": "path",
+            "name": "secret",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "The app's fragment name, in full.",
+            "in": "path",
+            "name": "app",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LendSecret"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Secret"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`forbidden`",
+            "x-fragment-codes": [
+              "forbidden"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Lends a secret to an app of the signer's under the name its code fills, and changes nothing else of it: its value, hosts, place, agents and other apps stay as they are.",
         "tags": [
           "vault"
         ]

@@ -260,6 +260,9 @@ async fn main() {
             // its SimpleX cores stopped and reaped first, within the shutdown's bound
             fragment_bridge::simplex::run::stop_cores(Duration::from_millis(limits::SHUTDOWN_MS_MAX / 2)).await;
             if disk {
+                // the stub's script's `at-stop` writes, which only this
+                // flush ships (none on any other runtime)
+                fragment_bridge::runtime::script::write_at_stop().await;
                 flush_disk().await;
             }
             match ran {

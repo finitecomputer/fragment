@@ -665,6 +665,16 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("live-held") => json!({ "held": self.meta(MetaKey::TestLiveHeld)?.is_some() }),
+            Some("refuse-turns") => {
+                // while on, this agent fragment refuses its places' word
+                // on its turns, as one that does not answer (runs_on.rs `turns_in`)
+                if body["on"] == true {
+                    self.set_meta(MetaKey::TestRefuseTurns, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestRefuseTurns)?;
+                }
+                json!({ "ok": true })
+            }
             Some("hold-woke") => {
                 // while on, a wake with something due waits before it reads
                 // the ledger (jobs.rs `held_woke`), at most 20 s

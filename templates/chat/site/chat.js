@@ -1062,6 +1062,8 @@ export function mount(root) {
       want(b.asks);
     } else if (b.kind === "turn.start") {
       t.asker = typeof b.asker === "string" ? b.asker : null;
+      // a hand-off's: whose ask its agent's words were on (FIN-615, PR 16a)
+      t.carried = typeof b.carried === "string" ? b.carried : null;
       t.cause = b.cause ?? null;
       t.startAt = record.at;
       if (state.pending && b.cause?.channel === "chat" && b.cause?.seq === state.pending.seq) state.pending = null;
@@ -2170,7 +2172,11 @@ export function mount(root) {
 
   function workingNode(t) {
     const agent = t ? t.agent : state.pending?.target;
-    const forWhom = t?.asker && t.asker !== state.me?.principal ? ` for ${who(t.asker).name}` : "";
+    // whose ask it works on: an ask carried on from another agent names
+    // both ("for Ben (via Juniper)"); its reader's own, no one
+    const me = state.me?.principal;
+    const forWhom = t?.carried && t.carried !== me && t.asker ? ` for ${who(t.carried).name} (via ${who(t.asker).name})`
+      : t?.asker && t.asker !== me ? ` for ${who(t.asker).name}` : "";
     const name = agent ? who(agent).name : "The agent";
     const phase = inRoster(agent)?.phase;
     const present = state.here.some((p) => p.principal === agent);
@@ -2178,7 +2184,7 @@ export function mount(root) {
     const late = !t && !readying && state.pending && Date.now() - Math.max(state.pending.since, state.readyAt) >= PENDING_MS;
     const said = t ? `${name} is working${forWhom}`
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
-      : late ? `${name} has not started a reply yet.`
+      : late ? `${name} hasn't picked this up yet.`
       : readying || phase === "asleep" ? `${name} is getting ready…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.key : "pending"}`;

@@ -38,11 +38,12 @@ routes are docs/api.md, Ledger; seats and Stripe are docs/billing.md.
   registry, in its own order (`SetSeat.seq`; an older one is refused as
   `StaleSeat`). `past_due` keeps this month's credit and gets no new
   month's. `canceled` stops agents; fragments serve and take writes on
-  what is left.
+  what is left, and they make no new one.
 - **Guests pay for nothing.** A guest's ledger refuses their paid calls
   and meter batches (`guest_payer`), and a guest makes no fragment
-  (`guest_creates`), both 403. Fragments shared with them that they edit
-  bill their owners.
+  (`guest_creates`), both 403. Making one is a guest's whenever the
+  ledger has no plan or its seat is `canceled` (`permit::guest`, decision
+  49). Fragments shared with them that they edit bill their owners.
 - **Caps** (decision 26). Each fragment has a monthly cap on its owner's
   ledger (`CAP_DEFAULT` until the owner sets one), counting every charge
   in that fragment, the owner's own agents' included. At it, the
@@ -111,8 +112,8 @@ finitecomputer/celld#33 (no gate waits on such a write); one without it holds
 the answer for the count as for any write.
 
 Not metered: a person's own keys (decisions 37 and 60: their provider
-bills them); a computer's time kept for its failed saves (the platform's:
-docs/computers.md); a computer's saves, an app facet's database and git
+bills them); a computer's time kept for its failed saves, and a disk's
+sleep's stop, its final flush awaited (the platform's: docs/computers.md); a computer's saves, an app facet's database and git
 storage (the debt ledger).
 
 ## Usage

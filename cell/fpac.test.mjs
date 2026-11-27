@@ -210,3 +210,19 @@ test("a small post's body is read within its bound as it comes: one that names n
     assert.ok(seen.pulled <= Math.ceil(bound / 1024) + 2, `${path} read ${seen.pulled} KiB of a 1 MiB body, not past its ${bound} bytes`);
   }
 });
+
+test("a disk whose props name an outage refuses every call as unreachable until it ends, then answers again", async () => {
+  const b = bucket();
+  const bytes = new TextEncoder().encode("its last words");
+  const out = { ...DISK, refuseUntil: Date.now() + 60_000 };
+  const during = (method, path, init = {}) => fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, duplex: "half", ...init }), b, out, RULES, async () => ({ answer: "taken" }), async () => ({}));
+  const put = await during("PUT", "/o/e7/s1", { body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": String(bytes.length) } });
+  assert.equal(put.status, 503, "a put: unreachable, so FPAC tries again");
+  assert.equal(b.objects.size, 0, "nothing stored");
+  assert.equal((await during("POST", "/head", { body: "7 - - -" })).status, 503, "its head too");
+  assert.equal((await during("GET", "/o/e7/s1")).status, 503);
+  // once it ends, the same put lands
+  const after = await fpacRoute(new Request("http://fpac.fragment.internal/o/e7/s1", { method: "PUT", body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": String(bytes.length) }, duplex: "half" }), b, { ...DISK, refuseUntil: Date.now() - 1 }, RULES, async () => ({}), async () => ({}));
+  assert.equal(after.status, 201);
+});
+
