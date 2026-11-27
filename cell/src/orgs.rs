@@ -8,6 +8,7 @@
 
 use fragment_core::mail::PRODUCT;
 use fragment_core::governance::Answer;
+use fragment_core::permit;
 use fragment_proto::org::{NewContentAdmin, OrgMember, SeatKind, SeatStatus, SetSleeps};
 use fragment_proto::{limits, ErrorCode};
 use worker::*;
@@ -203,12 +204,12 @@ pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, 
     let refused = || CellError::new(ErrorCode::Forbidden, "only the deployment's operators do this");
     match caller(env, req, url, Payload::Read(bytes))? {
         Caller::Key(key) => {
-            let listed = cfg.is_operator(Some(&key), "")?;
+            let listed = cfg.operators()?;
             match ask_registry(env, &crate::registry::calls::Resolve { key: key.clone() }).await {
                 // a person's: named by their identity
-                Ok(who) => (listed || cfg.is_operator(Some(&key), &who.id)?).then_some(who.id).ok_or_else(refused),
+                Ok(who) => permit::operator(listed, Some(&who.id), [key.as_str()]).then_some(who.id).ok_or_else(refused),
                 // a listed key no one holds: named by itself
-                Err(e) if listed && e.code == ErrorCode::Unauthenticated => Ok(fragment_core::npub::encode(&key)),
+                Err(e) if e.code == ErrorCode::Unauthenticated && permit::operator(listed, None, [key.as_str()]) => Ok(fragment_core::npub::encode(&key)),
                 Err(e) => Err(e),
             }
         }
@@ -223,18 +224,9 @@ pub(crate) async fn operator(env: &Env, cfg: &Config, req: &Request, url: &Url, 
 /// `GET /admin` the page's (shell.rs `admin_page`).
 pub(crate) async fn session_operator(env: &Env, cfg: &Config, token: String) -> CellResult<Option<String>> {
     let view = ask_registry(env, &crate::registry::calls::View { identity: None, by: By::Session(token) }).await?;
-    if cfg.is_operator(None, &view.id)? {
-        return Ok(Some(view.id));
-    }
     // bounded: an identity holds at most KEYS_PER_IDENTITY_MAX keys
-    for k in view.keys.iter().filter(|k| k.revoked_at.is_none()) {
-        if let Some(hex) = fragment_core::npub::parse(&k.npub) {
-            if cfg.is_operator(Some(&hex), "")? {
-                return Ok(Some(view.id));
-            }
-        }
-    }
-    Ok(None)
+    let keys: Vec<String> = view.keys.iter().filter(|k| k.revoked_at.is_none()).filter_map(|k| fragment_core::npub::parse(&k.npub)).collect();
+    Ok(permit::operator(cfg.operators()?, Some(&view.id), keys.iter().map(String::as_str)).then_some(view.id))
 }
 
 /// A log page's `before`, a log entry's number when named.

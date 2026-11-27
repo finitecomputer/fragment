@@ -148,6 +148,12 @@ pub(super) struct MemberRow {
 pub(super) const MEMBER_COLUMNS: &str = "m.id, m.org, m.person, m.email, m.admin, m.seat, m.comped, m.sleeps, m.added_at";
 
 impl MemberRow {
+    /// Whether this row makes its person an admin of `org`, when one is
+    /// named (`permit::org_admin`, the one billing-admin test).
+    pub(super) fn admins(&self, org: Option<&str>) -> bool {
+        fragment_core::permit::org_admin(self.admin != 0, &self.org, org)
+    }
+
     pub(super) fn seat(&self) -> CellResult<Option<SeatKind>> {
         self.seat.as_deref().map(|s| SeatKind::parse(s).ok_or_else(|| CellError::host(format!("org_members.seat of {} is {s:?}", self.id)))).transpose()
     }
@@ -514,10 +520,7 @@ impl RegistryCell {
             (None, None) => return Err(CellError::invalid("an operator names the org")),
             (Some(by), named) => {
                 let who = self.person_by(by)?;
-                let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins see it").because(Reason::NotAdmin))?;
-                if named.is_some_and(|id| id != m.org) {
-                    return Err(CellError::new(ErrorCode::Forbidden, "only an org's admins see it"));
-                }
+                let m = self.member_of(&who.id)?.filter(|m| m.admins(named)).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins see it").because(Reason::NotAdmin))?;
                 self.stored_org(&m.org)?
             }
         };

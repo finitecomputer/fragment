@@ -469,13 +469,13 @@ impl Config {
         }
     }
 
-    /// Whether the signer (its key, 64 hex, if it signed, and its identity)
-    /// is one of the deployment's operators.
-    pub fn is_operator(&self, key: Option<&str>, identity: &str) -> CellResult<bool> {
+    /// The keys (64 hex) the deployment lists as its operators, for
+    /// `permit::operator`: none when it lists none.
+    pub fn operators(&self) -> CellResult<&[String]> {
         match &self.operators {
-            None => Ok(false),
+            None => Ok(&[]),
             Some(Err(e)) => Err(CellError::host(format!("FRAGMENT_OPERATORS: {e}"))),
-            Some(Ok(listed)) => Ok(listed.iter().any(|l| Some(l.as_str()) == key || fragment_core::npub::identity_of(l) == identity)),
+            Some(Ok(listed)) => Ok(listed),
         }
     }
 
