@@ -634,7 +634,8 @@ $("ask-cancel").onclick = () => askDialog.close();
 // consent is the dialog's Allow, which arms after `ASK_ARM_MS` and no page
 // can press; against spam, one ask is open at a time, across every frame
 // (another is answered "busy"), and a frame told Not now asks nothing more
-// until the shell loads it again (`micDeclined`). Nothing is exempt. Allow
+// until the shell loads it again (`micDeclined`), but a release chat's (its
+// page the platform's, asking only from its own mic button). Allow
 // is kept on their row (`PUT /api/fragments/{name}/microphone`), and its
 // frame is made again, lent it (for chats, once: their next frames are made
 // lent); Not now keeps nothing. Answered `{fragment: KIND.micAnswer, nonce,
@@ -663,12 +664,15 @@ addEventListener("message", async (event) => {
     if (stale) relend(name);
   };
   if (row.microphone) return lent();
-  if (micDeclined.has(frame)) return answer(false, "declined");
+  // a release chat's page is the platform's, asking only from its own mic
+  // button: its ask again is its person pressing it again, never held
+  const holds = !row.chatRelease;
+  if (holds && micDeclined.has(frame)) return answer(false, "declined");
   // the words and the yes kept, both from its row's one fact (`chatRelease`)
   const title = titleOf(name);
   const asked = row.chatRelease ? "Use your microphone in chats?" : own(row) ? `Let ${title} use your microphone?` : `Let ${title}, an app shared with you, use your microphone?`;
   const said = await askPerson({ of: `mic:${name}`, title: asked, go: "Allow", cancel: "Not now" });
-  if (said === "declined" || said === "not answered") micDeclined.add(frame);
+  if (holds && (said === "declined" || said === "not answered")) micDeclined.add(frame);
   if (said !== "yes") return answer(false, said);
   try {
     await api("PUT", `/api/fragments/${seg(name)}/microphone`, { microphone: true });

@@ -1062,7 +1062,9 @@ never does. The fragment's ⋯ takes it back: its open pages, in every tab
 change). The consent is the dialog's own Allow, which arms after a moment
 and no page can press; against spam, one ask is open at a time across
 every frame ("busy"), and a frame told Not now asks nothing more until the
-shell loads it again (its Reload, or opened again). Nothing is exempt.
+shell loads it again (its Reload, or opened again). A release chat's page
+is the platform's and asks only from its own mic button, so its mic
+pressed again asks again.
 
 ### Listed records
 

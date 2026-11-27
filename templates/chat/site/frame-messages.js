@@ -97,7 +97,7 @@ export const MESSAGES = Object.freeze({
     kind: "microphone?",
     from: "a frame of a fragment on the person's list → the shell",
     fields: "{nonce}",
-    says: "Asks to use the person's microphone: the shell asks them once per app in its one ask dialog (\"Let Recipes use your microphone?\", \"an app shared with you\" when not theirs; one yes for every release chat), one ask open at a time across every frame, and none from a frame told Not now until the shell loads it again; Allow is kept on their row and the frame is made again, lent it. Answered `microphone`.",
+    says: "Asks to use the person's microphone: the shell asks them once per app in its one ask dialog (\"Let Recipes use your microphone?\", \"an app shared with you\" when not theirs; one yes for every release chat), one ask open at a time across every frame, and none from a frame told Not now until the shell loads it again (a release chat's, its mic pressed again, asks again); Allow is kept on their row and the frame is made again, lent it. Answered `microphone`.",
   },
   micAnswer: {
     kind: "microphone",

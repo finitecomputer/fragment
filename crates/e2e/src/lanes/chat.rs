@@ -333,9 +333,9 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
 /// browser refused the chat's page without asking: PR 582). Valid: before
 /// the yes, the frame navigates at once naming no microphone (no read of
 /// the chat's status first); a press on the mic asks "Use your microphone in
-/// chats?", whose Not now keeps nothing and records nothing; pressed again,
-/// it opens nothing (its frame told Not now asks nothing more until the
-/// shell loads it again: here, the tab reloaded); then Allow keeps the yes
+/// chats?", whose Not now keeps nothing and records nothing; pressed again
+/// (a release chat's ask is its own mic's press, never held after Not now),
+/// it asks again, and Allow keeps the yes
 /// on their row for this chat and their other, and makes the frame again
 /// naming the chat's origin, where the chat is told it may record (Chrome's
 /// fake, as a person's Allow) and a press records at once; the chat's ⋯ in
@@ -424,24 +424,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
         asked && title == "Use your microphone in chats?" && buttons == json!(["Not now", "Allow"]) && closed && lent(chat) == Some(false) && on == false,
         json!({ "asked": asked, "title": title, "buttons": buttons, "closed": closed, "recording": on }),
     );
-    // pressed again: its frame told Not now asks nothing more, the chat as any app
-    chrome.eval_in_frame(&shell, chat, "(delete document.body.dataset.micAnswer, true)")?;
-    press_mic(chrome)?;
-    let answered = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, "document.body.dataset.micAnswer ?? ''").ok().and_then(|v| v.as_str().map(|t| t.contains("\"error\":\"declined\""))) == Some(true));
-    let shut = chrome.eval(&shell, &format!("!{dialog}.open"))? == json!(true);
-    s.ok(
-        "pressed again, the chat's frame told Not now opens nothing (as any app's): it is told so, until the shell loads it again",
-        answered && shut,
-        json!({ "answered": answered, "no dialog": shut, "why": if answered { Value::Null } else { why(chrome) } }),
-    );
-    // the tab reloaded: the chat opened again, its press asks again; Allow, and the frame made again, lent it
-    chrome.eval(&shell, "(window.__before = true, location.reload(), true)")?;
-    let listed = chrome.until(&shell, &format!("!window.__before && !document.getElementById('layout').hidden && !!document.querySelector({})", js(&row)), wait);
-    if listed {
-        chrome.click(&shell, &row)?;
-    }
-    let up = listed && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
-    anyhow::ensure!(up, "the chat came up again after its tab's reload");
+    // pressed again: its own mic's press asks again (a release chat's is never held), and Allow
     press_mic(chrome)?;
     let again = chrome.until(&shell, &asking, wait);
     let armed = chrome.until(&shell, "!document.getElementById('ask-go').disabled", wait);
