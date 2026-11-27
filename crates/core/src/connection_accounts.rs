@@ -86,16 +86,7 @@ pub fn described(account: &Value) -> PipesAccount {
 /// An account with no id, or more than `catalog::ACCOUNTS_MAX`, is a
 /// fault: nothing of such an answer is used.
 pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, String> {
-    let entries = answer["data"].as_array().ok_or("Pipes' list of providers has no data")?;
-    let Some(entry) = entries.iter().find(|e| e["slug"] == provider) else { return Ok(vec![]) };
-    let accounts = match &entry["connected_accounts"] {
-        Value::Null => return Ok(vec![]),
-        Value::Array(a) => a,
-        _ => return Err(format!("Pipes' {provider} entry lists its accounts as no list")),
-    };
-    if accounts.len() > usize::from(crate::catalog::ACCOUNTS_MAX) {
-        return Err(format!("Pipes lists {} accounts at {provider}, more than its limit of {}", accounts.len(), crate::catalog::ACCOUNTS_MAX));
-    }
+    let accounts = entry_accounts(answer, provider)?;
     let mut out = Vec::with_capacity(accounts.len());
     for a in accounts {
         let account = described(a);
@@ -108,6 +99,23 @@ pub fn listed(answer: &Value, provider: &str) -> Result<Vec<PipesAccount>, Strin
     }
     out.sort_unstable_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
     Ok(out)
+}
+
+/// The account objects Pipes' plural list names at `provider`, read as
+/// they are: none where it has no entry, or one of no accounts; a list
+/// that is none, or longer than `catalog::ACCOUNTS_MAX`, a fault.
+pub(crate) fn entry_accounts<'a>(answer: &'a Value, provider: &str) -> Result<&'a [Value], String> {
+    let entries = answer["data"].as_array().ok_or("Pipes' list of providers has no data")?;
+    let Some(entry) = entries.iter().find(|e| e["slug"] == provider) else { return Ok(&[]) };
+    let accounts = match &entry["connected_accounts"] {
+        Value::Null => return Ok(&[]),
+        Value::Array(a) => a,
+        _ => return Err(format!("Pipes' {provider} entry lists its accounts as no list")),
+    };
+    if accounts.len() > usize::from(crate::catalog::ACCOUNTS_MAX) {
+        return Err(format!("Pipes lists {} accounts at {provider}, more than its limit of {}", accounts.len(), crate::catalog::ACCOUNTS_MAX));
+    }
+    Ok(accounts)
 }
 
 /// The account a person's agents use at a provider unless one picked

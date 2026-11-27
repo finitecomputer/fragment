@@ -346,14 +346,21 @@ pub struct Account {
 /// well remove a newer connect's. An import that answered with no known
 /// outcome is no longer under way, and the lasting fence (`FENCE`) holds
 /// against it should it land later.
+/// A wipe (`fence_all`, `settled`) also waits that import out: it is held
+/// `connection_accounts::UNCERTAIN_HOLD_MS` from its end, so a wipe lists
+/// the person's accounts only once it landed or never will (FIN-588).
 /// The Registry keeps it in memory, not a table: each finish runs inside
 /// the Registry and ends with it, so the one a restart starts has none
-/// under way. It holds one entry per finish under way, each gone at its
-/// answer (an exchange and an import, each within its vendor's timeout).
+/// under way, nor any hold (FIN-659). It holds one entry per finish under
+/// way, each gone at its answer (an exchange and an import, each within
+/// its vendor's timeout), and one per import ended unknown in the last
+/// `UNCERTAIN_HOLD_MS`.
 #[derive(Debug, Default)]
 pub struct Finishing {
     next: u64,
     under_way: Vec<Finish>,
+    /// Imports ended with no known outcome, each held until its time.
+    uncertain: Vec<(Account, i64)>,
 }
 
 #[derive(Debug)]
@@ -361,6 +368,8 @@ struct Finish {
     id: u64,
     account: Account,
     step: Step,
+    /// Its import answered with a known outcome (`imported`).
+    known: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -381,7 +390,7 @@ impl Finishing {
     /// `may_import` and `end`.
     pub fn begin(&mut self, account: Account) -> u64 {
         self.next += 1;
-        self.under_way.push(Finish { id: self.next, account, step: Step::Exchanging });
+        self.under_way.push(Finish { id: self.next, account, step: Step::Exchanging, known: false });
         self.next
     }
 
@@ -398,11 +407,24 @@ impl Finishing {
         may
     }
 
-    /// Callback `id` answered, whatever it answered.
-    pub fn end(&mut self, id: u64) {
-        let before = self.under_way.len();
-        self.under_way.retain(|f| f.id != id);
-        assert_eq!(self.under_way.len() + 1, before, "a callback ends once");
+    /// Callback `id`'s import answered with a known outcome (it imported,
+    /// or was refused): its end holds nothing (`end`).
+    pub fn imported(&mut self, id: u64) {
+        let f = self.under_way.iter_mut().find(|f| f.id == id).expect("a callback's import answers while it is under way");
+        assert_eq!(f.step, Step::Importing, "only an import answers");
+        f.known = true;
+    }
+
+    /// Callback `id` answered, whatever it answered, at `now`: one that
+    /// imported with no known outcome (`imported` never said) is held
+    /// until `now + UNCERTAIN_HOLD_MS`, as it may land at Pipes meanwhile.
+    pub fn end(&mut self, id: u64, now: i64) {
+        let at = self.under_way.iter().position(|f| f.id == id).expect("a callback ends once");
+        let f = self.under_way.remove(at);
+        self.uncertain.retain(|(_, until)| *until > now);
+        if f.step == Step::Importing && !f.known {
+            self.uncertain.push((f.account, now.saturating_add(crate::connection_accounts::UNCERTAIN_HOLD_MS)));
+        }
     }
 
     /// A disconnect of `account`: each of its callbacks still exchanging
@@ -418,6 +440,42 @@ impl Finishing {
             cancelled += 1;
         }
         Ok(cancelled)
+    }
+
+    /// A wipe's fence (FIN-588; `wipe_connections`) of each of a person's
+    /// `accounts` at once, all or none: refused, nothing cancelled, while
+    /// any of them imports, or an import at any ended unknown and is held
+    /// still (`end`); else each callback exchanging at any of them
+    /// cancelled (how many). Once it answers, no callback begun before it
+    /// lands at Pipes after the wipe lists their accounts there (a new one
+    /// needs a live session, which the wipe's begin ended).
+    pub fn fence_all(&mut self, accounts: &[Account], now: i64) -> Result<usize, Importing> {
+        if !self.settled_where(|a| accounts.contains(a), now) {
+            return Err(Importing);
+        }
+        let mut cancelled = 0;
+        for a in accounts {
+            cancelled += self.fence(a).expect("none of them imports");
+        }
+        Ok(cancelled)
+    }
+
+    /// Whether no import of `subject`'s (at `issuer`, any provider) is under
+    /// way or held with its outcome unknown at `now`.
+    /// Every hold of an import whose outcome was unknown let go, as their
+    /// while running out (a test's lever, as `Deciding::forget_uncertain`).
+    pub fn forget_uncertain(&mut self) {
+        self.uncertain.clear();
+    }
+
+    pub fn settled(&self, issuer: &str, subject: &str, now: i64) -> bool {
+        self.settled_where(|a| a.issuer == issuer && a.subject == subject, now)
+    }
+
+    /// No import at an account `of` names is under way, nor ended unknown
+    /// and still held at `now`.
+    fn settled_where(&self, of: impl Fn(&Account) -> bool, now: i64) -> bool {
+        !self.under_way.iter().any(|f| f.step == Step::Importing && of(&f.account)) && !self.uncertain.iter().any(|(a, until)| *until > now && of(a))
     }
 }
 
@@ -729,7 +787,7 @@ mod tests {
         assert!(f.may_import(b1) && f.may_import(d1), "another person's, and another provider's, import");
         assert_eq!(f.fence(&a), Ok(0), "a cancelled callback holds no fence back");
         for id in [a1, a2, b1, d1] {
-            f.end(id);
+            f.end(id, 0);
         }
         assert!(f.under_way.is_empty());
 
@@ -739,12 +797,88 @@ mod tests {
         assert_eq!(f.fence(&a), Err(Importing), "an import under way refuses the disconnect");
         assert_eq!(f.fence(&b), Ok(0), "and no other account's");
         assert!(f.may_import(exchanging), "a refused fence cancelled nothing");
-        f.end(newer);
+        f.end(newer, 0);
         assert_eq!(f.fence(&a), Err(Importing));
-        f.end(exchanging);
+        f.end(exchanging, 0);
         assert_eq!(f.fence(&a), Ok(0), "once the imports answered, the disconnect goes");
         assert!(f.under_way.is_empty());
         assert_eq!(Finishing::default().fence(&a), Ok(0), "a restarted Registry has none under way");
+    }
+
+    /// Goal: a wipe never lists a person's accounts at Pipes while an
+    /// import of theirs may land after (FIN-588): its fence of every
+    /// connection of theirs is refused while one imports at any, and
+    /// changes nothing then (no callback cancelled); once none does, each
+    /// exchanging is cancelled and imports nothing, and another person's
+    /// is untouched. Method: imports and exchanges at two providers.
+    #[test]
+    fn a_wipes_fence_waits_for_every_import_and_cancels_every_exchange() {
+        let (mail, drive, other) = (account("user-a", "mail"), account("user-a", "drive"), account("user-b", "mail"));
+        let theirs = [mail.clone(), drive.clone()];
+        let mut f = Finishing::default();
+        let (importing, exchanging, others) = (f.begin(drive.clone()), f.begin(mail.clone()), f.begin(other.clone()));
+        assert!(f.may_import(importing));
+        assert_eq!(f.fence_all(&theirs, 0), Err(Importing), "an import at drive refuses the wipe's fence");
+        assert!(f.may_import(exchanging), "a refused fence cancelled nothing: mail's exchange still imports");
+        assert_eq!(f.fence_all(&theirs, 0), Err(Importing));
+        f.imported(importing);
+        f.imported(exchanging);
+        f.end(importing, 0);
+        f.end(exchanging, 0);
+        let late = f.begin(mail.clone());
+        assert_eq!(f.fence_all(&theirs, 0), Ok(1), "no import under way: mail's exchange cancelled");
+        assert!(!f.may_import(late), "it imports nothing after the wipe's fence");
+        assert!(f.may_import(others), "another person's callback imports");
+        assert_eq!(f.fence_all(&[], 0), Ok(0), "no connections: nothing fenced");
+        assert_eq!(Finishing::default().fence_all(&theirs, 0), Ok(0), "a restarted Registry has none under way");
+    }
+
+    /// Goal: an import whose outcome is unknown (a timeout or a fault after
+    /// it was sent) may still land at Pipes, so a wipe neither lists nor
+    /// ends the person while it is held (FIN-588; `crate::connection_accounts::
+    /// UNCERTAIN_HOLD_MS`), of one account or several; one known to have
+    /// answered holds nothing, nor does one cancelled before it imported;
+    /// the hold runs out, and is another person's or issuer's none.
+    /// Method: imports ended known and unknown, asked either side of the hold.
+    #[test]
+    fn a_wipe_waits_out_an_import_whose_outcome_is_unknown() {
+        use crate::connection_accounts::UNCERTAIN_HOLD_MS as HOLD;
+        let (mail, drive, other) = (account("user-a", "mail"), account("user-a", "drive"), account("user-b", "mail"));
+        let theirs = [mail.clone(), drive.clone()];
+        let mut f = Finishing::default();
+        let lost = f.begin(drive.clone());
+        assert!(f.may_import(lost));
+        f.end(lost, 1_000);
+        assert_eq!(f.fence_all(&theirs, 1_000), Err(Importing), "an import timed out after it was sent: the wipe waits");
+        assert!(!f.settled("issuer", "user-a", 1_000), "and its end waits too");
+        assert_eq!(f.fence_all(&theirs, 1_000 + HOLD - 1), Err(Importing), "until its hold runs out");
+        assert_eq!(f.fence_all(std::slice::from_ref(&other), 1_000), Ok(0), "another person's wipe does not wait for it");
+        assert!(f.settled("issuer", "user-b", 1_000) && f.settled("other-issuer", "user-a", 1_000));
+        assert_eq!(f.fence_all(&theirs, 1_000 + HOLD), Ok(0), "its hold out: the wipe fences, then lists again");
+        assert!(f.settled("issuer", "user-a", 1_000 + HOLD));
+
+        let known = f.begin(mail.clone());
+        assert!(f.may_import(known));
+        assert!(!f.settled("issuer", "user-a", 100_000), "an import under way is not settled");
+        f.imported(known);
+        f.end(known, 100_000);
+        assert_eq!(f.fence_all(&theirs, 100_000), Ok(0), "an import with a known answer holds nothing");
+        let cancelled = f.begin(mail.clone());
+        assert_eq!(f.fence_all(&theirs, 100_000), Ok(1));
+        assert!(!f.may_import(cancelled));
+        f.end(cancelled, 100_000);
+        let exchanged = f.begin(mail.clone());
+        f.end(exchanged, 100_000);
+        assert_eq!(f.fence_all(&theirs, 100_000), Ok(0), "one cancelled, or ended before it imported, sent Pipes nothing");
+        assert!(f.settled("issuer", "user-a", 100_000));
+        for i in 0..3 {
+            let id = f.begin(mail.clone());
+            assert!(f.may_import(id));
+            f.end(id, 200_000 + i);
+        }
+        assert_eq!(f.fence_all(&theirs, 200_002 + HOLD - 1), Err(Importing), "the latest hold counts");
+        assert_eq!(f.fence_all(&theirs, 200_002 + HOLD), Ok(0));
+        f.forget_uncertain();
     }
 
     #[test]
@@ -761,8 +895,8 @@ mod tests {
     fn a_callback_ends_once() {
         let mut f = Finishing::default();
         let id = f.begin(account("user-a", "mail"));
-        f.end(id);
-        f.end(id);
+        f.end(id, 0);
+        f.end(id, 0);
     }
 
     #[test]

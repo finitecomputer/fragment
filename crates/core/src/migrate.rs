@@ -153,6 +153,8 @@ pub const REGISTRY: Class = Class {
         step!("comp_until", "registry/0010_comp_until.sql"),
         step!("connection_signin_access", "registry/0011_connection_signin_access.sql"),
         step!("move_comps_open", "registry/0012_move_comps_open.sql"),
+        step!("wipe_revokes", "registry/0013_wipe_revokes.sql"),
+        step!("wipe_revokes_ended", "registry/0014_wipe_revokes_ended.sql"),
     ],
     variants: &[],
     kept: &[],

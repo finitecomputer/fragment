@@ -320,6 +320,13 @@ async fn run_step(env: &Env, facts: &WipeFacts, step: Step, deadline: i64) -> Ce
             let b = ask_registry(env, &WipeBilling { identity: person.to_string() }).await?;
             Ok(Did { done: b.done, deleted: b.orgs, note: b.note, ..Did::default() })
         }
+        // each account Pipes holds for their WorkOS user, its grant revoked
+        // and then deleted (connections.rs `wipe`; FIN-588), while the
+        // registry still names that user: done once none is left
+        Step::Connections => {
+            let w = crate::connections::wipe(env, Config::from_env(env), person, deadline).await?;
+            Ok(Did { done: w.done(), deleted: w.deleted, note: w.note(), ..Did::default() })
+        }
         // its rows go as the registry records it done (`WipeStep`)
         Step::Registry => Ok(Did::finished(0)),
     }

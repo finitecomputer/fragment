@@ -85,6 +85,7 @@ pub mod site;
 pub mod steps;
 pub mod stripe;
 pub mod wipe;
+pub mod wipe_connections;
 pub mod swap;
 pub mod transcribe;
 pub mod tree;

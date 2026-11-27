@@ -334,6 +334,12 @@ pub async fn pipes_accounts(env: &Env, api: &str, user: &str) -> CellResult<Valu
     }
     let key = required(env, store::WORKOS_KEY).await?;
     let (status, answer) = post_json(&format!("{api}/user_management/users/{user}/data_providers?supports_multiple_connections=true"), Method::Get, Some(&key), None, "WorkOS").await?;
+    // a user WorkOS no longer knows (deleted there) holds no account: so a
+    // wipe of their person finishes (`connections::wipe`), and their
+    // connections read as none
+    if status == 404 {
+        return Ok(json!({ "object": "list", "data": [] }));
+    }
     if status != 200 {
         return Err(CellError::new(ErrorCode::UpstreamFailed, format!("WorkOS did not list the connected accounts ({status}): {}", answer["message"].as_str().unwrap_or("no reason given"))));
     }
@@ -489,13 +495,20 @@ pub async fn pipes_delete(env: &Env, api: &str, provider: &str, user: &str, acco
 /// other sends the token alone, as before. No redirects or retries, and
 /// nothing of its answer is kept: the request carries a credential.
 pub async fn connection_revoke(env: &Env, provider: &str, revoke: &str, form: &str) -> CellResult<bool> {
+    Ok(connection_revoke_answer(env, provider, revoke, form).await?.0 == 200)
+}
+
+/// `connection_revoke`'s request, answered whole: (status, the provider's
+/// answer as JSON, none when it is not), for a wipe, which reads it
+/// (`fragment_core::wipe_connections::revoked`). Nothing of it is logged.
+pub async fn connection_revoke_answer(env: &Env, provider: &str, revoke: &str, form: &str) -> CellResult<(u16, Value)> {
     use fragment_core::catalog::ClientAuth;
     let client = Config::from_env(env).providers.get(provider).filter(|p| p.client_auth == ClientAuth::Basic).and_then(|p| p.connection_oauth.as_ref());
     let authorization = match client {
         Some(o) => fragment_core::connection_signin::client_authorization(ClientAuth::Basic, &o.client_id, &required(env, &store::connection_secret(provider)).await?),
         None => None,
     };
-    Ok(confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await?.0 == 200)
+    confidential_request(revoke, Method::Post, "application/x-www-form-urlencoded", authorization.as_deref(), form).await
 }
 
 /// Whether the deployment binds the operator's key `name`
