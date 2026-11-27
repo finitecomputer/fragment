@@ -184,6 +184,16 @@ test("pairing: the account that sends the code is proposed, its owner confirms i
   assert.deepEqual([raced, w.app.state().pairing], [{ proposed: false, conflict: true }, null]);
 });
 
+test("pairing: a code pasted into Slack keeps its formatting (inline code, as the setup page shows it) and still pairs", async () => {
+  const w = await connected(world());
+  const { code } = w.app.pair({}, w.owner);
+  const out = await w.app.intake({ record: dm(PAUL, `\`pair ${code}\``, "1790000014.000100") }, w.job());
+  assert.deepEqual(out, { proposed: true, conflict: false }, "as a real Slack sent it (FIN-508's workspace test)");
+  assert.equal(w.published.length, 0, "a pairing code is never the agent's");
+  const bold = w.app.pair({}, w.owner).code;
+  assert.deepEqual(await w.app.intake({ record: dm(PAUL, `*pair ${bold}*`, "1790000015.000100") }, w.job()), { proposed: true, conflict: false });
+});
+
 test("a room takes others' messages up to its cap an hour, then says once that the agent rests; its owner's are never counted", async () => {
   const w = await paired(await connected(world()));
   for (let i = 0; i < 30; i += 1) await w.app.intake({ record: mention(MAPLE, `<@U0BOT> q${i}`, `17900001${String(i).padStart(2, "0")}.000100`) }, w.job());

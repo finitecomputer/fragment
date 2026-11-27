@@ -422,7 +422,9 @@ export class App extends DurableObject {
     // a reply in the thread of a channel's message; in a DM, in its thread
     // if it has one
     const thread = m.dm ? m.thread : (m.thread ?? m.ts);
-    const pairing = m.dm ? PAIR.exec(m.text.trim()) : null;
+    // pasted into Slack, the code keeps the page's formatting (inline
+    // code, `pair …`): its marks around the line are not the code's
+    const pairing = m.dm ? PAIR.exec(m.text.trim().replace(/^[`*_~\s]+|[`*_~\s]+$/g, "")) : null;
     if (pairing) {
       const who = await names(job, api, [m.user]);
       const { proposed, conflict } = await job.call("propose", { code: pairing[1], user: m.user, dm: m.channel, name: who.get(m.user) ?? "someone" });
