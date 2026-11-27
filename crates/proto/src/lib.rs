@@ -130,6 +130,12 @@ pub mod limits {
     /// A mandate's text, at most: its names are each bounded, so one the
     /// platform makes is about half this.
     pub const MANDATE_MAX_BYTES: usize = 1024;
+    /// How long a card the platform asks on stays answerable (docs/api.md,
+    /// "One ask"): a mandate's day, as its asker's request lasts.
+    pub const ASK_LIFE_MS: i64 = MANDATE_LIFE_MS;
+    /// The platform's cards open in one chat at once: past it an agent's
+    /// next ask there is refused (429) until one is answered or runs out.
+    pub const ASKS_OPEN_MAX: u64 = 8;
     /// Open turns an agent fragment holds as its places open them (cell
     /// runs_on.rs `turn_opened`): past it a turn is refused, and its ask
     /// waits.

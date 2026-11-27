@@ -479,21 +479,16 @@ fitViewport();
 // any of it changes: a rename or a new picture reaches the page as it
 // reaches this one.
 // It may then ask for one of them in its fragment (`{fragment: KIND.addAgent,
-// identity, nonce}`): the shell asks its person, in its own dialog (never
-// in the frame: a page is code its author or an agent wrote, so it asks
-// and never grants), "Add Fred to <title>?", and only on their Add adds that
+// identity, nonce}`): the shell asks its person, in its one ask dialog
+// (`askPerson`), "Add Fred to <title>?", and only on their Add adds that
 // agent as an editor, as making a chat does (decision 36: an owner shares
 // their own fragment with their own agent). It answers `{fragment:
 // "agent-added", nonce, identity, ok, error?}`: `error` "declined" on
-// Cancel, "not answered" after ADD_CONFIRM_MS, "busy" while another ask is
+// Cancel, "not answered" after ASK_MS, "busy" while another ask is
 // open. Nothing is remembered: every add is asked. A frame of a fragment
 // the person does not own (shared with them) learns nothing and adds no
 // one, and no page adds anyone but the person's own agents. It names no
 // template: any page of theirs may use it.
-const ADD_CONFIRM_MS = 90_000;
-// Add arms this long after the dialog shows, so the click or key that sent
-// the page's message cannot confirm it (the share sheet's 800 ms).
-const ADD_ARM_MS = 800;
 const rosterTo = new Map(); // a frame's window -> its fragment's origin
 const roster = () => {
   const phase = state.computer?.phase;
@@ -553,8 +548,9 @@ addEventListener("message", async (event) => {
   if (typeof d.nonce !== "string" || d.nonce.length > 64) return;
   const agent = state.agents.get(d.identity);
   if (!agent) return answer(false, "that is not one of your agents");
-  const said = await confirmAdd(agent, name);
-  if (said !== "added") return answer(false, said);
+  const who = titleOf(agent.fragment);
+  const said = await askPerson({ of: agent.identity, title: `Add ${who}?`, text: `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`, go: "Add" });
+  if (said !== "yes") return answer(false, said);
   // the frame may have gone, or shown another page, while its person read
   if (frame.contentWindow !== asker || !frame.isConnected) return;
   try {
@@ -564,48 +560,99 @@ addEventListener("message", async (event) => {
     answer(false, e.message);
   }
 });
-// The person's answer to one page's add, in the shell's own dialog:
-// "added" on Add; "declined" on Cancel or Escape; "not answered" when left
-// ADD_CONFIRM_MS. One at a time: another ask while it is open is "busy".
-const addDialog = $("add-agent-dialog");
-let adding = null; // { resolve, timer, arm, outcome }
-function confirmAdd(agent, name) {
-  if (adding) return Promise.resolve("busy");
+// ---- one ask (docs/api.md, "One ask"): the shell's own dialog for what a
+// page asks of its person (adding one of their agents; a dangerous action
+// their agent asked for, from its card). Never in the frame: a page is
+// code its author or an agent wrote, so it asks and never grants. Its
+// answer: "yes" on its button; "declined" on Cancel or Escape; "not
+// answered" when left ASK_MS. One at a time: another ask while it is open
+// is "busy". Its button arms ASK_ARM_MS after it shows, so the click or key
+// that sent the page's message cannot confirm it (the share sheet's 800 ms).
+// Nothing is remembered: each is asked. ----
+const ASK_MS = 90_000;
+const ASK_ARM_MS = 800;
+const askDialog = $("ask-dialog");
+let asking = null; // { resolve, timer, arm, outcome }
+// `of` names what it asks (`data-ask`): the agent added, or `delete:<name>`.
+function askPerson({ of, title, text = "", go, danger = false }) {
+  if (asking) return Promise.resolve("busy");
   return new Promise((resolve) => {
-    named($("add-agent-title"), agent.fragment, (who) => `Add ${who}?`);
-    named($("add-agent-text"), agent.fragment, (who) => `Add ${who} to ${titleOf(name)}? ${who} will be able to read and edit it.`);
-    addDialog.dataset.agent = agent.identity;
-    addDialog.dataset.fragment = name;
-    $("add-agent-go").disabled = true;
-    adding = {
+    askDialog.dataset.ask = of;
+    $("ask-title").textContent = title;
+    $("ask-text").textContent = text;
+    $("ask-text").hidden = !text;
+    $("ask-go").textContent = go;
+    $("ask-go").classList.toggle("danger", danger);
+    $("ask-go").disabled = true;
+    asking = {
       resolve,
       outcome: "declined",
-      arm: setTimeout(() => { $("add-agent-go").disabled = false; }, ADD_ARM_MS),
+      arm: setTimeout(() => { $("ask-go").disabled = false; }, ASK_ARM_MS),
       timer: setTimeout(() => {
-        if (adding) adding.outcome = "not answered";
-        addDialog.close();
-      }, ADD_CONFIRM_MS),
+        if (asking) asking.outcome = "not answered";
+        askDialog.close();
+      }, ASK_MS),
     };
-    addDialog.showModal();
-    $("add-agent-cancel").focus();
+    askDialog.showModal();
+    $("ask-cancel").focus();
   });
 }
-// whatever closes it (Add, Cancel, Escape, the timeout) settles the ask once
-addDialog.addEventListener("close", () => {
-  if (!adding) return;
-  const { resolve, timer, arm, outcome } = adding;
-  adding = null;
+// whatever closes it (its button, Cancel, Escape, the timeout) settles the ask once
+askDialog.addEventListener("close", () => {
+  if (!asking) return;
+  const { resolve, timer, arm, outcome } = asking;
+  asking = null;
   clearTimeout(timer);
   clearTimeout(arm);
   resolve(outcome);
 });
-$("add-agent-form").onsubmit = (e) => {
+$("ask-form").onsubmit = (e) => {
   e.preventDefault();
-  if ($("add-agent-go").disabled || !adding) return;
-  adding.outcome = "added";
-  addDialog.close();
+  if ($("ask-go").disabled || !asking) return;
+  asking.outcome = "yes";
+  askDialog.close();
 };
-$("add-agent-cancel").onclick = () => addDialog.close();
+$("ask-cancel").onclick = () => askDialog.close();
+
+// A card of the platform's in a chat it framed (docs/chat-records.md,
+// `ask`) asks its person to confirm what their agent asked for
+// (`{fragment: KIND.confirm, nonce, what: "delete" | "cap", name, micros?}`):
+// the shell asks them in its one ask dialog, naming the fragment as their
+// own list does, and on its button does it as them, in person: the same
+// request their own Delete or cap would make. It answers `{fragment:
+// KIND.confirmed, nonce, ok, error?}` (`error` as `add-agent`'s, or the
+// API's refusal). Only the release's chat asks (its page is the
+// platform's code, as with alerts); the API decides the rest, as for any
+// request of theirs.
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== KIND.confirm || typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  const frame = [...document.querySelectorAll("iframe[data-fragment]")].find((f) => f.contentWindow === event.source);
+  const chat = frame?.dataset.fragment;
+  if (!chat || byName(chat)?.kind !== "chat" || typeof d.name !== "string" || !["delete", "cap"].includes(d.what)) return;
+  if (d.what === "cap" && d.micros !== null && !Number.isSafeInteger(d.micros)) return;
+  let status;
+  try {
+    status = await api("GET", `/api/f/${seg(chat)}/status`);
+  } catch {
+    return;
+  }
+  const origin = new URL(status.urls.canonical).origin;
+  if (event.origin !== origin || frame.contentWindow !== event.source || !String(status.code?.id ?? "").startsWith("blessed:chat@")) return;
+  const answer = (ok, error) => event.source.postMessage({ fragment: KIND.confirmed, nonce: d.nonce, ok, ...(error ? { error } : {}) }, origin);
+  const title = titleOf(d.name);
+  const cap = d.micros === null ? "the default" : `$${(d.micros / 1e6).toFixed(d.micros % 1e6 ? 2 : 0)}`;
+  const of = `${d.what}:${d.name}`;
+  const said = await (d.what === "delete" ? askPerson({ of, title: `Delete ${title}?`, go: "Delete", danger: true }) : askPerson({ of, title: `Set ${title}'s cap to ${cap}?`, go: "Set cap" }));
+  if (said !== "yes") return answer(false, said);
+  try {
+    if (d.what === "delete") await api("DELETE", `/api/f/${seg(d.name)}`);
+    else await api("PUT", `/api/f/${seg(d.name)}/cap`, { id: crypto.randomUUID(), micros: d.micros });
+    answer(true);
+  } catch (e) {
+    answer(false, e.message);
+  }
+});
 
 // ---- a chat's alerts (docs/api.md, The shell, "A chat's alerts are the
 // shell's"; docs/chat-records.md, Push). A browser lets no cross-origin
