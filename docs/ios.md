@@ -129,7 +129,10 @@ reports main-frame HTTP errors, and supports swipe dismissal; each opening is a
 new redemption. It holds that fragment's pages alone (`WebLinks`): a link, a new
 window or a script's navigation to another address leaves it, a fragment of the
 person's opening in the app as a chat's link opens one (its own redemption) and
-anything else in the system's browser; the platform's own page, where a page whose
+any other web address in the system's browser. Another scheme (`mailto:`, `tel:`,
+`sms:`, an app's own links) goes to its app only from a link a person tapped, as in
+Safari; a page's script alone opens no other app (`WebLinks.handsToSystem`).
+The platform's own page, where a page whose
 sign-in ended is sent, is said so, and Try again asks for a new redemption.
 Reload reloads the page it is at, never the spent redemption. Share gives that
 page's address alone: its origin and path, with no query, hash, user, password or
