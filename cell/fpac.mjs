@@ -1,6 +1,6 @@
 // fpac.mjs: a computer's disk route (docs/computers.md, "A disk"): what
 // its guest's FPAC daemon calls at fpac.fragment.internal, by FPAC's
-// contract (finitecomputer/fpac, docs/contract.md, at the v0.1.0 the
+// contract (finitecomputer/fpac, docs/contract.md, at the v0.1.1 the
 // images pin). Apart from entry.mjs, which imports what only workerd has,
 // so node's runner tries it against a stand-in bucket (fpac.test.mjs).
 //
@@ -64,8 +64,11 @@ export async function fpacRoute(request, bucket, disk, rules, postHead, postUnus
   const route = `${request.method} ${url.pathname}`;
   // a test fleet's outage of its storage (the lever `fpac-refuse-at-stop`,
   // set in its props at a stop's signal): every call refused, as R2 down
-  // answers, until then; FPAC tries again (FIN-783)
-  if (disk.refuseUntil && Date.now() < disk.refuseUntil) {
+  // answers, until then; FPAC tries again (FIN-783). `refusePages`
+  // (`fpac-refuse-pages-at-stop`): only gets of map pages
+  // (`e<epoch>/m<seq>-<page>`), its final checkpoint's loads
+  const page = request.method === "GET" && /^\/o\/e\d+\/m\d+-\d+$/.test(url.pathname);
+  if (disk.refuseUntil && Date.now() < disk.refuseUntil && (!disk.refusePages || page)) {
     await request.body?.cancel();
     return text(503, "the disk's storage is unreachable (the test lever's outage)\n");
   }
@@ -119,7 +122,10 @@ async function get(bucket, key, range) {
     const o = await bucket.get(key);
     if (o === null) return text(404, "absent\n");
     const sum = o.checksums && o.checksums.sha256;
-    if (!sum) return text(500, "an object with no checksum\n");
+    // it can never be checked, so it is refused for good (a 4xx, which FPAC
+    // does not ask again: a 5xx would keep a sleep asking until its stop
+    // ends, Codex on FPAC v0.1.1)
+    if (!sum) return text(409, "an object with no checksum, which is never served\n");
     return new Response(o.body, { status: 200, headers: { "content-length": String(o.size), "x-fpac-sha256": hex(sum) } });
   }
   const r = RANGE.exec(range);

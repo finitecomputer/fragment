@@ -533,7 +533,7 @@ the DO removes them from one started from a snapshot.
 A computer made while its image is one its deployment puts on disks
 (`computers.disks`, `FRAGMENT_COMPUTER_DISKS`; preview's setting,
 production's off) is on a disk for good: its `/data` is ext4 on a lazy
-block device, FPAC (github.com/finitecomputer/fpac, at the v0.1.0 our
+block device, FPAC (github.com/finitecomputer/fpac, at the v0.1.1 our
 images pin by its SHA-256), whose bytes are objects in the platform's
 bucket under `disks/<its id's hex>/`. Only new computers: one with saves
 never goes on a disk. Its pin refuses an image the deployment does not
@@ -602,8 +602,10 @@ put on disks.
   every minute, until the flush lands and it exits, or what it keeps
   passes from that signal: the unsaved bound its start told its guest
   (`fpac::flush_kept_ms`: never under its exit wait, at most five
-  hours). Its boot waits longer still (`FRAGMENT_DISK_FLUSH_MS`), so the
-  platform's destroy, not the guest, ends one that never lands; a destroy
+  hours). Its boot waits longer still (`FRAGMENT_DISK_FLUSH_MS`), and its
+  daemon asks its storage again until it answers (FPAC v0.1.1: its final
+  checkpoint's map page loads too), so the platform's destroy, not the
+  guest, ends one that never lands; a destroy
   that fails keeps the stop on while its guest's own wait lasts, then its
   life ends and the next start waits for that container to go, as any
   start after a failed destroy does. That one, or any final

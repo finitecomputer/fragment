@@ -64,11 +64,11 @@ pub fn flush_ms(named: Option<&str>) -> u64 {
 /// be a failed start of its own, a strike, and the same head again.
 pub const TOLD_WAIT_MS: u64 = 30_000;
 /// How an open that found the disk's head unusable begins its error (FPAC
-/// v0.1.0, `open_store`): a head that will never mount, told from a remote
+/// v0.1.1, `open_store`): a head that will never mount, told from a remote
 /// that did not answer.
 const UNUSABLE: &str = "the disk does not open";
 /// How a mount of the device's ext4 that failed begins its error (FPAC
-/// v0.1.0, `linux::mount_ext4`).
+/// v0.1.1, `linux::mount_ext4`).
 const EXT4_MOUNT: &str = "mount ext4 at";
 
 /// Its start says it is on a disk.
@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn an_unusable_head_is_told_from_every_other_failure_by_fpacs_words() {
-        // FPAC v0.1.0's two errors at an open (daemon.rs, `open_store`)
+        // FPAC v0.1.1's two errors at an open (daemon.rs, `open_store`)
         assert!("the disk does not open: a head that names a checkpoint not found".starts_with(UNUSABLE));
         assert!(!"the remote is unavailable: connection refused".starts_with(UNUSABLE));
     }

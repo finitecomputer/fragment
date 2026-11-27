@@ -2,14 +2,14 @@
 //! volume, a lazy disk whose blocks live in R2 as write-once objects
 //! under `disks/<computer>/`, served to the guest's daemon by the cell's
 //! `fpac` egress route (FPAC's contract, docs/contract.md in
-//! finitecomputer/fpac at v0.1.0). The platform's part, here as pure rules:
+//! finitecomputer/fpac at v0.1.1). The platform's part, here as pure rules:
 //!
 //! - **The epoch** is the computer's start generation: minted at each
 //!   start, larger than every earlier one, so a container from an older
 //!   start can write only under its old epoch.
 //! - **The head** names the checkpoint a disk opens from. The Computer DO
 //!   keeps it as typed columns and moves it only by `decide`, the same
-//!   rules as FPAC's own (`fpac_store::head::decide` at v0.1.0, which its
+//!   rules as FPAC's own (`fpac_store::head::decide` at v0.1.1, which its
 //!   conformance suite holds every route to; the cases below are its).
 //! - **Object names** are `e<epoch>/<rest>`; the route reads and writes
 //!   nothing else, and writes only under the running life's epoch.
@@ -322,7 +322,7 @@ pub const EXTENT_BYTES: u64 = 64 << 10;
 const _: () = assert!(DISK_VOLUME_BYTES.is_multiple_of(EXTENT_BYTES), "a disk's volume is whole extents");
 
 /// What a disk's daemon says of itself (`fpac status`, its
-/// `/run/fpac/status.json` at v0.1.0), as a sleep reads it: the bytes it
+/// `/run/fpac/status.json` at v0.1.1), as a sleep reads it: the bytes it
 /// has not shipped (written and not cut, or cut and not landed), the
 /// extents a read fetched, and the fetches it made again (a checksum
 /// that did not match, or the remote unavailable).

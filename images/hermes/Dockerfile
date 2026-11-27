@@ -123,7 +123,7 @@ RUN --mount=type=cache,id=cli-registry,target=/usr/local/cargo/registry \
 # - cua-driver-rs 0.28.3: its Linux binary tarball.
 # - gws 0.22.5: musl's x86_64 build; glibc's for aarch64, the only Linux
 #   arm64 build the release has (the base is Debian's).
-# - fpac v0.1.0, a computer's disk's daemon (docs/computers.md, "A disk"):
+# - fpac v0.1.1, a computer's disk's daemon (docs/computers.md, "A disk"):
 #   its x86_64 static build, named by its own SHA-256 (FPAC's
 #   docs/release.md). The release has no arm64 build: there, a stand-in
 #   that says so, and no computer of this image goes on a disk.
@@ -131,12 +131,12 @@ FROM alpine:3.20 AS downloads-amd64
 ADD --checksum=sha256:895fb14cfaa662d1c0947f2f871141fc89680fe3e70bff64c366cbe9e59aa4f0 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-24_04-x86_64 /simplex-chat
 ADD --checksum=sha256:51de56e37e1e57cca613cff06e22a3c64bf8285ed97e518660f3d1cb2a4e6fcf https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-x86_64-binary.tar.gz /cua-driver.tgz
 ADD --checksum=sha256:4db473dde4b1ab872e4ff35d769b0d4af1f1a6441a605e79d5cf8ada9c87e920 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-x86_64-unknown-linux-musl.tar.gz /gws.tgz
-ADD --checksum=sha256:9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e https://github.com/finitecomputer/fpac/releases/download/v0.1.0/fpac-9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e /fpac
+ADD --checksum=sha256:6b664c74264f74720d39a745c138817fb55428110939f87d734187c5e7e3e1db https://github.com/finitecomputer/fpac/releases/download/v0.1.1/fpac-6b664c74264f74720d39a745c138817fb55428110939f87d734187c5e7e3e1db /fpac
 FROM alpine:3.20 AS downloads-arm64
 ADD --checksum=sha256:91f332edc813cab78a848da7ba75ed91bcb8d09abf1fc92eca74330dc29ec970 https://github.com/simplex-chat/simplex-chat/releases/download/v7.0.3/simplex-chat-ubuntu-22_04-aarch64 /simplex-chat
 ADD --checksum=sha256:392cc554eb916b37d585c2ee2e8090cb1efe8d34b1657df77afd2e7a67d0f83b https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.28.3/cua-driver-rs-0.28.3-linux-arm64-binary.tar.gz /cua-driver.tgz
 ADD --checksum=sha256:94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0 https://github.com/googleworkspace/cli/releases/download/v0.22.5/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz /gws.tgz
-RUN printf '#!/bin/sh\necho "fpac: v0.1.0 has no arm64 build" >&2\nexit 1\n' > /fpac
+RUN printf '#!/bin/sh\necho "fpac: v0.1.1 has no arm64 build" >&2\nexit 1\n' > /fpac
 FROM downloads-${TARGETARCH} AS downloads
 
 # sandbox-shim, the Sandbox SDK's in-container half (its DirectoryBackup's

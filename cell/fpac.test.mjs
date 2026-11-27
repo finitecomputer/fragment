@@ -1,5 +1,5 @@
 // fpac.mjs: the disk route answers FPAC's contract (finitecomputer/fpac,
-// docs/contract.md at v0.1.0): its conformance cases 1-12, the route's own
+// docs/contract.md at v0.1.1): its conformance cases 1-12, the route's own
 // (13-19, the head's rules, are fragment_core::computer::fpac's, tested
 // there), against a stand-in bucket that checks a put's SHA-256 and its
 // condition as R2 does. Valid (open from the props, gets whole and ranged,
@@ -224,5 +224,29 @@ test("a disk whose props name an outage refuses every call as unreachable until 
   // once it ends, the same put lands
   const after = await fpacRoute(new Request("http://fpac.fragment.internal/o/e7/s1", { method: "PUT", body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": String(bytes.length) }, duplex: "half" }), b, { ...DISK, refuseUntil: Date.now() - 1 }, RULES, async () => ({}), async () => ({}));
   assert.equal(after.status, 201);
+});
+
+test("an object stored with no checksum is refused for good, never a 5xx FPAC would ask again", async () => {
+  const b = bucket();
+  const bytes = new TextEncoder().encode("a page");
+  assert.equal((await call(b, "PUT", "/o/e7/m1-0", { body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": String(bytes.length) } })).status, 201);
+  const kept = b.get;
+  b.get = async (key, opts) => ({ ...(await kept(key, opts)), checksums: {} });
+  const r = await call(b, "GET", "/o/e7/m1-0");
+  assert.equal(r.status, 409);
+  assert.equal(r.headers.get("x-fpac-sha256"), null, "no bytes it cannot name");
+});
+
+test("an outage of map pages alone refuses their gets, and serves every other call", async () => {
+  const b = bucket();
+  const bytes = new TextEncoder().encode("a segment");
+  const out = { ...DISK, refuseUntil: Date.now() + 60_000, refusePages: true };
+  const during = (method, path, init = {}) => fpacRoute(new Request(`http://fpac.fragment.internal${path}`, { method, duplex: "half", ...init }), b, out, RULES, async () => ({ answer: "taken" }), async () => ({}));
+  const put = await during("PUT", "/o/e7/s1", { body: bytes, headers: { "x-fpac-sha256": sha(bytes).toString("hex"), "content-length": String(bytes.length) } });
+  assert.equal(put.status, 201, "a put lands");
+  assert.equal((await during("GET", "/o/e7/s1")).status, 200, "a segment's get is answered");
+  assert.equal((await during("GET", "/o/e7/m3-0")).status, 503, "a map page's get: unreachable, so FPAC asks again");
+  assert.equal((await during("GET", "/o/e6/m12-75")).status, 503, "any life's page");
+  assert.equal((await during("POST", "/head", { body: "7 - - -" })).status, 200, "its head is taken");
 });
 
