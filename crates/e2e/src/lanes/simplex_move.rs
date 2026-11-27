@@ -25,14 +25,15 @@
 //!   message lands there, once, nothing in the old one, and the agent's
 //!   answer reaches the phone through the door;
 //! - its way back refused busy while its agent works in the connector's
-//!   chat, then while its reply waits to go, and that reply reaching the
+//!   chat (a second message waiting for its turn), then while its replies
+//!   wait to go, and each reply reaching the
 //!   phone once, through the door;
 //! - back: a message the door's runner held as it fenced lands in its
 //!   computer's chat, answered; its computer runs the link again, the
 //!   phone's next message lands in its computer's chat, and the connector
 //!   is unbound and archived, its history kept.
 //!
-//! Paid calls: the agent's answers (six turns, a few calls each).
+//! Paid calls: the agent's answers (seven turns, a few calls each).
 
 use std::time::{Duration, Instant};
 
@@ -334,22 +335,31 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let busy_back = |why: &str| mv("back").map(|r| (r.status == 409 && r.body["message"].as_str().is_some_and(|m| m.contains(why)), r.body));
     let at_work = || records(api, &owner, &connector, "work").iter().rev().find(|r| r["body"]["kind"].as_str().is_some_and(|k| k.starts_with("turn."))).is_some_and(|r| matches!(r["body"]["kind"].as_str(), Some("turn.start" | "turn.step")));
     let pause = |on: bool| api.signed(&owner, "POST", &format!("/api/f/{connector}/pause"), Some(&json!({ "op": "mirror", "paused": on })));
-    let blocked_run = || api.signed(&owner, "GET", &format!("/api/f/{connector}/runs?op=mirror&status=blocked&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64());
+    let blocked_runs = || -> Vec<i64> { api.signed(&owner, "GET", &format!("/api/f/{connector}/runs?op=mirror&status=blocked&limit=20"), None).ok().and_then(|r| r.body["runs"].as_array().map(|a| a.iter().filter_map(|r| r["id"].as_i64()).collect())).unwrap_or_default() };
     anyhow::ensure!(pause(true)?.status == 200, "pausing its connector's mirror");
     phone.drain(Duration::from_secs(5))?;
     phone.say(contact, "Run `sleep 20` in your terminal, then reply with just the word done.")?;
     let working = s.eventually(SLOW, at_work);
+    // a second message as it works, whose turn waits for the first's end:
+    // the gap between that end and its claim is the window a way back's
+    // quiet question cannot see (Gaps)
+    phone.say(contact, "After that, reply with just the word two.")?;
     let (refused_working, said_working) = busy_back("at work")?;
-    let blocked = s.eventually(SLOW, || blocked_run().is_some());
+    let blocked = s.eventually(SLOW, || blocked_runs().len() >= 2);
     let (refused_reply, said_reply) = busy_back("mirror run blocked")?;
     anyhow::ensure!(pause(false)?.status == 200, "unpausing its connector's mirror");
-    let replayed = api.signed(&owner, "POST", &format!("/api/f/{connector}/replay"), Some(&json!({ "run": blocked_run().unwrap_or(0) })))?;
-    let heard = phone.received(SLOW, |got| got.iter().any(|g| g.to_lowercase().contains("done"))).unwrap_or_default();
+    let replayed: Vec<u16> = blocked_runs().into_iter().map(|run| api.signed(&owner, "POST", &format!("/api/f/{connector}/replay"), Some(&json!({ "run": run }))).map_or(0, |r| r.status)).collect();
+    let said = |got: &[String], word: &str| got.iter().filter(|g| g.to_lowercase().contains(word)).count();
+    let heard = phone.received(SLOW, |got| said(got, "done") >= 1 && said(got, "two") >= 1).unwrap_or_default();
+    // the window, from its records: the first turn's end to the second's claim
+    let turns: Vec<Value> = records(api, &owner, &connector, "work").into_iter().filter(|r| matches!(r["body"]["kind"].as_str(), Some("turn.start" | "turn.end"))).collect();
+    let claim_gap_ms = turns.windows(2).rev().find(|w| w[0]["body"]["kind"] == "turn.end" && w[1]["body"]["kind"] == "turn.start").map(|w| w[1]["at"].as_i64().unwrap_or(0) - w[0]["at"].as_i64().unwrap_or(0));
     s.ok(
-        "its way back is refused busy while its agent is at work in its connector's chat, then while its reply waits to go (each named), its door running on; that reply reaches the phone once, through its door",
-        working && refused_working && blocked && refused_reply && replayed.status == 200 && heard.iter().filter(|g| g.to_lowercase().contains("done")).count() == 1,
-        json!({ "working": said_working, "reply": said_reply, "replayed": replayed.status, "heard": heard }),
+        "its way back is refused busy while its agent is at work in its connector's chat, then while its replies wait to go (each named), its door running on; each reply reaches the phone once, through its door",
+        working && refused_working && blocked && refused_reply && !replayed.is_empty() && replayed.iter().all(|r| *r == 200) && said(&heard, "done") == 1 && said(&heard, "two") == 1,
+        json!({ "working": said_working, "reply": said_reply, "replayed": replayed, "heard": heard, "claimGapMs": claim_gap_ms }),
     );
+    println!("note  the second turn's claim came {claim_gap_ms:?} ms after the first turn's end");
 
     // a message its door's runner holds as the door fences for its way back
     // (refused, kept past its cursor) goes in its save to its computer, which
