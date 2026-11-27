@@ -259,10 +259,20 @@ fn mandates(s: &mut Suite, api: &Api) -> Result<()> {
     // where `for` is refused, a mandate is too, never dropped: a route
     // acting as its signer alone, the registry's own, and the invites
     let unhonored: Vec<Reply> = ["/api/notices", "/api/identities/me", "/api/invites"].iter().map(|path| carrying(&juniper, &anas, "GET", path, None)).collect::<Result<_>>()?;
+    // nor on a fragment's site, which takes its signer's word alone
+    let site = api.call(crate::api::Call {
+        method: "POST",
+        url: api.site_url(&private, "__op/whoami"),
+        body: Some(json!({ "id": "w5", "input": {} }).to_string().into_bytes()),
+        content_type: Some("application/json"),
+        keys: Some(&juniper),
+        extra: vec![("x-fragment-mandate", anas.clone())],
+        ..crate::api::Call::default()
+    })?;
     s.ok(
-        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400), and one where `for` is not honored (400, the identities and invites too) are refused",
-        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.iter().all(|r| r.status == 400),
-        format!("{forged} {freds} {both} {:?}", unhonored.iter().map(|r| r.status).collect::<Vec<_>>()),
+        "an altered mandate (403), another agent carrying Juniper's (403), one beside `for` (400), and one where `for` is not honored (400, the identities, the invites and a fragment's site too) are refused",
+        forged.status == 403 && freds.status == 403 && freds.message().contains("only by the agent it names") && both.status == 400 && unhonored.iter().all(|r| r.status == 400) && site.status == 400,
+        format!("{forged} {freds} {both} {:?} site {}", unhonored.iter().map(|r| r.status).collect::<Vec<_>>(), site.status),
     );
 
     // ---- someone else's ask: Juniper for Ben

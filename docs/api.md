@@ -213,33 +213,67 @@ lend, which a second agent would not be held to, so the agent asked goes
 on unproven, as itself, in the place it was asked alone (SHIP IT,
 2026-11-26). Nor is another owner's agent given one.
 
-**An agent's computer proves who asked** (FIN-720). Its bridge tells the
-agent's fragment each turn it runs, before its runtime hears of it
-(`/api/computer/turns`: docs/computers.md). The egress then signs each
-call the agent makes `for` its owner with the proof the open turns hold
-(`mandate::proof`): only its owner's turns open, its owner's mandate (or
-the bare `for`, with none); one other person's turns open, each proven,
-their newest mandate; turns of more than one other person, or of one
-unproven, the agent as itself, with no `for`, in those turns' places
-alone, and 403 anywhere else. The invites waiting on its owner's email
-take `for` and no mandate: there its owner's own ask keeps `for`, and
-anyone else's is 403. A hand-off (another agent of the computer's words
-in a chat) carries on the ask of the turn it was said in: proven by the
-mandate its place gave the agent beside the words ("An ask carried on",
-above), else unproven (an image from before, a record from before, or
-words on no mandate). Since decision 64 an agent's own
-memberships mirror its owner's, so acting as itself elsewhere would reach
-what is its owner's for someone it cannot name. A mandate names whose ask
-a turn is, whatever its bridge says (a schedule's fire is its maker's,
-though the place's own key wrote it). While someone else's turn is open,
+**A place opens its agents' turns** (FIN-720; cell/src/asks.rs). Whose
+ask an agent's turn is is the word of the chat it was asked in, from its
+own records, never its computer's. Words on `chat` that start a turn,
+someone's (`mandate::asked_of`), to an agent member as its bridge hears
+them (`mandate::heard_by`: whom `to` names, else whom a person
+@-mentions, any mention being every agent, else the chat's lead), open
+that agent's ask as they first reach it: sent on its socket that
+follows `chat`, or read forward past the newest it was handed (a page
+after its cursor, a subscribe's catch-up); each is handed once, and a
+read back hands nothing. Its claim of a record there (its `turn.start`
+on `work`) opens that record's ask again, and the other agents' asks of
+it they never claimed close; its `turn.end` closes that
+turn's ask and each it never claimed, each held at least
+`TURN_HOLD_MS` from its words. Each change is a new version, and the
+agent's fragment is told all its open asks there (one turn an asker,
+with the place's mandate for it; an agent's own words with none), an
+older version changing nothing. Someone else's ask reaches its agent
+only once its fragment holds it: its sockets hold what they are sent
+meanwhile, and its page reads and its claim answer 502; one not told is
+told again from the alarm. Its owner's own asks narrow nothing (decision
+64) and wait for nothing. A hand-off (one of its owner's agents' words,
+said on their owner's own proven ask: "An ask carried on", above) opens
+that ask carried on, by the same words and day; on anyone else's ask, and
+another owner's agent's words, the posting agent's own, unproven, lending
+nothing (Ben's ask would otherwise reach what another of its agents' cap,
+grants and lend reach). An agent removed has its asks there closed.
+A computer's own word on its turns (`/api/computer/turns`) opens nothing;
+a turn it told before the release that brought this one still holds, until
+its bridge ends it or a new bridge life starts.
+
+**Every call that is not its presence is held** to those turns. The
+egress signs the agent's presence in its chats as it came
+(`mandate::presence`, one list: its own fragment; `__live`, `__people`;
+its fragment list; a fragment's status, members, channels and
+subscriptions, read; a channel's pages, newest and posts, drafts,
+blobs), never `for` anyone. A wake subscription never reaches it: the
+egress asks the fragment for it itself. Any other call, `for` its
+owner or as itself, carries the proof its open turns hold
+(`mandate::proof`): none open, or only its owner's, as it came (`for`
+its owner with their newest mandate in its place); one other person's,
+each proven, their newest mandate in place of `for` (refused, 400, where
+`for` is not honored); more than one other person's, or one unproven,
+the agent as itself in those turns' places alone, and 403 anywhere else.
+The invites waiting on its owner's email take `for` and no mandate:
+there its owner's own ask keeps `for`, and anyone else's is 403. A
+fragment's site (`/f/…`) takes neither `for` nor a mandate (one is 400
+there): on someone else's ask the agent reaches one only in their turns'
+places, as itself, and 403 anywhere else. Since
+decision 64 an agent's own memberships mirror its owner's, so acting as
+itself elsewhere would reach what is its owner's for someone it cannot
+name. A mandate names whose ask a turn is, whatever its bridge says (a
+schedule's fire is its maker's, though the place's own key wrote it).
+While someone else's turn is open,
 the agent's grants carry `lend`, what of its owner's it uses then, read
 at each use from each place that person's turns are in, the narrowest of
 them: paid tools (an operator key) by `spend`, their accounts and keys (a
 connection, a Vault secret) by `accounts`; no one proven's, nothing. Its
 owner's own ask lends everything. A paid tool used on someone else's turn
-is billed to the owner only while lent. The computer tells its own turns,
-which its agent could undo (the debt ledger, "An agent's computer tells
-its own turns").
+is billed to the owner only while lent. An agent ends its own turn, and
+so someone's ask of it, early by saying so (the debt ledger, "An agent
+ends someone's ask by saying so").
 
 **An agent's lend** (the share sheet's card for an owner's own agent in
 a chat): `PUT /api/f/{name}/members/{agent}/lend` `{spend, accounts}` →

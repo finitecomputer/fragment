@@ -42,9 +42,11 @@
 //!   environment variable as `GET /api/computer` lists it now, or a literal;
 //!   it goes in a header (`authorization: Bearer …` unless named), a query
 //!   parameter, or basic auth's password beside `<user>`; with `posting
-//!   <json>` (the rest of the message) it is a POST of that JSON, else a
-//!   GET. The reply is the answer's status and its first 300 characters
-//!   (the computer's swap, decisions 22 and 37);
+//!   <json>` (the rest of the message) it is a POST of that JSON (`putting`
+//!   a PUT, `deleting` a DELETE), else a GET. The reply is the answer's
+//!   status and its first 300 characters (the computer's swap, decisions
+//!   22 and 37). `fetch … then fetch …` makes each in turn, in one turn,
+//!   each answer said; `$TURN` anywhere in it is this turn's id;
 //! - `credentials`: what the agent's guest is given now (`GET
 //!   /api/computer`): each credential's provider, its environment variables
 //!   and its placeholder (and `models at <base>` for a provider that serves
@@ -372,17 +374,22 @@ enum Place<'a> {
     Basic(&'a str),
 }
 
+/// What a `fetch` sends: its method and its JSON body.
+type Sent<'a> = (&'static str, &'a str);
+
 /// `fetch`'s words: the URL, the value (`$NAME` or a literal), where it
-/// goes, and the JSON body it posts, if any (all after ` posting `).
-fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>, Option<&str>), String> {
-    let (text, posted) = text.split_once(" posting ").map_or((text, None), |(t, b)| (t, Some(b)));
+/// goes, and the method and JSON body it sends, if any (all after
+/// ` posting `, ` putting ` or ` deleting `).
+fn fetch_words(text: &str) -> Result<(&str, &str, Place<'_>, Option<Sent<'_>>), String> {
+    let sent = [(" posting ", "POST"), (" putting ", "PUT"), (" deleting ", "DELETE")].into_iter().find_map(|(word, method)| text.split_once(word).map(|(t, b)| (t, (method, b))));
+    let (text, posted) = sent.map_or((text, None), |(t, sent)| (t, Some(sent)));
     let words: Vec<&str> = text.split_whitespace().collect();
     let (url, value, place) = match words.as_slice() {
         [_, url, "with", v] => (*url, *v, Place::Header("authorization")),
         [_, url, "with", v, "in", "query", q] => (*url, *v, Place::Query(q)),
         [_, url, "with", v, "as", "basic", user] => (*url, *v, Place::Basic(user)),
         [_, url, "with", v, "in", h] => (*url, *v, Place::Header(h)),
-        _ => return Err("say `fetch <http url> with <$NAME or a value> [in <header> | in query <param> | as basic <user>] [posting <json>]`".into()),
+        _ => return Err("say `fetch <http url> with <$NAME or a value> [in <header> | in query <param> | as basic <user>] [posting | putting | deleting <json>]`".into()),
     };
     Ok((url, value, place, posted))
 }
@@ -403,8 +410,9 @@ async fn credential(agent: &str, name: &str) -> Result<String, String> {
 }
 
 /// `fetch <url> with <value> [in <header> | in query <param> | as basic
-/// <user>] [posting <json>]`, as `agent`'s guest sends it (no header of
-/// ours; a GET, or a POST of the JSON): the answer's status and body.
+/// <user>] [posting | putting | deleting <json>]`, as `agent`'s guest
+/// sends it (no header of ours; a GET, or the JSON sent by that method):
+/// the answer's status and body.
 async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     use base64::Engine;
     use http_body_util::{BodyExt, Either, Empty, Full, Limited};
@@ -426,7 +434,7 @@ async fn fetch(agent: &str, text: &str) -> Result<(u16, String), String> {
     let req = hyper::Request::builder().uri(&url).header("host", base.authority()).header(header, header_value);
     let req = match posted {
         None => req.method("GET").body(Either::Left(Empty::<bytes::Bytes>::new())),
-        Some(json) => req.method("POST").header("content-type", "application/json").body(Either::Right(Full::new(bytes::Bytes::from(json.to_string())))),
+        Some((method, json)) => req.method(method).header("content-type", "application/json").body(Either::Right(Full::new(bytes::Bytes::from(json.to_string())))),
     }
     .map_err(|e| e.to_string())?;
     let client = Client::builder(TokioExecutor::new()).build_http();
@@ -975,10 +983,17 @@ async fn turn(cfg: ScriptConfig, ts: TurnStart, mut rx: mpsc::Receiver<Heard>, e
         };
     }
     if text.starts_with("fetch ") {
-        reply = match fetch(&ts.agent.fragment, &ts.text).await {
-            Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
-            Err(e) => format!("fetch failed: {e}"),
-        };
+        // `fetch … then fetch …`: each in turn, in one turn, each said;
+        // `$TURN` is this turn's id
+        let mut said = vec![];
+        for (i, one) in ts.text.replace("$TURN", &ts.turn).split(" then fetch ").enumerate() {
+            let one = if i == 0 { one.to_string() } else { format!("fetch {one}") };
+            said.push(match fetch(&ts.agent.fragment, &one).await {
+                Ok((status, body)) => format!("fetched {status}: {}", body.chars().take(300).collect::<String>()),
+                Err(e) => format!("fetch failed: {e}"),
+            });
+        }
+        reply = said.join(" then ");
     }
     let mut part = 1;
     if says(&text, "tool") {
@@ -1141,7 +1156,10 @@ mod tests {
         assert_eq!(fetch_words("fetch http://a.test/x with fck_p_00 as basic api").unwrap(), ("http://a.test/x", "fck_p_00", Place::Basic("api"), None));
         // a JSON body, its spaces as they came
         let posted = fetch_words(r#"fetch http://a.test/x with $K in xi-api-key posting {"text": "two words"}"#).unwrap();
-        assert_eq!(posted, ("http://a.test/x", "$K", Place::Header("xi-api-key"), Some(r#"{"text": "two words"}"#)));
+        assert_eq!(posted, ("http://a.test/x", "$K", Place::Header("xi-api-key"), Some(("POST", r#"{"text": "two words"}"#))));
+        let put = fetch_words(r#"fetch http://a.test/x with $K in xi-api-key putting {"a": 1}"#).unwrap();
+        assert_eq!(put.3, Some(("PUT", r#"{"a": 1}"#)));
+        assert_eq!(fetch_words(r#"fetch http://a.test/x with $K deleting {}"#).unwrap().3, Some(("DELETE", "{}")));
         for bad in ["fetch http://a.test/x", "fetch http://a.test/x with", "fetch http://a.test/x with $K in", "fetch http://a.test/x with $K as basic", "fetch http://a.test/x posting {}"] {
             assert!(fetch_words(bad).is_err(), "{bad}");
         }

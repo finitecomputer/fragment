@@ -38,6 +38,7 @@ mod across;
 mod ai;
 mod address;
 mod alone;
+mod asks;
 mod assets;
 mod auth;
 mod billing;
@@ -1147,6 +1148,11 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(sha) => Payload::Streamed { sha256_hex: sha },
         None => Payload::Read(&body),
     };
+    // a site takes no one's word but its signer's: a mandate here is
+    // refused, never dropped (`FOR_HONORED`)
+    if req.headers().get(fragment_core::mandate::HEADER)?.is_some() {
+        return Err(CellError::invalid(FOR_HONORED));
+    }
     let mut credential = site_credential(&req, url, payload, fetched)?;
     // a frame's page shows only in the page its session was made for (and
     // in its own frames there): that session is asked for here, for the

@@ -35,7 +35,7 @@ use serde_json::{json, Value};
 use worker::*;
 
 use crate::error::{CellError, CellResult};
-use crate::fragment::calls::{AgentIdentity, AgentJoined, DoorActor, DoorCheck, JoinedAnswer, Named, Reach, Routine};
+use crate::fragment::calls::{AgentIdentity, AgentJoined, DoorActor, DoorCheck, JoinedAnswer, Named, PlaceTurn, Reach, Routine, TurnsIn};
 use crate::fragment::{FragmentCell, MetaKey};
 use crate::js;
 use crate::registry::calls::{self, By};
@@ -85,9 +85,11 @@ struct Sign {
     fragment: Option<String>,
 }
 
-/// The bridge lives an agent fragment remembers (`turn_life`): a late call
-/// from one of them is known as a retired life's.
-const TURN_LIVES_KEPT: i64 = 8;
+/// The `life` of a turn its place told (`turns_in`). A row a bridge told
+/// before this release (named by its bridge's life) is read too, so a turn
+/// running across the deploy stays held, until its bridge ends it or a new
+/// bridge life takes over (`turns`): no new one is taken.
+const PLACE_OPENED: &str = "";
 
 /// An open turn as its row holds it (`turns`, Fragment step 15).
 #[derive(Deserialize)]
@@ -95,13 +97,12 @@ struct TurnRow {
     place: String,
     asker: String,
     mandate: Option<String>,
-    until: i64,
 }
 
 /// A turn's row read as `mandate::proof` reads one: its mandate only while
-/// it holds.
+/// that holds (a day from its words), the turn itself while its row does.
 fn turn_of(r: &TurnRow, now: i64) -> mandate::Turn<'_> {
-    let mandate = r.mandate.as_deref().filter(|_| r.until >= now).and_then(|text| Some(mandate::Held { text, until: r.until, place: mandate::place_of(text)? }));
+    let mandate = r.mandate.as_deref().and_then(|text| Some(mandate::Held { text, until: mandate::until_of(text)?, place: mandate::place_of(text)? })).filter(|m| m.until >= now);
     mandate::Turn { place: &r.place, asker: &r.asker, mandate }
 }
 
@@ -213,129 +214,99 @@ impl FragmentCell {
         Ok(Grants { lend: self.lent_now().await?, ..grants })
     }
 
-    /// Its open turns' rows, as its bridge told them and not yet forgotten
-    /// (`limits::TURN_HELD_MS`).
+    /// Its open turns' rows, as its places told them (`turns_in`), and a
+    /// bridge before them (`PLACE_OPENED`), not yet past
+    /// `limits::TURN_HELD_MS`.
     fn turn_rows(&self, now: i64) -> CellResult<Vec<TurnRow>> {
+        // a place's row holds until its `until`; a bridge's, past its
+        // mandate's day too (held unproven), as it always did
         self.typed(
-            "SELECT place, asker, mandate, until FROM turns WHERE at >= ? ORDER BY turn LIMIT ?",
-            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
+            "SELECT place, asker, mandate FROM turns WHERE at >= ? AND (until > ? OR life != ?) ORDER BY turn LIMIT ?",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), PLACE_OPENED.into(), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
         )
     }
 
-    /// `computer/turns`: its bridge tells which turns it runs, so the
-    /// agent's calls for its owner carry the proof of whose ask they are
-    /// (`mandate::proof`): `open` one (`{turn, place, asker?, mandate?}`: no
-    /// asker is no one's, app code's words), `close` one, or `take` them (a
-    /// bridge's start), each as one bridge life of its computer's start
-    /// (`life`, `generation`: `turn_life`): a retired life's word is
-    /// refused (409), and changes nothing. Its mandate is checked as the router checks
-    /// one (the platform's, for this agent, unexpired), and names whose ask
-    /// the turn is, whatever the bridge said (a schedule's fire is its
-    /// maker's, though the place's own key wrote it); one that does not
-    /// check proves nothing, and the turn is held as the bridge said it,
-    /// unproven: narrower, never refused. Read field by field (the cell's
-    /// Wasm budget).
-    async fn turns(&self, body: &Value) -> CellResult<Value> {
-        let text = |k: &str| body[k].as_str().unwrap_or("");
+    /// The turns a place holds open for this agent (`TurnsIn`): the one
+    /// word on them, its place's own (FIN-720), replacing what it said
+    /// before; an older version than the one held changes nothing. Its
+    /// rows and every other place's past `TURNS_HELD_MAX`, it holds as one
+    /// ask no one proves: the agent acts as itself there alone
+    /// (`Proof::Itself`), narrower than any, never refused.
+    pub(crate) fn turns_in(&self, t: TurnsIn) -> CellResult<()> {
+        if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(t.agent.as_str()) {
+            return Err(CellError::new(ErrorCode::NotFound, "no such agent here: this fragment was made again since"));
+        }
+        if self.cfg.test_hooks && self.meta(MetaKey::TestRefuseTurns)?.is_some() {
+            return Err(CellError::new(ErrorCode::HostFailed, "refused by a test hook (`refuse-turns`)"));
+        }
+        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && npub::is_identity(&p.asker) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
+        if !valid_fragment_name(&t.place) || t.version <= 0 || !t.turns.iter().all(well_formed) {
+            return Err(CellError::invalid("a place's turns are its name, their version, and each its id, asker and mandate"));
+        }
+        let held = self.rows("SELECT version FROM turn_places WHERE place = ?", vec![t.place.as_str().into()])?.first().and_then(|r| r["version"].as_i64());
+        if held.is_some_and(|v| v >= t.version) {
+            return Ok(());
+        }
         let now = js::now_ms();
-        let life = text("life");
-        if !(life.len() == 32 && life.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))) {
-            return Err(CellError::invalid("name the bridge life that tells its turns (32 lower-case hex)"));
+        self.exec(
+            "DELETE FROM turns WHERE at < ? OR (until <= ? AND life = ?)",
+            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(now), PLACE_OPENED.into()],
+        )?;
+        self.exec("DELETE FROM turns WHERE place = ? AND life = ?", vec![t.place.as_str().into(), PLACE_OPENED.into()])?;
+        let others = self.count_of("SELECT COUNT(*) AS n FROM turns", vec![])?;
+        let mut turns = t.turns;
+        if others + turns.len() as u64 > limits::TURNS_HELD_MAX as u64 {
+            let until = turns.iter().map(|p| p.until).max().unwrap_or(now);
+            turns = vec![PlaceTurn { turn: turns[0].turn.clone(), asker: String::new(), mandate: None, until }];
+            self.event("turns.crowded", &format!("{} holds more open asks than it may: it acts as itself in {} until they end", npub::display(&t.agent), t.place), json!({ "place": t.place, "others": others }));
         }
-        let Some(start) = body["generation"].as_u64().filter(|g| i64::try_from(*g).is_ok()) else {
-            return Err(CellError::invalid("name the computer's start the bridge life is of (its generation)"));
-        };
-        // its computer, the one the agent runs on (checked as it came)
-        let computer = text("computer");
-        let op = text("op");
-        if !matches!(op, "take" | "close" | "open") {
-            return Err(CellError::invalid("a turn is opened or closed, or a life takes its agent's turns"));
+        for p in turns {
+            self.exec(
+                "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, life = excluded.life, at = excluded.at",
+                vec![p.turn.as_str().into(), t.place.as_str().into(), p.asker.as_str().into(), p.mandate.map_or(SqlStorageValue::Null, Into::into), SqlStorageValue::Integer(p.until), PLACE_OPENED.into(), SqlStorageValue::Integer(now)],
+            )?;
         }
-        self.turn_life((life, computer, start), now)?;
-        match op {
-            "close" => {
-                self.exec("DELETE FROM turns WHERE turn = ?", vec![text("turn").into()])?;
-                Ok(json!({ "ok": true }))
-            }
-            "open" => {
-                let (turn, place, asker) = (text("turn"), text("place"), text("asker"));
-                if !fragment_proto::valid_op_id(turn) || !valid_fragment_name(place) || !(asker.is_empty() || npub::is_identity(asker)) {
-                    return Err(CellError::invalid("a turn is its id, the fragment it runs in, and who asked (an identity, or no one)"));
-                }
-                let unproven = (asker.to_string(), None, now + limits::MANDATE_LIFE_MS);
-                let (asker, mandate, until) = match body["mandate"].as_str() {
-                    None => unproven,
-                    Some(m) => match mandate::open(&crate::keys::mandate_keys(&self.env).await?, m, js::now_ms()) {
-                        Ok(o) if Some(o.agent.as_str()) == self.meta(MetaKey::AgentIdentity)?.as_deref() => (o.asker, Some(m.to_string()), o.until),
-                        _ => unproven,
-                    },
-                };
-                self.exec("DELETE FROM turns WHERE at < ?", vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS)])?;
-                let held = self.count_of("SELECT COUNT(*) AS n FROM turns WHERE turn != ?", vec![turn.into()])?;
-                if held >= limits::TURNS_HELD_MAX as u64 {
-                    return Err(CellError::new(ErrorCode::RateLimited, format!("this agent holds {held} open turns, the most it may: end one first")));
-                }
-                // its computer and life again after the await: the agent may
-                // run on another now, or a newer life have taken over
-                self.assigned_to(computer)?;
-                self.turn_life((life, computer, start), now)?;
-                self.exec(
-                    "INSERT INTO turns (turn, place, asker, mandate, until, life, at) VALUES (?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT (turn) DO UPDATE SET place = excluded.place, asker = excluded.asker, mandate = excluded.mandate, until = excluded.until, life = excluded.life, at = excluded.at",
-                    vec![
-                        turn.into(),
-                        place.into(),
-                        asker.as_str().into(),
-                        mandate.map_or(SqlStorageValue::Null, Into::into),
-                        SqlStorageValue::Integer(until),
-                        life.into(),
-                        SqlStorageValue::Integer(now),
-                    ],
-                )?;
-                Ok(json!({ "ok": true }))
-            }
-            // "take": the life heard, which is all it asks
-            _ => Ok(json!({ "ok": true })),
-        }
+        self.exec(
+            "INSERT INTO turn_places (place, version) VALUES (?, ?) ON CONFLICT (place) DO UPDATE SET version = excluded.version",
+            vec![t.place.as_str().into(), SqlStorageValue::Integer(t.version)],
+        )
     }
 
-    /// Whether bridge `life`, of `computer`'s `start`, speaks for this
-    /// agent's turns (`mandate::heard`, among that computer's lives: its
-    /// starts order them, and only the computer the agent runs on speaks):
-    /// the newest does. A new one takes over, and every other life's turns
-    /// are forgotten (its bridge is gone: one computer runs one bridge at a
-    /// time), another computer's lives with them; any other is retired, its
-    /// word refused, so a late call from a bridge before changes nothing,
-    /// and its bridge runs no turn its fragment does not hold. The newest
-    /// `TURN_LIVES_KEPT` lives are kept.
-    fn turn_life(&self, (life, computer, start): (&str, &str, u64), now: i64) -> CellResult<()> {
-        const NEWEST: &str = "FROM turn_lives WHERE computer = ? ORDER BY generation DESC, at DESC, life LIMIT ?";
-        let kept = || vec![computer.into(), SqlStorageValue::Integer(TURN_LIVES_KEPT)];
-        let lives = self.rows(&format!("SELECT life, generation {NEWEST}"), kept())?;
-        let lives: Vec<(&str, u64)> = lives.iter().filter_map(|r| Some((r["life"].as_str()?, r["generation"].as_u64()?))).collect();
-        match mandate::heard(&lives, life, start) {
-            mandate::Heard::Speaks => Ok(()),
-            mandate::Heard::Retired => Err(CellError::new(ErrorCode::Conflict, "this bridge life was retired: a newer one runs this agent's turns")),
-            mandate::Heard::TakesOver => {
-                let start = SqlStorageValue::Integer(i64::try_from(start).expect("checked as read"));
-                self.exec("INSERT INTO turn_lives (life, computer, generation, at) VALUES (?, ?, ?, ?)", vec![life.into(), computer.into(), start, SqlStorageValue::Integer(now)])?;
-                self.exec("DELETE FROM turns WHERE life != ?", vec![life.into()])?;
-                self.exec(&format!("DELETE FROM turn_lives WHERE life NOT IN (SELECT life {NEWEST})"), kept())?;
-                Ok(())
-            }
+    /// `computer/turns`, as a bridge tells its turns: whose ask a turn is
+    /// is its place's to say (`turns_in`), never its computer's (FIN-720),
+    /// so nothing it opens is taken. Its end of a turn it told before this
+    /// release, or a new life's taking of them, lets those go
+    /// (`PLACE_OPENED`), and no place's. The route goes once no computer
+    /// runs a bridge that calls it (FIN-615 PR 8).
+    fn turns(&self, body: &Value) -> CellResult<Value> {
+        match body["op"].as_str() {
+            Some("close") => self.exec("DELETE FROM turns WHERE turn = ? AND life != ?", vec![body["turn"].as_str().unwrap_or("").into(), PLACE_OPENED.into()])?,
+            Some("take") => self.exec("DELETE FROM turns WHERE life != ?", vec![PLACE_OPENED.into()])?,
+            _ => {}
         }
+        Ok(json!({ "ok": true }))
     }
 
-    /// The request its computer's egress signs for this agent: as it came,
-    /// unless it acts for its owner (`for=<its owner>`), whose proof the
-    /// open turns name in its place (`mandate::proof`): its owner's own
-    /// mandate, or the one other person's whose turn is open; with no one
-    /// proven, the agent itself in those turns' places alone, and nowhere
-    /// else. Answers its URL and the mandate it carries.
-    fn asked(&self, at: &str, fragment: Option<&str>) -> CellResult<(String, Option<String>)> {
+    /// The request its computer's egress signs for this agent (FIN-720):
+    /// its presence in its chats (`mandate::presence`) as it came, its own.
+    /// Any other call is work, held to whose ask is open over the turns its
+    /// places opened (`mandate::proof`), signed for its owner or as itself:
+    /// none open, or only its owner's own, as it came (for its owner, their
+    /// newest mandate in place of `for`); one other person's, as them,
+    /// their mandate in place of `for`; no single one proven, the agent
+    /// itself in those turns' places alone, and nowhere else. Answers its
+    /// URL and the mandate it carries.
+    fn asked(&self, method: &str, at: &str, fragment: Option<&str>) -> CellResult<(String, Option<String>)> {
         let url = url::Url::parse(at).map_err(|e| CellError::invalid(format!("url: {e}")))?;
+        // a fragment's site is signed at its own origin (its app's `/api/…`
+        // too): its path as the guest asked for it, `/f/<fragment>/…`, is
+        // what the rules read
+        let site = fragment.filter(|_| !url.host_str().is_some_and(|h| self.cfg.is_platform_host(h)));
+        let path = site.map_or_else(|| url.path().to_string(), |f| format!("/f/{f}{}", url.path()));
         let owner = self.must(MetaKey::Owner)?;
-        if !url.query_pairs().any(|(k, v)| k == "for" && npub::display(&v) == npub::display(&owner)) {
+        let for_owner = url.query_pairs().any(|(k, v)| k == "for" && npub::display(&v) == npub::display(&owner));
+        if !for_owner && mandate::presence(method, &path, &self.name()?) {
             return Ok((at.to_string(), None));
         }
         let now = js::now_ms();
@@ -346,16 +317,32 @@ impl FragmentCell {
         // platform's route takes `for` and no mandate (the registry's
         // `invitee_by`), so its owner's own ask keeps `for` there, and no
         // one else's goes (a fragment's own route of that name is its app's)
-        let path = url.path();
-        if fragment.is_none() && (path == "/api/invites" || path.starts_with("/api/invites/")) {
+        if for_owner && fragment.is_none() && (path == "/api/invites" || path.starts_with("/api/invites/")) {
             return match proof {
                 Proof::Bare | Proof::Owner(_) => Ok((at.to_string(), None)),
                 Proof::Asker { .. } | Proof::Itself(_) => Err(CellError::new(ErrorCode::Forbidden, "an agent answers its owner's invites for its owner alone, never on someone else's ask")),
             };
         }
+        // a fragment's site (`/f/…`) takes no one's word but its signer's
+        // (`for` and a mandate are not honored there, lib.rs): on someone
+        // else's ask it is reached only as the agent itself, in their
+        // turns' places
+        if site.is_some() {
+            return match proof {
+                Proof::Bare | Proof::Owner(_) => Ok((at.to_string(), None)),
+                Proof::Itself(places) if fragment.is_some_and(|f| places.contains(&f)) => Ok((at.to_string(), None)),
+                Proof::Asker { at: places, .. } if fragment.is_some_and(|f| places.iter().any(|(p, _)| *p == f)) => Ok((at.to_string(), None)),
+                Proof::Asker { .. } | Proof::Itself(_) => Err(CellError::new(
+                    ErrorCode::Forbidden,
+                    "on someone else's ask, an agent reaches a fragment's site only in the chats they asked it in: call its API (/api/f/…) to act as them",
+                )),
+            };
+        }
         match proof {
             Proof::Bare => Ok((at.to_string(), None)),
-            Proof::Owner(m) | Proof::Asker { held: m, .. } => Ok((without_for(&url), Some(m.text.to_string()))),
+            Proof::Owner(m) if for_owner => Ok((without_for(&url), Some(m.text.to_string()))),
+            Proof::Owner(_) => Ok((at.to_string(), None)),
+            Proof::Asker { held: m, .. } => Ok((without_for(&url), Some(m.text.to_string()))),
             Proof::Itself(places) if fragment.is_some_and(|f| places.contains(&f)) => Ok((without_for(&url), None)),
             Proof::Itself(_) => Err(CellError::new(
                 ErrorCode::Forbidden,
@@ -447,14 +434,14 @@ impl FragmentCell {
             "sign" => {
                 let b: Sign = crate::json_body(body)?;
                 self.assigned_to(&b.computer)?;
-                let (url, mandate) = self.asked(&b.url, b.fragment.as_deref())?;
+                let (url, mandate) = self.asked(&b.method, &b.url, b.fragment.as_deref())?;
                 let header = self.own_keys().await?.header_for_payload(&b.method, &url, b.payload.as_deref(), crate::js::now_ms() / 1000);
                 Ok(json!({ "header": header, "url": url, "mandate": mandate }))
             }
             "turns" => {
                 let body: Value = crate::json_body(body)?;
                 self.assigned_to(body["computer"].as_str().unwrap_or(""))?;
-                self.turns(&body).await
+                self.turns(&body)
             }
             // an agent's door (fragment_core::door): its owner's ticket, and
             // the guest's redeeming of a link's (a relayed record's check is
@@ -651,9 +638,11 @@ impl FragmentCell {
         )
     }
 
-    /// A member that left takes its notice with it.
+    /// A member that left takes its notice with it, and its asks here
+    /// close (asks.rs).
     pub(crate) fn agent_removed(&self, identity: &str) -> CellResult<()> {
-        self.exec("DELETE FROM joined_outbox WHERE principal = ?", vec![identity.into()])
+        self.exec("DELETE FROM joined_outbox WHERE principal = ?", vec![identity.into()])?;
+        self.asks_let_go(identity)
     }
 
     /// When the joined outbox next has a row due (for the alarm): none

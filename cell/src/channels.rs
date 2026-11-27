@@ -263,7 +263,15 @@ impl FragmentCell {
 
     /// `append`, written by the platform for `asker` (a schedule's fire:
     /// its maker, FIN-720), whose ask the record then names.
-    pub(crate) fn append_asked(&self, channel: &str, (principal, author, asker): (&str, Author, Option<&str>), kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+    pub(crate) fn append_asked(&self, channel: &str, by: (&str, Author, Option<&str>), kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
+        self.append_with(channel, by, None, kind, body, op)
+    }
+
+    /// `append`, its words said on the ask `carried` names (an agent's post
+    /// on someone's proven ask: `records.carried`), kept in the same step,
+    /// so the asks it hands (asks.rs) and an agent of the same owner's it
+    /// asks here (`mandated`) carry it on (FIN-615, PR 16a).
+    fn append_with(&self, channel: &str, (principal, author, asker): (&str, Author, Option<&str>), carried: Option<&str>, kind: &str, body: &Value, op: Option<(&str, i64)>) -> CellResult<Option<ChannelRecord>> {
         assert!(author != Author::Other, "the platform stamps an author it knows");
         assert!(asker.is_none() || author == Author::Platform, "only the platform writes a record for someone's ask");
         let now = js::now_ms();
@@ -298,8 +306,8 @@ impl FragmentCell {
             (false, _) => None,
         };
         let rows = self.rows(
-            "INSERT INTO records (channel, seq, at, principal, author, asker, kind, body, op, idx, outboxed)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+            "INSERT INTO records (channel, seq, at, principal, author, asker, carried, kind, body, op, idx, outboxed)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
              ON CONFLICT DO NOTHING RETURNING seq",
             vec![
                 channel.into(),
@@ -308,6 +316,7 @@ impl FragmentCell {
                 principal.into(),
                 author.as_str().into(),
                 asker.map_or(SqlStorageValue::Null, Into::into),
+                carried.map_or(SqlStorageValue::Null, Into::into),
                 kind.into(),
                 raw.get().into(),
                 op_id,
@@ -341,6 +350,10 @@ impl FragmentCell {
             )?;
         }
         let record = ChannelRecord { channel: channel.to_string(), seq, at: now, principal: npub::display(principal), author: Some(author), kind: kind.to_string(), body: raw, asker: asker.map(str::to_string), mandate: None };
+        // the asks it hands its agents, in this step: someone else's waits
+        // for its agent fragment to hold it (asks.rs), told in `published`
+        let gated = self.asks_noted(&record)?;
+        self.hold_live(&gated);
         self.broadcast_record(&record);
         Ok(Some(record))
     }
@@ -543,6 +556,10 @@ impl FragmentCell {
     /// search is sent from the alarm, armed then too, so a post waits on
     /// no person's list. Answers the runs.
     pub(crate) async fn published(&self, record: &ChannelRecord, appended: bool, depth: u32, laps: &mut js::Laps) -> CellResult<Vec<i64>> {
+        // the asks it handed its agents told first: someone else's reaches
+        // its agent only then (asks.rs)
+        self.tell_asks().await;
+        laps.lap("asks");
         // A retry finds the record appended; its deliveries are written
         // then only if the try that appended it never wrote them (the mark
         // goes with them), so none is lost and none is sent twice.
@@ -627,18 +644,22 @@ impl FragmentCell {
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
         self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
+        // an agent's words on someone's proven ask keep that ask, in the
+        // append's own step (`append_with`)
+        let carried = caller.signed.as_ref().filter(|s| author == Author::Agent && s.mandated).and_then(|s| s.mandate.as_deref());
         // the append and the look for an earlier one are one step (no await between)
-        let (record, appended) = match self.append(channel, principal, author, POST_KIND, body, Some((&key, POST_INDEX)))? {
+        let (record, appended) = match self.append_with(channel, (principal, author, None), carried, POST_KIND, body, Some((&key, POST_INDEX)))? {
             Some(record) => (record, true),
             None => (self.posted(&key, channel, body)?, false),
         };
-        // an agent's words on someone's proven ask keep that ask, in the
-        // append's own step, so an agent of the same owner's it asks here
-        // carries it (`mandated`; FIN-615, PR 16a)
-        if let Some(text) = caller.signed.as_ref().filter(|s| appended && author == Author::Agent && s.mandated).and_then(|s| s.mandate.as_deref()) {
-            self.exec("UPDATE records SET carried = ? WHERE channel = ? AND seq = ?", vec![text.into(), channel.into(), SqlStorageValue::Integer(record.seq)])?;
-        }
         laps.lap("append");
+        // an agent's claim of a record here, taken, opens its ask again, and
+        // is answered once its agent fragment holds it (asks.rs): until then
+        // 502, and its retry finds the claim and asks again
+        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
+            self.claim_noted(&agent.id, channel, body).await?;
+            laps.lap("claim");
+        }
         // A retry finishes what the first try left undone for as long as a
         // mutation's effects are tried again; later, the runs it started may
         // be forgotten, and it would start them twice.
@@ -938,6 +959,14 @@ impl FragmentCell {
     pub(crate) async fn channel(&self, caller: &Caller, channel: &str, after: i64, before: Option<i64>, limit: usize) -> CellResult<Response> {
         self.channel_reader(caller, channel)?;
         let mut page = self.channel_page(channel, after, before, limit)?;
+        // a page an agent reads forward hands it what it holds, and it is
+        // read only once its turns here are open (asks.rs)
+        if let Some(agent) = caller.signed.as_ref().filter(|s| s.kind == IdentityKind::Agent && s.acting_for.is_none()) {
+            if before.is_none() {
+                self.asks_handed(&agent.id, &page.records, after)?;
+            }
+            self.asks_settled(&agent.id).await?;
+        }
         self.mandated(caller, &mut page).await?;
         json_response(&page)
     }

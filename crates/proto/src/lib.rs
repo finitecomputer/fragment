@@ -130,14 +130,19 @@ pub mod limits {
     /// A mandate's text, at most: its names are each bounded, so one the
     /// platform makes is about half this.
     pub const MANDATE_MAX_BYTES: usize = 1024;
-    /// Open turns an agent fragment holds as its bridge tells them
-    /// (cell runs_on.rs `turns`): past it a turn is refused, and its
-    /// bridge runs it later.
+    /// Open turns an agent fragment holds as its places open them (cell
+    /// runs_on.rs `turn_opened`): past it a turn is refused, and its ask
+    /// waits.
     pub const TURNS_HELD_MAX: i64 = 64;
-    /// How long an agent fragment holds a turn its bridge never said ended
-    /// (a crash between): its mandate's day and as long again, then it is
-    /// forgotten. A bridge's start forgets them all at once.
+    /// How long an agent fragment holds a turn its place never said ended
+    /// (the agent never ended it there): its mandate's day and as long
+    /// again, then it is forgotten.
     pub const TURN_HELD_MS: i64 = 2 * MANDATE_LIFE_MS;
+    /// How long a turn holds from its ask, at the least, however soon its
+    /// agent says it ended (cell `opened.rs`): an agent that ends someone
+    /// else's turn early is held to it that long. None for now; its length
+    /// is Paul's to choose.
+    pub const TURN_HOLD_MS: i64 = 0;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
     /// A page of a channel on the live socket also ends at about this many
