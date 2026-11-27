@@ -726,6 +726,26 @@ unfinished design, not debt.
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
 
+## An app reads another as its viewer only for its owner, alone
+
+- **Shortcut:** `job.read` (FIN-615, PR 16b) asks another fragment's query
+  as the app's viewer only when that is its owner in person and the app is
+  "Only you" (`Sharing::only_you`) with code only ever written at its
+  owner's ask (`others_wrote`); for anyone else, an agent's run, once
+  anyone else is in it, or once anyone else wrote its code, the step fails.
+  An app's code is its editors', so a viewer who isn't its owner, or code
+  someone else wrote, would read the viewer's things into what others hold
+  (SHIP IT, 2026-11-26). `others_wrote` stays set: no way back. An app
+  someone else wrote into before it was kept (this release) carries no
+  mark, nor does a mutation's write an agent made for someone else (its
+  pending row names no asker).
+- **Risk:** a shared dashboard can't show each viewer their own other
+  apps; an app anyone else once edited never reads again; an agent's run
+  reads nothing (its caps would have to travel to the app it reads).
+- **Delete when:** One Right Way's one ask (FIN-615, PR 10) lands: an app
+  reading a viewer's other app asks that viewer once (Allow once / Always /
+  No), and the read goes on with their word.
+
 ## An agent ends someone's ask by saying so
 
 - **Shortcut:** an agent's `turn.end` in a chat closes the turn and

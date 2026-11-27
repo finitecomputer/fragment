@@ -74,6 +74,7 @@ impl FragmentCell {
     /// Writes to `main` as one commit, once per `key`. `expect` maps a path
     /// to the blob sha it must have (`None`: it must not exist) at the head
     /// the commit lands on.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit_files(
         &self,
         key: &str,
@@ -81,6 +82,7 @@ impl FragmentCell {
         expect: &BTreeMap<String, Option<String>>,
         message: &str,
         principal: &str,
+        asker: Option<&str>,
         depth: u32,
     ) -> CellResult<Wrote> {
         if writes.len() > limits::FILE_WRITES_MAX {
@@ -90,11 +92,12 @@ impl FragmentCell {
         if total > limits::FILE_WRITE_MAX_BYTES {
             return Err(CellError::too_large("the files written", total, limits::FILE_WRITE_MAX_BYTES));
         }
-        self.commit(key, writes, expect, message, principal, depth).await
+        self.commit(key, writes, expect, message, principal, asker, depth).await
     }
 
     /// [`Self::commit_files`] without a write's limits: the platform's own
     /// commits (a template).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn commit(
         &self,
         key: &str,
@@ -102,6 +105,7 @@ impl FragmentCell {
         expect: &BTreeMap<String, Option<String>>,
         message: &str,
         principal: &str,
+        asker: Option<&str>,
         depth: u32,
     ) -> CellResult<Wrote> {
         if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
@@ -110,7 +114,7 @@ impl FragmentCell {
         // a write before its template's first commit makes the repo and
         // lands that commit first (plane.rs `repo_ready`)
         let repo = self.repo_ready().await?;
-        self.commit_in(&repo, key, writes, expect, message, principal, depth).await
+        self.commit_in(&repo, key, writes, expect, message, principal, asker, depth).await
     }
 
     /// [`Self::commit`] to `repo`, made: the template's seed's own
@@ -124,11 +128,14 @@ impl FragmentCell {
         expect: &BTreeMap<String, Option<String>>,
         message: &str,
         principal: &str,
+        asker: Option<&str>,
         depth: u32,
     ) -> CellResult<Wrote> {
         if let Some(r) = self.rows("SELECT sha FROM file_commits WHERE key = ?", vec![key.into()])?.first() {
             return Ok(Wrote::Commit(r["sha"].as_str().unwrap_or("").to_string()));
         }
+        // whoever's ask it is: past here, it may land
+        self.stamp_others(principal, asker)?;
         let repo = repo.to_string();
         let cs = self.cs()?;
         let (author, email) = author(principal);

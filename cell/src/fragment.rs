@@ -558,6 +558,11 @@ pub(crate) enum MetaKey {
     /// When its last icon makings started (ms, a JSON array, oldest
     /// first): the hour's are counted (`fragment_core::icon::admit`).
     IconMakings,
+    /// Set once someone whose ask was not its owner's wrote its code, or
+    /// was given a token that writes it (`stamp_others`): its code is then
+    /// no longer its owner's alone, so it reads none of their other apps
+    /// (`job.read`, FIN-615 PR 16b), even once no one else is in it.
+    OthersWrote,
 }
 
 impl MetaKey {
@@ -645,6 +650,7 @@ impl MetaKey {
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
+            MetaKey::OthersWrote => "others_wrote",
         }
     }
 
@@ -1067,6 +1073,34 @@ impl FragmentCell {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
+    /// Before a commit to its code lands (files.rs `commit_in`: the files
+    /// API, a job's or mutation's files, an AI step's) or a token that
+    /// writes its repo is minted: unless the write is at its owner's ask,
+    /// its code is no longer its owner's alone (`MetaKey::OthersWrote`, kept
+    /// for good; FIN-615 PR 16b). `writer` signs it; `asker`, whom an agent
+    /// acts for. Its owner's ask is theirs in person, their own agent's for
+    /// them or as itself, or its own code's (its key: a trigger's, a cron's).
+    pub(crate) fn stamp_others(&self, writer: &str, asker: Option<&str>) -> CellResult<()> {
+        // one with no owner reads no one's apps (`job.read`)
+        let Some(owner) = self.meta(MetaKey::Owner)?.map(|o| npub::display(&o)) else { return Ok(()) };
+        let owners = match asker {
+            Some(asker) => npub::display(asker) == owner,
+            None if npub::display(writer) == owner || writer == self.own_key()? => true,
+            None => {
+                #[derive(serde::Deserialize)]
+                struct Row {
+                    owner: Option<String>,
+                }
+                let rows: Vec<Row> = self.typed("SELECT owner FROM members WHERE principal = ? AND kind = 'agent'", vec![writer.into()])?;
+                rows.first().and_then(|r| r.owner.as_deref()).is_some_and(|o| npub::display(o) == owner)
+            }
+        };
+        if owners {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::OthersWrote, "1")
+    }
+
     /// Its schema made current, else refused; and one from before
     /// `Sharing.reach` tells its owner's row once (reach.rs), which fails
     /// no request.
@@ -1341,7 +1375,12 @@ impl FragmentCell {
             (Method::Post, ["api", "ops", op]) => {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
-                self.api_op(&caller, &op, body).await
+                self.api_op(&caller, &op, body, false).await
+            }
+            (Method::Post, ["api", "reads", op]) => {
+                let body = body_json(&mut req).await?;
+                let op = op.to_string();
+                self.api_op(&caller, &op, body, true).await
             }
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();
