@@ -81,16 +81,18 @@ pub(super) async fn answered(req: &mut Request, env: &Env, cfg: &Config, url: &U
     };
     let again = format!("/auth/fragment?name={}&return={}{}", enc(&name), enc(&back), super::address_query(cfg, url));
     let answer = AnswerInvite { by: By::Session(session.clone()), acting_for: None, fragment: name.clone(), yes };
-    match (ask_registry(env, &answer).await, yes) {
-        (Ok(Some(_)), true) => {}
-        (Ok(None), false) => return Ok(redirect("/", &[])?.with_status(303)),
+    let life = match (ask_registry(env, &answer).await, yes) {
+        (Ok(answered), true) if answered.role.is_some() => answered.life,
+        (Ok(answered), false) if answered.role.is_none() => return Ok(redirect("/", &[])?.with_status(303)),
         (Ok(_), _) => return Err(CellError::host("the registry's answer to an invite's yes named no role, or one after a no")),
         (Err(e), _) if e.code == ErrorCode::NotFound => return unanswered(404, "This invite is gone", &e.message, &again, share::label(&name)),
         (Err(e), _) if e.code.status() < 500 => return unanswered(e.code.status(), "Not answered", &e.message, &again, share::label(&name)),
         (Err(e), _) => return Err(e),
-    }
-    // a member now (the fragment answered its claim with their role)
-    let member = Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Member, embedder: None, invite_first: false };
+    };
+    // a member now (the fragment answered its claim with their role), of
+    // the life the registry read before that claim: minted only while it
+    // is still the name's (`site_signin::still_its_life`)
+    let member = Mint { token: Some(session), key: None, fragment: name.clone(), return_to: back, consent: Consent::Member, embedder: None, invite_first: false, life: Some(life) };
     let redeem = ask_registry(env, &member).await?.redeem.ok_or_else(|| CellError::host("a member's mint answered no redemption"))?;
     Ok(to_signin(env, cfg, url, &name, &redeem).await?.with_status(303))
 }

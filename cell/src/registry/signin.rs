@@ -28,6 +28,14 @@
 //! ("Continue to X as you?") is remembered (`consents`) until they sign
 //! out of it there.
 //!
+//! Site sessions, their redemptions and yeses are keyed by the fragment's
+//! name, and are its life's alone (`fragment_core::site_signin`): its
+//! create forgets every one the name keys before the life is written and
+//! counts the name's next life (`forget_site`), a member is minted only
+//! for the life the fragment knew them in (`mint`), and its delete forgets
+//! its own life's rows, never a newer one's. No one is signed in to, or
+//! said yes to, a name's new life by an earlier one.
+//!
 //! A person's approved key (an iPhone's) has no browser, so no platform
 //! session: it signs `POST /api/f/{name}/session` for a top-level
 //! redemption (`mint`), minted from a parent session of the key's own
@@ -52,14 +60,14 @@
 //! request waits on.
 
 use fragment_core::cli_code::{self, Misses};
-use fragment_core::{levers, roundtrip};
+use fragment_core::{levers, roundtrip, site_signin};
 use fragment_proto::Subject;
 use serde::de::IgnoredAny;
 use sha2::{Digest, Sha256};
 
 use super::calls::{
     ApproveKey, Began, Begin, CliBegin, CliBegun, CliCodeOf, CliCoded, Consent, E2ePeopleAnswer, E2ePerson, E2eSignedIn, EndSession, ExchangeIn, Exchanged, KeyAdded,
-    LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
+    ForgetSite, LiveSession, LoggedOut, Logout, Mint, Minted, Redeem, Redeemed, Session, SiteLife, SigninCounts, SigninsHook, SubjectAnswer, E2E_PEOPLE_PAGE,
 };
 use super::*;
 
@@ -689,6 +697,50 @@ impl RegistryCell {
         Ok(())
     }
 
+    /// The name's life as this registry counts it (`site_signin::LIFE_OF`).
+    pub(super) fn site_life(&self, fragment: &str) -> CellResult<u64> {
+        #[derive(Deserialize)]
+        struct LifeRow {
+            life: i64,
+        }
+        let row = self.row::<LifeRow>(site_signin::LIFE_OF, vec![fragment.into()])?.ok_or_else(|| CellError::host("a name's life answered no row"))?;
+        u64::try_from(row.life).map_err(|_| CellError::host("a name's life is never below 0"))
+    }
+
+    /// A fragment's name begins a life (`ended` none), or ended one (calls.rs
+    /// `ForgetSite`): its site and frame sessions, their unspent
+    /// redemptions and its people's yeses go (`site_signin::FORGETS`), in
+    /// one turn with no await, so no request reads a name half forgotten.
+    /// A create's also counts the name's next life; a delete's goes only
+    /// while its life is still the name's (`still_its_life`): a life made
+    /// since keeps its own.
+    pub(super) fn forget_site(&self, b: ForgetSite) -> CellResult<SiteLife> {
+        if !fragment_proto::valid_fragment_name(&b.fragment) {
+            return Err(CellError::invalid("a forgotten site is named by its fragment"));
+        }
+        let now = self.site_life(&b.fragment)?;
+        let forgets = match b.ended {
+            None => true,
+            Some(_) => site_signin::still_its_life(b.ended, now),
+        };
+        // each statement answers its rows (RETURNING): read them all, as
+        // `sweep_signin` does, or the request's transaction cannot commit
+        // (SQLITE_BUSY: a statement still in progress)
+        if forgets {
+            for sql in site_signin::FORGETS {
+                self.rows::<IgnoredAny>(sql, vec![b.fragment.as_str().into()])?;
+            }
+            assert_eq!(self.count("SELECT COUNT(*) AS n FROM sessions WHERE fragment = ?", vec![b.fragment.as_str().into()])?, 0, "a forgotten name keeps no site session");
+        }
+        if b.ended.is_some() {
+            return Ok(SiteLife { life: now });
+        }
+        self.rows::<IgnoredAny>(site_signin::NEXT_LIFE, vec![b.fragment.as_str().into()])?;
+        let life = self.site_life(&b.fragment)?;
+        assert_eq!(life, now + 1, "a create counts the name's next life");
+        Ok(SiteLife { life })
+    }
+
     pub(super) fn logout(&self, b: Logout) -> CellResult<LoggedOut> {
         let Live { hash, .. } = self.live_session(&b.token, None, false)?;
         let now = SqlStorageValue::Integer(js::now_ms());
@@ -716,6 +768,10 @@ impl RegistryCell {
             (None, Some(key), false) => self.key_parent(key).await?,
             _ => return Err(CellError::invalid("a mint names a platform session or a key, and a key's is top-level")),
         };
+        // its one await, ahead of every check below: from here to its
+        // redemption's row nothing else runs here (a create's forget among it)
+        self.sweep_by(js::now_ms() + REDEEM_TTL_MS).await?;
+        let life = self.site_life(&b.fragment)?;
         let (identity, email) = (session.identity, session.email);
         let (who, at) = (identity.id.as_str(), SqlStorageValue::Integer(js::now_ms()));
         // an invite waiting comes before any yes kept: its person is asked
@@ -723,14 +779,20 @@ impl RegistryCell {
         // already), never signed in there as no member
         if b.invite_first {
             if let Some(invite) = self.waiting_to(who, &b.fragment)? {
-                return Ok(Minted { redeem: None, identity, email, invite: Some(invite) });
+                return Ok(Minted { redeem: None, identity, email, invite: Some(invite), life });
             }
         }
         match b.consent {
-            Consent::Member => {}
+            // the fragment knew them in the life read before it was asked;
+            // a create since forgot every row, and knows no one yet
+            Consent::Member => {
+                if !site_signin::still_its_life(b.life, life) {
+                    return Err(CellError::new(ErrorCode::Unauthenticated, "this fragment was made again while you signed in to it; sign in again"));
+                }
+            }
             Consent::Remembered => {
                 if self.count("SELECT COUNT(*) AS n FROM consents WHERE identity = ? AND fragment = ?", vec![who.into(), b.fragment.as_str().into()])? == 0 {
-                    return Ok(Minted { redeem: None, identity, email, invite: None });
+                    return Ok(Minted { redeem: None, identity, email, invite: None, life });
                 }
             }
             Consent::Given => {
@@ -745,8 +807,8 @@ impl RegistryCell {
                 )?;
             }
         }
-        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref()).await?;
-        Ok(Minted { redeem: Some(redeem), identity, email, invite: None })
+        let redeem = self.new_redemption(&hash, &b.fragment, &b.return_to, b.embedder.as_deref())?;
+        Ok(Minted { redeem: Some(redeem), identity, email, invite: None, life })
     }
 
     /// A person's approved key's own parent session (`mint`), made here when
@@ -781,9 +843,9 @@ impl RegistryCell {
         Ok((hash, LiveSession { identity, email, embedder: None }))
     }
 
-    async fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {
+    /// Its caller armed the sweep for it (`mint`, ahead of its checks).
+    fn new_redemption(&self, session: &str, fragment: &str, return_to: &str, embedder: Option<&str>) -> CellResult<String> {
         let expires_at = js::now_ms() + REDEEM_TTL_MS;
-        self.sweep_by(expires_at).await?;
         let redeem = fresh_token();
         let redeem_hash = sha(&redeem);
         self.exec(
