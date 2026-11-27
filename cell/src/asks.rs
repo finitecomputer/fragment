@@ -181,8 +181,10 @@ impl FragmentCell {
             if old || r.principal == agent || r.at < m.added_at || !mandate::starts_turn(r.body.get()) {
                 continue;
             }
-            // to it, as its bridge hears whom words are to
-            if !mandate::heard_by(r.body.get(), r.author == Some(Author::Agent), &agents).contains(&agent.as_str()) {
+            // to it, as its bridge hears whom words are to: words under an
+            // agent member's name (its own, or app code's it called) are
+            // an agent's, whoever wrote them (engine.rs `addressed`)
+            if !mandate::heard_by(r.body.get(), agents.contains(&r.principal.as_str()), &agents).contains(&agent.as_str()) {
                 continue;
             }
             let Some(asked) = mandate::asked_of(&r.principal, r.author, r.asker.as_deref(), r.body.get()) else { continue };
