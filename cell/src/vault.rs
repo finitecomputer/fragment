@@ -287,54 +287,11 @@ struct HandOff<P>(String, P);
 /// Puts `put` into `person`'s Vault under `name` for an old agent's
 /// hand-off (FIN-463 F11), once for `receipt`: its receipt kept in the
 /// turn that puts it, so the same hand-off again (a retry, or a call
-/// beside it) puts nothing, even once its person removed, moved or set
-/// that secret since. It never takes the name of a secret bound to
+/// beside it) puts nothing, even once its person removed or set that
+/// secret since. It never takes the name of a secret bound to
 /// another agent (409).
 pub(crate) async fn hand_off(env: &Env, person: &str, name: &str, receipt: &str, put: &PutSecret) -> CellResult<Vec<u8>> {
     crate::routed::ask_bytes(env, "VAULT", person, &op_path("handoff", name)?, &HandOff(receipt.to_string(), put)).await
-}
-
-/// What a move reads of a kept `Secret`: how and where it goes.
-#[derive(serde::Deserialize)]
-struct Placed {
-    place: Place,
-    #[serde(default)]
-    hosts: Vec<String>,
-}
-
-/// `vault/take`'s body: the destination it claims for, and the hosts the
-/// move keeps it toward there (`fragment_core::vault::within`). A tuple on
-/// the wire.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Take(String, Vec<String>);
-
-/// `vault/take`'s answer: a secret's value, for its move, and which value
-/// it is (its revision: its sealed text's SHA-256). A tuple on the wire.
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct Taken(pub String, pub String);
-
-/// `vault/moved`'s body: the destination a take claimed for, and the
-/// revision it answered. A tuple on the wire.
-#[derive(serde::Serialize, serde::Deserialize)]
-struct Moved(String, String);
-
-/// `name`'s value in `person`'s Vault, for its move into `to` (`fragment/
-/// KEY`, members.rs `fromVault`), claimed for `to` as it is read
-/// (`fragment_core::vault::Claimed`: another destination's take is refused,
-/// 409, while it stands). The mover keeps it, then completes (`moved`), so
-/// it has one home at the end and is never lost between. A Nostr key is
-/// refused: it never leaves; and so is a move toward a host its Vault does
-/// not point it at (`hosts`, 400), before anything is claimed.
-pub(crate) async fn take(env: &Env, person: &str, name: &str, to: &str, hosts: &[String]) -> CellResult<Taken> {
-    crate::routed::ask_object(env, "VAULT", person, &op_path("take", name)?, &Take(to.to_string(), hosts.to_vec())).await
-}
-
-/// `to`'s move of `name`, kept there, completed: removed from `person`'s
-/// Vault while it still holds the value `take` answered as `revision`,
-/// claimed for `to` (one its person set since stays). Again, it removes
-/// nothing.
-pub(crate) async fn moved(env: &Env, person: &str, name: &str, to: &str, revision: &str) -> CellResult<()> {
-    crate::routed::ask_bytes(env, "VAULT", person, &op_path("moved", name)?, &Moved(to.to_string(), revision.to_string())).await.map(drop)
 }
 
 /// Removes `name` from `person`'s Vault: its answer, a `SecretRemoved`.
@@ -442,14 +399,6 @@ impl VaultCell {
             }
             ["vault", "list"] => self.list()?,
             ["vault", "delete", name] => self.delete(name)?,
-            ["vault", "take", name] => {
-                let Take(to, hosts) = crate::json_body(&req.bytes().await?)?;
-                self.take(name, &to, &hosts).await?
-            }
-            ["vault", "moved", name] => {
-                let Moved(to, revision) = crate::json_body(&req.bytes().await?)?;
-                self.moved(name, &to, &revision)?
-            }
             ["vault", "names"] => self.names(&crate::json_body(&req.bytes().await?)?)?,
             ["vault", "fill"] => self.fill(&crate::json_body(&req.bytes().await?)?).await?,
             ["vault", "lent"] => self.lent(crate::json_body(&req.bytes().await?)?).await?,
@@ -522,6 +471,10 @@ impl VaultCell {
         self.binds_alone(name, &checked.apps)?;
         let secret = Secret { name: name.to_string(), hosts: checked.hosts, place: checked.place, agents: checked.agents, apps: checked.apps, set_at: js::now_ms() };
         let text = serde_json::to_string(&secret).map_err(|e| CellError::host(format!("a secret's JSON: {e}")))?;
+        // a value set again ends any claim a move left (the move is gone,
+        // FIN-615 PR 13; a release before it, rolled back to, reads the
+        // column: docs/technical-debt-ledger.md, "A Vault row keeps the
+        // move's claim column")
         self.sql().exec(
             "INSERT INTO secrets (name, sealed, secret) VALUES (?, ?, ?) ON CONFLICT (name) DO UPDATE SET sealed = excluded.sealed, secret = excluded.secret, claim = NULL",
             vec![name.into(), sealed.into(), text.as_str().into()],
@@ -533,10 +486,10 @@ impl VaultCell {
     }
 
     /// `name`, set again with no value: the value held kept as it is, never
-    /// opened (its seal, so its revision and any claim on it, untouched),
-    /// and only where it goes set, its `setAt` its value's own. One turn:
-    /// nothing here yields, so nothing is put, moved or removed between
-    /// its read and its write. One not held is refused, never made.
+    /// opened (its seal untouched), and only where it goes set, its `setAt`
+    /// its value's own. One turn: nothing here yields, so nothing is put or
+    /// removed between its read and its write. One not held is refused,
+    /// never made.
     fn place(&self, name: &str, put: &PutSecret) -> CellResult<String> {
         let rows = self.rows("SELECT secret FROM secrets WHERE name = ?", vec![name.into()])?;
         let held: Option<Secret> = rows.first().map(stored).transpose()?;
@@ -850,44 +803,10 @@ impl VaultCell {
         Ok(event.to_string())
     }
 
-    /// `name`'s value, opened for its move into `to`, and its revision:
-    /// `Taken`'s JSON. Claimed for `to` in the turn that reads it, before
-    /// anything yields (`fragment_core::vault::take`). None, a Nostr key,
-    /// one toward a host its row does not name, or one claimed for another
-    /// destination, refused.
-    async fn take(&self, name: &str, to: &str, hosts: &[String]) -> CellResult<String> {
-        let rows = self.rows("SELECT sealed, secret, claim FROM secrets WHERE name = ?", vec![name.into()])?;
-        let row = rows.first().ok_or_else(|| CellError::new(ErrorCode::NotFound, format!("no secret {name} in your vault (GET /api/vault lists them)")))?;
-        let kept: Placed = crate::json_text(row["secret"].as_str().unwrap_or_default()).map_err(|e| CellError::host(format!("a stored secret: {e}")))?;
-        if kept.place.sign.is_some() {
-            return Err(CellError::invalid(format!("{name} is a key that signs: it never leaves your vault")));
-        }
-        rules::within(name, &kept.hosts, hosts).map_err(|e| CellError::invalid(e.to_string()))?;
-        rules::take(name, row["claim"].as_str(), to).map_err(|e| CellError::new(ErrorCode::Conflict, e.to_string()))?;
-        let sealed = row["sealed"].as_str().unwrap_or_default().to_string();
-        self.sql().exec("UPDATE secrets SET claim = ? WHERE name = ? AND sealed = ?", vec![to.into(), name.into(), sealed.as_str().into()])?;
-        let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;
-        let value = String::from_utf8(opened.plaintext).map_err(|_| CellError::host("a secret that is not text"))?;
-        serde_json::to_string(&Taken(value, revision_of(&sealed))).map_err(|e| CellError::host(e.to_string()))
-    }
-
     /// `name` removed: `SecretRemoved`'s JSON.
     fn delete(&self, name: &str) -> CellResult<String> {
         let removed = !self.rows("SELECT name FROM secrets WHERE name = ?", vec![name.into()])?.is_empty();
         self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
-        serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
-    }
-
-    /// `to`'s move of `name` completed: removed while it is claimed for
-    /// `to` and holds `revision` (`fragment_core::vault::completes`), in one
-    /// turn. `SecretRemoved`'s JSON.
-    fn moved(&self, name: &str, to: &str, revision: &str) -> CellResult<String> {
-        let rows = self.rows("SELECT sealed, claim FROM secrets WHERE name = ?", vec![name.into()])?;
-        let held = rows.first().and_then(|r| Some((r["sealed"].as_str()?, r["claim"].as_str())));
-        let removed = held.is_some_and(|(sealed, claim)| rules::completes(claim, &revision_of(sealed), to, revision));
-        if removed {
-            self.sql().exec("DELETE FROM secrets WHERE name = ?", vec![name.into()])?;
-        }
         serde_json::to_string(&SecretRemoved { name: name.to_string(), removed }).map_err(|e| CellError::host(e.to_string()))
     }
 
@@ -918,13 +837,6 @@ impl VaultCell {
             other => Err(CellError::new(ErrorCode::NotFound, format!("no wipe route {other}"))),
         }
     }
-}
-
-/// Which value a stored secret holds: its sealed text's SHA-256, which a
-/// new seal (its random nonce) always changes.
-fn revision_of(sealed: &str) -> String {
-    use sha2::Digest;
-    hex::encode(sha2::Sha256::digest(sealed.as_bytes()))
 }
 
 /// What a row's kept `Secret` says, read as `T`.

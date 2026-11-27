@@ -1303,7 +1303,7 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
-fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
+fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
 fragment vault set <secret> --agent A|--app APP=KEY [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held; --app lends it to an app of yours as its {{KEY}}
 fragment vault list                      fragment vault rm <secret>
 fragment deploy <name> [--dir D] [--note N]

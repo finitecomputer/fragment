@@ -89,7 +89,7 @@ export async function setup(root) {
   // the Vault's bot lent here by Settings, which framed this page with
   // its offer (`vault-lend`, frame-messages.js): the page asks, naming
   // nothing, and hears its answer from its parent at the platform's origin
-  function fromVault() {
+  function lendIt() {
     const nonce = randomHex(16);
     return new Promise((resolve, reject) => {
       const done = (fn, v) => {
@@ -147,7 +147,7 @@ export async function setup(root) {
         // lent again, it is lent as before (its answer lost); with no
         // offer here, the one lent already (`held`) fills it
         await connect(async () => {
-          if (VAULT) await fromVault();
+          if (VAULT) await lendIt();
         });
       }));
       const other = button("Use another bot", "quiet", () => {
