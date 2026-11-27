@@ -199,8 +199,8 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let window = listed && chrome.until(&apps, &format!("!!document.querySelector({})", serde_json::to_string(&format!("#stack iframe[data-fragment=\"{chat}\"]"))?), wait);
     let allow = allow_of(&mut chrome, &apps, "#stack", &chat)?;
     s.ok(
-        "a chat opened from Apps (it reaches its owner's accounts) keeps the microphone in its window: its policy names the chat's own origin",
-        window && allow == json!(format!("clipboard-write; microphone {}", api.site_origin(&chat))),
+        "a chat opened from Apps (it reaches its owner's accounts) keeps the microphone and the clipboard in its window: its policy names the chat's own origin for both",
+        window && allow == json!(format!("clipboard-write {o}; microphone {o}", o = api.site_origin(&chat))),
         json!({ "reaches": reaches, "listed": listed, "window": window, "allow": allow }),
     );
     chrome.close(apps)?;
