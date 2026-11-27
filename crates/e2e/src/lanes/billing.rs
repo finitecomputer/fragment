@@ -491,7 +491,65 @@ pub fn billing(s: &mut Suite, api: &Api) -> Result<()> {
     payer_goes(s, api)?;
     orphan(s, api)?;
     org_credit(s, api)?;
+    by_invoice(s, api)?;
     wiped(s, api, &payer)
+}
+
+/// An org paid by invoice (FIN-824; docs/billing.md, "An org paid by
+/// invoice") is never Stripe's: its seats' changes ask Stripe nothing, no
+/// card starts paying for it (its seatless admin's Checkout is refused, as
+/// a paying org's is), and an org a card pays for is not marked.
+fn by_invoice(s: &mut Suite, api: &Api) -> Result<()> {
+    let operator = s.operator.clone();
+    let fresh = || format!("inv-{}", &Keys::generate().pubkey_hex()[..12]);
+    let mark = |org: &str, on: bool| api.signed(&operator, "PUT", &format!("/api/admin/orgs/{org}/invoiced"), Some(&json!({ "id": fresh(), "invoiced": on })));
+    // an org a card pays for: its payer keeps its billing
+    let carded = api.person()?;
+    let carded_org = buys(s, api, &carded)?;
+    let refused = mark(&carded_org, true)?;
+    let view = api.signed(&operator, "GET", &format!("/api/admin/orgs/{carded_org}"), None)?;
+    s.ok(
+        "an org a card pays for (its subscription live) is not marked paid by invoice (409): cancel it first",
+        refused.status == 409 && view.body["invoiced"].is_null(),
+        json!([refused.body, view.body]),
+    );
+    // an org paid by invoice: its admin's seats ask Stripe nothing
+    let admin = api.person()?;
+    let made = api.signed(&operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&admin), "kind": "seat_always_on" })))?;
+    let org = made.body["org"]["id"].as_str().unwrap_or("").to_string();
+    let own_seat = made.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let asked = s.stripe.requests().len();
+    let marked = mark(&org, true)?;
+    let member = api.person()?;
+    let offered = api.signed(&admin, "POST", "/api/org/seats", Some(&json!({ "email": Api::email_of(&member) })))?;
+    let accepted = api.signed(&member, "POST", &format!("/api/seat/offers/{}/accept", offered.body["seat"]["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    let held = s.eventually(PUSHED, || ledger(api, &member)["seat"] == "active");
+    let removed = api.signed(&admin, "DELETE", &format!("/api/org/seats/{}", offered.body["seat"]["id"].as_str().unwrap_or("")), None)?;
+    let gone = s.eventually(PUSHED, || ledger(api, &member)["seat"] == "canceled");
+    // its admin gives up their own seat: seatless, they buy none by card
+    let given_up = api.signed(&admin, "DELETE", &format!("/api/org/seats/{own_seat}"), None)?;
+    let checkout = api.signed(&admin, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    let after = s.stripe.requests();
+    s.ok(
+        "its admin's seat offered, accepted and removed, and their own given up, each a comp, ask Stripe nothing; seatless, their Checkout is refused (409 org_pays): no card pays for it",
+        marked.status == 200
+            && offered.status == 200
+            && offered.body["seat"]["comped"] == true
+            && accepted.status == 200
+            && held
+            && removed.status == 200
+            && gone
+            && given_up.status == 200
+            && checkout.status == 409
+            && checkout.body["reason"] == "org_pays"
+            && after.len() == asked,
+        json!({ "marked": marked.body, "offered": offered.body, "removed": removed.body, "givenUp": given_up.body, "checkout": checkout.body, "stripe": after[asked..].iter().map(|a| a.path.clone()).collect::<Vec<_>>() }),
+    );
+    // cleared, it buys again as any org that pays for nothing does
+    let cleared = mark(&org, false)?;
+    let again = api.signed(&admin, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    s.ok("the mark cleared, its seatless admin's Checkout opens again (buying in it)", cleared.status == 200 && again.status == 200 && again.body["session"].is_string(), json!([cleared.body, again.body]));
+    Ok(())
 }
 
 /// An org's own credit (decisions 66 to 68): orgs pay out of band (a
@@ -2200,6 +2258,84 @@ pub fn billing_page(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "seen": seen, "at": b.eval(&page, "location.href")? }),
     );
     b.close(page)?;
+    by_invoice_page(s, &mut b, api, &shots)?;
     println!("      (screenshots: {})", shots.display());
+    Ok(())
+}
+
+/// The Billing and Org sections' text, alone of settings.
+const BILLING_TEXT: &str = "[...document.querySelectorAll('#settings-page section')].filter((x) => /^(Billing|Org)/.test(x.querySelector('h2')?.textContent ?? '')).map((x) => x.innerText).join('\\n')";
+
+/// Billing of an org paid by invoice (FIN-824), in Chrome: its admin is
+/// told it is paid by invoice and its prepaid seats taken, adds a seat by
+/// email, and past its prepaid seats is told to ask Finite for more; its
+/// seat's holder is told theirs is paid by invoice. Neither is shown a
+/// price for a seat, a card, Pay again or the portal. Wide and narrow,
+/// light and dark, for review.
+fn by_invoice_page(s: &mut Suite, b: &mut Lease, api: &Api, shots: &std::path::Path) -> Result<()> {
+    let wait = Duration::from_secs(30);
+    let operator = s.operator.clone();
+    let comp = |body: Value| api.signed(&operator, "POST", "/api/admin/seats", Some(&body));
+    let admin = api.person()?;
+    let made = comp(json!({ "email": Api::email_of(&admin), "kind": "seat_always_on" }))?;
+    let org = made.body["org"]["id"].as_str().unwrap_or("").to_string();
+    let mate = api.person()?;
+    let placed = comp(json!({ "email": Api::email_of(&mate), "kind": "seat_always_on", "org": org }))?;
+    let marked = api.signed(&operator, "PUT", &format!("/api/admin/orgs/{org}/invoiced"), Some(&json!({ "id": format!("inv-{}", &Keys::generate().pubkey_hex()[..12]), "invoiced": true, "seats": 3 })))?;
+    anyhow::ensure!(made.status == 200 && placed.status == 200 && marked.status == 200, "an org paid by invoice, two seats held: {made} {placed} {marked}");
+    let seat_price = dollars(fragment_core::stripe::offer().seat_micros);
+    let unpriced = |said: &str, buys: &Value| {
+        let shown: Vec<&str> = buys["buys"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        !said.contains(&seat_price) && !said.to_lowercase().contains("card") && !said.contains("Pay again") && !shown.iter().any(|b| ["Payment and invoices", "Pay again", "Continue"].contains(b) || b.starts_with("Buy an always-on seat"))
+    };
+    // its admin
+    let session = api.sign_in(&Api::email_of(&admin))?;
+    let page = page_of(b, api, &session, "/settings")?;
+    let shown = view(b, &page, "location.pathname === '/settings' && !!document.querySelector('.billing-seats') && /Paid by invoice/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    let said = b.eval(&page, BILLING_TEXT)?.as_str().unwrap_or("").to_string();
+    let buys = b.eval(&page, BUYS)?;
+    s.ok(
+        "an admin of an org paid by invoice is told so, and how many of its prepaid seats are taken; nothing of a price, a card, Pay again or the portal",
+        shown && said.contains("Paid by invoice") && said.contains("2 of 3 taken") && said.contains("Your org pays Finite by invoice.") && unpriced(&said, &buys),
+        json!({ "said": said, "buys": buys }),
+    );
+    let add = |email: &str| format!("(() => {{ const f = [...document.querySelectorAll('#settings-page form')].find(f => f.textContent.includes('Add a seat')); if (!f) return false; f.querySelector('input[type=email]').value = {email:?}; f.requestSubmit(); return true; }})()");
+    let teammate = format!("billing-invoiced-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
+    if !act(s, b, &page, "an invoiced org's Add a seat", &add(&teammate))? {
+        return Ok(());
+    }
+    let added = b.until(&page, &format!("[...document.querySelectorAll('.billing-seats tr')].some(r => r.textContent.includes({teammate:?}) && r.textContent.includes('invited')) && /3 of 3 taken/.test(document.getElementById('settings-page').innerText)"), wait);
+    s.ok("they add a seat by email: it waits, invited, a comp, and the prepaid seats are all taken", added, b.eval(&page, BILLING_TEXT)?);
+    let over = format!("billing-invoiced-over-{}@e2e.test", &Keys::generate().pubkey_hex()[..8]);
+    if !act(s, b, &page, "an invoiced org's Add a seat, past its prepaid seats", &add(&over))? {
+        return Ok(());
+    }
+    let full = b.until(&page, "[...document.querySelectorAll('.billing-note')].some((n) => n.textContent === \"Your org's prepaid seats are all taken. Ask Finite for more.\")", wait);
+    s.ok("past its prepaid seats, they are told to ask Finite for more, and nothing is offered", full && seat(api, &admin)["seat"]["invoiced"] == true, b.eval(&page, BILLING_TEXT)?);
+    for scheme in ["light", "dark"] {
+        b.color_scheme(&page, scheme)?;
+        for (width, height, mobile) in [(1280, 900, false), (390, 844, true)] {
+            b.viewport(&page, width, height, mobile)?;
+            b.eval(&page, "document.querySelector('.billing-seats')?.scrollIntoView({ block: 'center' })")?;
+            let _ = b.screenshot(&page, &shots.join(format!("invoiced-admin-{width}-{scheme}.png")));
+        }
+    }
+    b.close(page)?;
+    // its seat's holder
+    let session = api.sign_in(&Api::email_of(&mate))?;
+    let page = page_of(b, api, &session, "/settings")?;
+    let shown = view(b, &page, "location.pathname === '/settings' && /Always-on seat, paid by invoice/.test(document.getElementById('settings-page')?.innerText ?? '')", wait);
+    let said = b.eval(&page, BILLING_TEXT)?.as_str().unwrap_or("").to_string();
+    let buys = b.eval(&page, BUYS)?;
+    s.ok("its seat's holder is told their seat is paid by invoice; nothing of a price, a card, Pay again or the portal", shown && !said.contains("(given)") && unpriced(&said, &buys), json!({ "said": said, "buys": buys }));
+    for scheme in ["light", "dark"] {
+        b.color_scheme(&page, scheme)?;
+        for (width, height, mobile) in [(1280, 900, false), (390, 844, true)] {
+            b.viewport(&page, width, height, mobile)?;
+            b.eval(&page, "[...document.querySelectorAll('#settings-page section')].find((x) => x.querySelector('h2')?.textContent === 'Billing')?.scrollIntoView()")?;
+            let _ = b.screenshot(&page, &shots.join(format!("invoiced-member-{width}-{scheme}.png")));
+        }
+    }
+    b.close(page)?;
     Ok(())
 }

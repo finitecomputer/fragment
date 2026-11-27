@@ -303,9 +303,10 @@ impl RegistryCell {
     /// person is in, else in a new org of one, named by the email, whose
     /// seat's holder is its admin. A person's is theirs at once (operators
     /// are trusted: `Yes::Comped`); an email no one signs in with yet is
-    /// offered it, theirs once they accept it. A person who holds a seat
-    /// already is refused, unless it is this same comp (a replay answers it
-    /// again).
+    /// offered it, theirs once they accept it, and so is someone in another
+    /// org than the one named: they move by their own yes (FIN-562). A
+    /// person who holds a seat already is refused, unless it is this same
+    /// comp (a replay answers it again).
     fn comp_seat(&self, b: CompSeatCall) -> CellResult<Comped> {
         let email = super::signin::email_of(&b.comp.email).ok_or_else(|| CellError::invalid(format!("{:?} is not an email", b.comp.email)))?;
         let kind = b.comp.kind;
@@ -315,14 +316,17 @@ impl RegistryCell {
             None => None,
         };
         let person = self.person_by_email(&email)?;
+        // in another org than the one named: offered its seat, as anyone
+        // with no person yet is, and in it only once they accept it
+        let mut elsewhere = false;
         if let Some(p) = &person {
             self.not_wiping_id(p)?;
             // in an org already (by their own yes): the comp is in theirs
             if let Some(m) = self.member_of(p)? {
-                if named.as_ref().is_some_and(|o| o.id != m.org) {
-                    return Err(conflict(format!("{email} is in another org already")));
+                match &named {
+                    Some(o) if o.id != m.org => elsewhere = true,
+                    _ => return self.comp_member(&b.by, m, kind, &email).and_then(|c| self.ending(c, b.comp.until_ms)),
                 }
-                return self.comp_member(&b.by, m, kind, &email).and_then(|c| self.ending(c, b.comp.until_ms));
             }
         }
         // an offer waiting on the email: in the org named, or a comp's own org of one
@@ -346,7 +350,7 @@ impl RegistryCell {
                 }
             },
             None => {
-                if person.is_none() {
+                if person.is_none() || elsewhere {
                     self.check_offer_room(&email)?;
                 }
                 let (org_row, admin) = match named {
@@ -360,9 +364,10 @@ impl RegistryCell {
             }
         };
         let seat = match &person {
-            Some(p) => self.enroll(&offer, Yes::Comped(p))?,
-            None => offer,
+            Some(p) if !elsewhere => self.enroll(&offer, Yes::Comped(p))?,
+            _ => offer,
         };
+        assert!(!elsewhere || seat.person.is_none(), "someone in another org is offered the comp, never moved by it");
         let org_row = self.stored_org(&seat.org)?;
         self.ending(Comped { seat: seat.wire(None)?, org: org_row.reference(), created, mailed: false }, b.comp.until_ms)
     }
@@ -486,7 +491,8 @@ impl RegistryCell {
                             (false, Some(Status::Trialing)) => self.trial_end_of(&o.id)?,
                             _ => None,
                         };
-                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0, trial_ends })
+                        let invoiced = self.invoiced(&o.id)?.is_some();
+                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0, trial_ends, invoiced })
                     }
                     None => None,
                 };
@@ -512,7 +518,7 @@ impl RegistryCell {
         self.my_seat(&who.id)
     }
 
-    fn org_of(&self, b: OrgOf) -> CellResult<OrgView> {
+    pub(super) fn org_of(&self, b: OrgOf) -> CellResult<OrgView> {
         let org_row = match (&b.by, b.org.as_deref()) {
             // an operator's (the router checked them)
             (None, Some(id)) if org::valid_org_id(id) => self.org_row(id)?.ok_or_else(|| not_found(format!("no org {id}")))?,
@@ -541,7 +547,8 @@ impl RegistryCell {
         )?;
         let members = rows.into_iter().map(|r| r.m.wire(r.latest)).collect::<CellResult<Vec<_>>>()?;
         let payer = self.payer_of(&org_row.id)?;
-        Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer })
+        let invoiced = self.invoiced(&org_row.id)?;
+        Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer, invoiced })
     }
 
     fn sync_seat(&self, b: SyncSeat) -> CellResult<()> {

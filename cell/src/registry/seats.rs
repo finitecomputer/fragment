@@ -32,10 +32,16 @@
 //! subscription is canceled in Stripe's portal, at the period's end. A
 //! member's going (leaving, moving, wiped) that leaves none cancels it at
 //! once.
+//!
+//! An org an operator marked invoiced (content.rs `invoiced`; docs/billing.md,
+//! "An org paid by invoice") pays Finite directly: while the mark is set,
+//! its admins offer and remove seats as a paying org's do, but each is a
+//! comp, outside Stripe, within the seats it prepaid for when the mark
+//! names them; removing one ends the comp.
 
 use fragment_core::org::{self, Departure, Seating, Status, Unseated, ADMINS_PER_ORG_MAX, SYNC_BATCH, SYNC_RETRY_MS};
 use fragment_core::stripe::{self as core_stripe, Push, Snapshot, Subscription};
-use fragment_proto::org::{OrgMember, SeatKind};
+use fragment_proto::org::{Invoiced, OrgMember, SeatKind};
 use serde::Serialize;
 
 use super::billing::SubscriptionCopy;
@@ -172,11 +178,11 @@ impl RegistryCell {
         self.row::<OrgSub>("SELECT subscription, status, items, customer, period_end, trial_end, cancel_at_end FROM orgs WHERE id = ?", vec![org.into()])
     }
 
-    /// An org that pays: its seats and admins may change, and it offers
-    /// them. One that never paid, or lapsed, buys again first; a comped
-    /// org's seats are its operators'.
+    /// An org that pays, by card or by invoice: its seats and admins may
+    /// change, and it offers them. One that never paid, or lapsed, buys
+    /// again first; a comped org's seats are its operators'.
     fn paying(&self, org: &str) -> CellResult<()> {
-        if !self.org_pays(org)? {
+        if !self.org_pays(org)? && self.invoiced(org)?.is_none() {
             return Err(CellError::invalid("your org pays for no seats now: buy one first (Checkout), then offer the rest").because(Reason::OrgNotPaying));
         }
         Ok(())
@@ -260,11 +266,26 @@ impl RegistryCell {
         Ok(())
     }
 
+    /// Whether `org` takes one more seat its admins add: by invoice, within
+    /// its prepaid seats, held or offered (an operator's own comps count, and
+    /// are not held to them); by card, as its subscription allows (`seating`).
+    fn seat_room(&self, org: &str, invoiced: Option<Invoiced>) -> CellResult<()> {
+        let Some(mark) = invoiced else { return self.seating(org, Seating::Add) };
+        let Some(prepaid) = mark.seats else { return Ok(()) };
+        if self.count("SELECT COUNT(*) AS n FROM org_members WHERE org = ? AND seat IS NOT NULL", vec![org.into()])? >= prepaid {
+            return Err(CellError::invalid(format!("your org's {prepaid} prepaid seats are all taken: ask Finite for more")).because(Reason::PrepaidSeatsTaken));
+        }
+        Ok(())
+    }
+
     fn add_seat(&self, b: AddSeat) -> CellResult<Added> {
         let (who, admin) = self.admin_of(&b.by)?;
         core_stripe::for_sale(b.kind)?;
         let org_row = self.stored_org(&admin.org)?;
         self.paying(&org_row.id)?;
+        // paid by invoice: the seat is a comp, outside Stripe
+        let invoiced = self.invoiced(&org_row.id)?;
+        let comped = i64::from(invoiced.is_some());
         let email = Self::email_arg(&b.email)?;
         let person = self.person_for_offer(&email)?;
         let from = self.email_of(&who.id)?;
@@ -272,12 +293,15 @@ impl RegistryCell {
         // one of its members: the seat is theirs at once, in their own row
         if let Some(m) = self.member_by_email(&org_row.id, person.as_deref())? {
             return match m.seat()? {
-                Some(k) if k == b.kind && m.comped == 0 => added(&m, false),
+                Some(k) if k == b.kind && m.comped == comped => added(&m, false),
                 Some(_) => Err(conflict(format!("{email} holds a seat here already")).because(Reason::AlreadyOffered)),
                 None => {
-                    self.seating(&org_row.id, Seating::Add)?;
+                    self.seat_room(&org_row.id, invoiced)?;
                     self.check_seats_room(&org_row.id)?;
-                    self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), m.id.as_str().into()])?;
+                    self.exec(
+                        "UPDATE org_members SET seat = ?, comped = ?, until_ms = NULL WHERE id = ?",
+                        vec![b.kind.as_str().into(), SqlStorageValue::Integer(comped), m.id.as_str().into()],
+                    )?;
                     if let Some(p) = &m.person {
                         self.queue_sync(p)?;
                     }
@@ -292,25 +316,25 @@ impl RegistryCell {
         let offer = match self.offer_in(&org_row.id, &email)? {
             Some(o) if o.seat.is_some() => {
                 // the same offer again is answered again
-                if o.seat()? == Some(b.kind) && o.comped == 0 {
+                if o.seat()? == Some(b.kind) && o.comped == comped {
                     return added(&o, false);
                 }
                 return Err(conflict(format!("{email} is offered a seat here already")).because(Reason::AlreadyOffered));
             }
             Some(o) => {
                 // an admin's place offered: the seat joins it
-                self.seating(&org_row.id, Seating::Add)?;
+                self.seat_room(&org_row.id, invoiced)?;
                 self.check_seats_room(&org_row.id)?;
                 self.offer_mail_room(&org_row.id)?;
-                self.exec("UPDATE org_members SET seat = ?, comped = 0 WHERE id = ?", vec![b.kind.as_str().into(), o.id.as_str().into()])?;
+                self.exec("UPDATE org_members SET seat = ?, comped = ? WHERE id = ?", vec![b.kind.as_str().into(), SqlStorageValue::Integer(comped), o.id.as_str().into()])?;
                 self.member(&o.id)?
             }
             None => {
-                self.seating(&org_row.id, Seating::Add)?;
+                self.seat_room(&org_row.id, invoiced)?;
                 self.check_offer_room(&email)?;
                 self.check_seats_room(&org_row.id)?;
                 self.offer_mail_room(&org_row.id)?;
-                self.insert_offer(&org_row.id, &email, false, Some(b.kind), false, &who.id)?
+                self.insert_offer(&org_row.id, &email, false, Some(b.kind), comped != 0, &who.id)?
             }
         };
         assert!(offer.person.is_none(), "an offer is no one's until they accept it");
@@ -319,29 +343,37 @@ impl RegistryCell {
         added(&offer, true)
     }
 
-    /// A paid seat of the org `by` admins, held or offered.
-    fn paid_seat(&self, by: &By, seat: &str) -> CellResult<MemberRow> {
+    /// A seat of the org `by` admins, held or offered, theirs to remove: a
+    /// paid one, or, while it pays by invoice, a comp (its seats are its
+    /// admins'). Answers whether it pays by invoice.
+    fn admins_seat(&self, by: &By, seat: &str) -> CellResult<(MemberRow, bool)> {
         let (_, admin) = self.admin_of(by)?;
         let m = self.member_in(&admin.org, seat)?;
+        let invoiced = self.invoiced(&m.org)?.is_some();
         match m.seat()? {
-            Some(_) if m.comped == 0 => Ok(m),
+            Some(_) if m.comped == 0 || invoiced => Ok((m, invoiced)),
             Some(_) => Err(CellError::invalid(format!("{seat} is comped: an operator changes it"))),
             None => Err(not_found(format!("no seat {seat}")).because(Reason::Gone)),
         }
     }
 
     fn remove_seat(&self, b: RemoveSeat) -> CellResult<OrgMember> {
-        let m = self.paid_seat(&b.by, &b.seat)?;
+        let (m, invoiced) = self.admins_seat(&b.by, &b.seat)?;
         let who = self.person_by(&b.by)?;
         if self.payers_own(&m, &who.id)? {
             return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: their seat is theirs to give up", m.email)).because(Reason::PayerOnly));
         }
-        if self.paid_seats(&m.org)? <= 1 {
+        // an org paid by invoice has no live subscription (content.rs
+        // `mark_invoiced`), so no paid seat of it keeps one alive
+        if m.comped == 0 && !invoiced && self.paid_seats(&m.org)? <= 1 {
             return Err(CellError::invalid("this is the org's last paid seat: cancel its subscription in Payment and invoices (it ends with the period)").because(Reason::LastPaidSeat));
+        }
+        if m.comped != 0 {
+            console_log!("{}", json!({ "invoiced-seat-removed": m.id, "org": m.org }));
         }
         if m.admin != 0 {
             // an admin (or an admin's place offered) keeps their place
-            self.exec("UPDATE org_members SET seat = NULL, sleeps = 0 WHERE id = ?", vec![m.id.as_str().into()])?;
+            self.exec("UPDATE org_members SET seat = NULL, comped = 0, sleeps = 0, until_ms = NULL WHERE id = ?", vec![m.id.as_str().into()])?;
         } else {
             self.exec("DELETE FROM org_members WHERE id = ?", vec![m.id.as_str().into()])?;
         }

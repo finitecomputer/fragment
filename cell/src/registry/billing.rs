@@ -309,7 +309,8 @@ impl RegistryCell {
             Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
-                let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref());
+                // an org paid by invoice pays for its seats: no card starts paying for it
+                let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref()) || self.invoiced(&o.id)?.is_some();
                 match (paying, m.admins(None)) {
                     (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
                     (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name)).because(Reason::OrgPays)),

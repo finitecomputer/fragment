@@ -1,5 +1,7 @@
 // The operators' admin page (docs/billing.md, "The operator's admin";
-// decision 59): a glance at who joined and what runs, people, orgs, trial
+// decision 59): a glance at who joined and what runs, people, orgs (and an
+// org's own acts: its invoiced mark, a comp into it, its credit, budget and
+// payer, each through the route the CLI's `fragment operator` uses), trial
 // codes, billing's health and the log
 // of what operators did, through `/api/admin/*` with the operator's own
 // platform session (`x-fragment-shell`, same-origin only). The page is
@@ -149,7 +151,9 @@ async function orgs(more = false) {
   const rows = $("org-rows");
   if (!more) rows.replaceChildren();
   for (const o of v.orgs) {
-    const st = el("span", o.status || "never paid", o.status && !["trialing", "active", "past_due"].includes(o.status) ? "lapsed" : "");
+    const st = o.invoiced
+      ? el("span", "paid by invoice")
+      : el("span", o.status || "never paid", o.status && !["trialing", "active", "past_due"].includes(o.status) ? "lapsed" : "");
     rows.append(row([o.name, st, String(o.paidSeats), String(o.compedSeats), String(o.pending), String(o.admins), o.customer || ""], guard(() => openOrg(o.id))));
   }
   orgsNext = v.next;
@@ -157,8 +161,37 @@ async function orgs(more = false) {
   say(`${rows.children.length} orgs`);
 }
 
+const dollars = (micros) => `$${(micros / 1e6).toFixed(2)}`;
+const fresh = () => `admin-${crypto.randomUUID()}`;
+
+/** A form of `fields` and a button labeled `label`; `done` runs on its submit. */
+function form(label, fields, done) {
+  const f = el("form");
+  f.append(...fields, el("button", label));
+  f.addEventListener("submit", guard(async (e) => {
+    e.preventDefault();
+    await done();
+  }));
+  return f;
+}
+
+function input(placeholder, { type = "text", required = true, min, step } = {}) {
+  const i = el("input");
+  i.type = type;
+  i.placeholder = placeholder;
+  i.required = required;
+  if (min !== undefined) i.min = min;
+  if (step !== undefined) i.step = step;
+  return i;
+}
+
+// An org, and what an operator does for it: its invoiced mark (paid to
+// Finite directly, outside Stripe: its admins' seats are comps), a seat
+// comped into it (someone in another org is offered it), and its own
+// credit, budget and payer (docs/billing.md, "An org's own credit").
 async function openOrg(id) {
-  const v = await api("GET", `/api/admin/orgs/${encodeURIComponent(id)}`);
+  const org = encodeURIComponent(id);
+  const [v, ledger] = await Promise.all([api("GET", `/api/admin/orgs/${org}`), api("GET", `/api/admin/orgs/${org}/ledger`).catch((e) => ({ unread: e.message }))]);
   const box = $("org");
   const table = el("table");
   const body = el("tbody");
@@ -166,7 +199,62 @@ async function openOrg(id) {
     body.append(row([m.email, m.person ? "" : "waiting", m.admin ? "admin" : "", m.seat ? `${KIND[m.seat]} ${m.comped ? "comped" : "paid"}` : "", m.id]));
   }
   table.append(body);
-  box.replaceChildren(el("h2", v.name), table);
+  const seats = v.members.filter((m) => m.seat).length;
+  const facts = el("dl");
+  const fact = (k, val) => facts.append(el("dt", k), el("dd", val ?? ""));
+  fact("id", v.id);
+  fact("paid by invoice", v.invoiced ? (v.invoiced.seats != null ? `yes: ${seats} of ${v.invoiced.seats} prepaid seats taken` : `yes, no seat cap: ${seats} seats`) : "no");
+  fact("credit", ledger.unread ? `unread: ${ledger.unread}` : `${dollars(ledger.balanceMicros)} left, ${dollars(ledger.spentMicros)} of its ${dollars(ledger.budgetMicros)} budget spent this month`);
+  const again = async (said) => {
+    await openOrg(id);
+    await orgs();
+    say(said);
+  };
+  // the mark: set, its prepaid seats changed, or cleared (its seats stay)
+  const prepaid = input("prepaid seats (none: no cap)", { type: "number", required: false, min: "1", step: "1" });
+  if (v.invoiced?.seats != null) prepaid.value = String(v.invoiced.seats);
+  const mark = form(v.invoiced ? "Change prepaid seats" : "Mark paid by invoice", [prepaid], async () => {
+    await api("PUT", `/api/admin/orgs/${org}/invoiced`, { id: fresh(), invoiced: true, seats: prepaid.value ? Number(prepaid.value) : null });
+    await again(`${v.name} is paid by invoice${prepaid.value ? `, ${prepaid.value} prepaid seats` : ""}: its admins add seats, each a comp`);
+  });
+  if (v.invoiced) {
+    const clear = el("button", "Clear the mark");
+    clear.type = "button";
+    clear.addEventListener("click", guard(async () => {
+      if (!confirm(`Clear ${v.name}'s invoiced mark? Its seats stay; its admins can't add more.`)) return;
+      await api("PUT", `/api/admin/orgs/${org}/invoiced`, { id: fresh(), invoiced: false });
+      await again(`${v.name} is no longer paid by invoice: its seats stay; its admins can't add more`);
+    }));
+    mark.append(clear);
+  }
+  // a seat comped into this org: theirs at once, or offered (someone in another org moves by their own yes)
+  const email = input("email", { type: "email" });
+  const kind = el("select");
+  kind.append(new Option("always-on seat", "seat_always_on"), new Option("seat that sleeps (comps only)", "seat"));
+  const comp = form("Comp a seat here", [email, kind], async () => {
+    const c = await api("POST", "/api/admin/seats", { email: email.value.trim(), kind: kind.value, org: id });
+    const how = c.seat.person ? "theirs now" : "offered: theirs once they accept it";
+    await again(`${c.created ? "comped" : "already comped"}: ${c.seat.email} in ${c.org.name}, ${how}${c.mailed ? ", mailed" : ""}`);
+  });
+  // its own credit, under the payment's own id (so a retry credits it once)
+  const usd = input("dollars", { type: "number", min: "0.01", step: "0.01" });
+  const why = input("why");
+  const payment = input("payment's id (an invoice's number)");
+  const credit = form("Credit the org", [usd, why, payment], async () => {
+    await api("POST", `/api/ledger/org:${org}/grant`, { id: payment.value.trim(), micros: Math.round(Number(usd.value) * 1e6), by: me.id, why: why.value });
+    await again(`credited ${v.name} $${usd.value}`);
+  });
+  const budget = input("monthly budget, dollars (0: none)", { type: "number", min: "0", step: "0.01" });
+  const setBudget = form("Set its budget", [budget], async () => {
+    await api("POST", `/api/ledger/org:${org}/budget`, { id: fresh(), micros: Math.round(Number(budget.value) * 1e6) });
+    await again(`${v.name}'s budget is $${budget.value} a month`);
+  });
+  const person = input("email or npub");
+  const payer = form("Name who its credit is invoiced to", [person], async () => {
+    const p = await api("POST", `/api/admin/orgs/${org}/payer`, { id: fresh(), person: person.value.trim() });
+    await again(`${v.name}'s credit is invoiced to ${p.email || p.person}`);
+  });
+  box.replaceChildren(el("h2", v.name), facts, table, mark, comp, credit, setBudget, payer);
   box.hidden = false;
 }
 

@@ -14,7 +14,7 @@
 //! checks that itself, as every route of its own did in the cell.
 
 use fragment_core::mail::PRODUCT;
-use fragment_proto::org::{CompSeat, Comped, NamePayer, NewContentAdmin, SeatKind, SetSeatKind};
+use fragment_proto::org::{CompSeat, Comped, NamePayer, NewContentAdmin, SeatKind, SetInvoiced, SetSeatKind};
 use fragment_proto::{limits, ErrorCode};
 use worker::{console_error, Env, Method, Request, Response};
 
@@ -22,7 +22,7 @@ use crate::config::Config;
 use crate::error::{CellError, CellResult};
 use crate::orgs::{before, body, param};
 use crate::registry::admin;
-use crate::registry::content::{ContentOf, NominatePayer, OfferAdmin};
+use crate::registry::content::{ContentOf, MarkInvoiced, NominatePayer, OfferAdmin};
 use crate::registry::orgs::{CompKind, CompSeatCall, EndComp, OrgOf};
 use crate::registry::trials::{TrialChange, TrialGet, TrialList, TrialNew};
 use crate::{ask_registry, json_answer, read_body};
@@ -147,6 +147,12 @@ pub async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (Method::Post, ["orgs", org, "payer"]) => {
             let b: NamePayer = body(&bytes)?;
             json_answer(&ask_registry(env, &NominatePayer { operator: by, org: org.to_string(), person: b.person, request: b.id }).await?)
+        }
+        // an org paid by invoice, outside Stripe (docs/billing.md, "An org
+        // paid by invoice"), its mark set or cleared, in its governance log
+        (Method::Put, ["orgs", org, "invoiced"]) => {
+            let set: SetInvoiced = body(&bytes)?;
+            json_answer(&ask_registry(env, &MarkInvoiced { operator: by, org: org.to_string(), set }).await?)
         }
         (m, _) => Err(CellError::new(ErrorCode::NotFound, format!("no route {} /api/admin/{}", m.as_ref(), rest.join("/")))),
     }

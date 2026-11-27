@@ -79,6 +79,9 @@ pub struct SeatView {
     /// While its org's subscription is a trial: when it ends (seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_ends: Option<i64>,
+    /// Its org pays Finite by invoice (an operator's mark, `Invoiced`).
+    #[serde(default)]
+    pub invoiced: bool,
 }
 
 /// An offer to a person: an org named an email of theirs for a seat, an
@@ -178,6 +181,33 @@ pub struct OrgView {
     /// comped only, or never paid). Only they step down as its admin.
     #[serde(default)]
     pub payer: Option<String>,
+    /// It pays Finite by invoice (`None`: it does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoiced: Option<Invoiced>,
+}
+
+/// An org's invoiced mark (docs/billing.md, "An org paid by invoice"): an
+/// operator's, set while it pays Finite directly, outside Stripe. Its
+/// admins' seats are comps while it is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Invoiced {
+    /// The seats it prepaid for, held or offered (`None`: no cap).
+    pub seats: Option<u64>,
+    /// When an operator set it, ms.
+    pub at: i64,
+}
+
+/// `PUT /api/admin/orgs/{org}/invoiced`: an operator marks an org paid by
+/// invoice (`invoiced`, its prepaid `seats` when named), or clears the
+/// mark, once by `id`. Clearing it keeps its seats.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetInvoiced {
+    pub id: String,
+    pub invoiced: bool,
+    #[serde(default)]
+    pub seats: Option<u64>,
 }
 
 /// `POST /api/admin/seats`: an operator comps a seat of `kind` for
@@ -337,6 +367,9 @@ pub struct AdminOrg {
     pub paid_seats: u64,
     pub comped_seats: u64,
     pub pending: u64,
+    /// It pays Finite by invoice (`None`: it does not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoiced: Option<Invoiced>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

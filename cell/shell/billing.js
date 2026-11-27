@@ -18,8 +18,10 @@
 // (`/welcome?checkout=…`), a credit pack's here (`/settings?pack=…`,
 // `returning`). A deployment that sells nothing (`offer` null: no Stripe,
 // billing off, its seats an operator's to give) shows no price and nothing
-// to buy: a guest is told seats are not open (`CLOSED`). Every value is
-// text, never markup.
+// to buy: a guest is told seats are not open (`CLOSED`). An org an operator
+// marked paid by invoice (`invoiced`: it pays Finite directly) is said to,
+// its seats offered and removed as any paying org's, with no price, card or
+// portal. Every value is text, never markup.
 
 import { icon } from "./icons.js";
 
@@ -27,6 +29,7 @@ const KIND = { seat: "Seat whose computer sleeps when idle", seat_always_on: "Al
 // an offer's amount, in whole dollars where it is whole ($200, not $200.00)
 const price = (micros) => (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 0 });
 const CLOSED = "Finite isn't open for new seats yet.";
+const BY_INVOICE = "Paid by invoice";
 
 /** What a seat gives a guest, at its price (`offer`: `GET /api/seat`'s; null, nothing sold). */
 export function seatGives(offer) {
@@ -343,7 +346,7 @@ export async function billingSections(helpers, ledger, mine, back) {
   const alone = org?.members?.length === 1;
   const seat = mine.seat;
   if (seat) {
-    const kind = KIND[seat.kind] + (seat.comped ? " (given)" : seat.kind === offer?.kind ? `, ${price(offer.seatMicros)} a month` : "");
+    const kind = KIND[seat.kind] + (seat.invoiced ? `, ${BY_INVOICE.toLowerCase()}` : seat.comped ? " (given)" : seat.kind === offer?.kind ? `, ${price(offer.seatMicros)} a month` : "");
     billing.append(line("Seat", kind));
     // a seat's holder who is no admin leaves by their own yes, as they joined
     const leave = seat.admin
@@ -470,8 +473,9 @@ export async function billingSections(helpers, ledger, mine, back) {
   // a trial is for a seat of one (docs/billing.md, "Trials"): no seat is added while it runs
   const trial = !!seat?.trialEnds;
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays, trial)] : [billing];
-  // an admin alone buys seats for others, where something is sold
-  if (!offer) return [billing];
+  // an admin alone adds seats for others: where something is sold, or by invoice
+  const invoiced = !!org?.invoiced;
+  if (!offer && !invoiced) return [billing];
   const more = el("div", "settings-actions");
   const others = el("button", "quiet", "Add seats for others");
   others.type = "button";
@@ -479,8 +483,10 @@ export async function billingSections(helpers, ledger, mine, back) {
     more.closest(".settings-action-line")?.remove();
     billing.after(orgSection(org, offer, mine.pays, trial));
   };
-  // only who pays opens its billing (Stripe's portal renews it, and changes its card)
-  more.append(...(mine.pays ? [portal()] : []), others);
+  // only who pays opens its billing (Stripe's portal renews it, and changes
+  // its card); an org paid by invoice has none of it
+  more.append(...(mine.pays && !invoiced ? [portal()] : []), others);
+  if (invoiced) billing.append(line("Payment", BY_INVOICE));
   billing.append(actionLine("Organization", more));
   return [billing];
 }
@@ -500,10 +506,13 @@ function portal() {
  * nothing is sold, the table alone). Who pays's own seat and place are
  * theirs alone to give up, and while its subscription lives they stay
  * (the platform says to cancel it first). While it is a trial (`trial`),
- * which is for a seat of one, no seat is added: it says so instead.
+ * which is for a seat of one, no seat is added: it says so instead. An org
+ * paid by invoice (`org.invoiced`) adds and removes its seats with no price
+ * and no portal, within the seats it prepaid for when they are named.
  */
 function orgSection(org, offer, pays, trial) {
   const { el, section, line, actionLine } = h;
+  const invoiced = org.invoiced ?? null;
   const box = section(org.name ? `Org: ${org.name}` : "Org");
   if (org.error) {
     box.append(el("p", "muted", org.error));
@@ -515,10 +524,11 @@ function orgSection(org, offer, pays, trial) {
     const who = el("td", null, m.email + (m.person ? "" : " (invited)"));
     // who pays's seat and place are theirs alone; offers (no person) are withdrawn
     const payer = !!m.person && m.person === org.payer;
-    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped ? " (given)" : "") : "", payer ? "pays" : ""].filter(Boolean).join(", "));
+    const role = el("td", null, [m.admin ? "admin" : "", m.seat ? KIND[m.seat] + (m.comped && !invoiced ? " (given)" : "") : "", payer ? "pays" : ""].filter(Boolean).join(", "));
     const actions = el("td");
     const now = "Open Settings again to see your org as it is now.";
-    if (m.seat && !m.comped && (!payer || pays)) {
+    // an org paid by invoice removes its own seats, each a comp; a comp elsewhere is an operator's
+    if (m.seat && (!m.comped || invoiced) && (!payer || pays)) {
       const removed = (e) =>
         plainly(
           e,
@@ -570,8 +580,8 @@ function orgSection(org, offer, pays, trial) {
     table.append(tr);
   }
   box.append(table);
-  // its seats and admins are added, and paid for, through Stripe
-  if (!offer) return box;
+  // its seats and admins are added, and paid for, through Stripe or by invoice
+  if (!offer && !invoiced) return box;
   const add = el("form", "settings-actions");
   const email = el("input");
   email.type = "email";
@@ -585,7 +595,8 @@ function orgSection(org, offer, pays, trial) {
     plainly(
       err,
       {
-        org_not_paying: `No ${what} was offered: your org isn't paying for seats right now. Pay for yours first (Pay again, under Billing).`,
+        org_not_paying: `No ${what} was offered: your org isn't paying for seats right now.${pays ? " Renew it in Payment and invoices first." : ""}`,
+        prepaid_seats_taken: "Your org's prepaid seats are all taken. Ask Finite for more.",
         not_an_email: `That isn't an email address. Check it and try again.`,
         already_offered: `${who} already has a seat here, or an offer waiting.`,
         org_full: "Your org has as many seats as it can hold.",
@@ -623,11 +634,20 @@ function orgSection(org, offer, pays, trial) {
       note(box, offerFailed(err, adminEmail.value.trim(), "admin's place"));
     }
   };
+  const byMail = "A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once).";
+  if (invoiced) {
+    // paid to Finite directly: no price, no card, no portal
+    const taken = org.members.filter((m) => m.seat).length;
+    box.append(line("Payment", BY_INVOICE));
+    if (invoiced.seats != null) box.append(line("Prepaid seats", `${taken} of ${invoiced.seats} taken`));
+    box.append(actionLine("Add a seat", add), actionLine("Add an admin", admin), el("p", "muted", `Your org pays Finite by invoice. ${byMail}`));
+    return box;
+  }
   // while a trial runs, no seat is added: said instead of a form that would be refused
   box.append(
     trial ? line("Add a seat", "A trial is for one seat. Add seats once it's paid: add a card in Payment and invoices before the trial ends.") : actionLine("Add a seat", add),
     actionLine("Add an admin", admin),
-    el("p", "muted", `A seat or an admin's place is offered by mail, and is theirs once they accept it (someone in the org is given a seat at once). A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
+    el("p", "muted", `${byMail} A seat, ${price(offer.seatMicros)} a month and always on, bills from its offer, prorated; one removed is credited on the next invoice. ${pays ? "Cancel in Payment and invoices." : "Its billing is who pays's."}`),
   );
   if (pays) {
     const pay = el("div", "settings-actions");

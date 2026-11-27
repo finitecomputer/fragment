@@ -49,7 +49,7 @@ the security audit's H1).
   their own.
 - **A seat is paid or comped.** Paid seats are counted on the org's one
   subscription; comped seats are an operator's, outside Stripe, always
-  good. A comp may end by itself (`CompSeat.untilMs`, an operator's; the
+  good (or, in an org paid by invoice, its admins': below). A comp may end by itself (`CompSeat.untilMs`, an operator's; the
   move's have none, docs/migrations.md): the registry's alarm ends it
   then, as an operator's end would. A comp held already keeps its own end.
 - **Standing is Stripe's status** (decision 53): `trialing`, `active` and
@@ -80,6 +80,38 @@ before its ledger takes it, so a command cut short is finished by
 sending it again. Orgs buy no credit and set no budget themselves. Its
 billing admins read its ledger; reading or funding it lets no one into
 its fragments (decision 69).
+
+### An org paid by invoice
+
+FIN-824 (Paul, 2026-11-27: "most orgs are paying us up front not
+per-month"). An org that pays Finite directly, outside Stripe, carries an
+operator's **invoiced** mark (`PUT /api/admin/orgs/{org}/invoiced`, or the
+admin's org view), optionally with the seats it prepaid for, and no end:
+an operator clears it. The mark is one fact, its governance log's latest
+`invoiced` or `invoiced-cleared` entry, logged once by its id there and
+in the operators' log, as `payer-named` is (registry/content.rs
+`invoiced`). While it is set:
+
+- the org pays, for its seats' changes: its admins offer seats and admins'
+  places, and its offers are taken, as a paying org's are;
+- each seat its admins add, offered or given, is a comp, outside Stripe:
+  free, its holder's plan pushed as any comp's. Its admins remove one,
+  which ends the comp;
+- with prepaid seats named, its seats, held or offered, never pass them
+  (`prepaid_seats_taken`: "Your org's prepaid seats are all taken. Ask
+  Finite for more."). An operator's own comp is not held to them;
+- no card starts paying for it: a Checkout of its admins' is refused, as
+  any paying org's is;
+- Billing says "Paid by invoice" to its admins and seats' holders, and
+  shows no price, card or portal.
+
+An org whose subscription has not ended is not marked (cancel it first),
+so a card never pays for an org its Billing says is invoiced. Clearing the
+mark keeps every seat, held or offered: it stops new ones, and the
+operator is told so. Staff invoice its seats by hand (the admin's org view
+counts them); Stripe's invoiced subscriptions (FIN-824's option a) are not
+in v1. An org ever marked is never dropped (`has_content`), as one
+credited is.
 
 ### An org's content outlives its billing
 
@@ -160,7 +192,11 @@ Decision 59: `/admin`, served to an operator's session alone (to anyone
 else, the 404 of a missing path), and `/api/admin/*`. People (comp a seat,
 end a comp, grant credit), invites (a comped seat, or a mailed trial),
 trial codes (a change is compare-and-set, its capacity never below the
-places taken), orgs, billing's health, and an audit log of every write.
+places taken), orgs (an org's invoiced mark, a seat comped into it, its
+own credit, budget and payer, through the routes `fragment operator` uses),
+billing's health, and an audit log of every write. A comp into an org for
+someone in another org offers it to them: they move by their own yes
+(FIN-562).
 The wipe stays a signed CLI call. It is a row of SPECIAL-CASE-INVENTORY.md.
 
 ## The shell
@@ -183,7 +219,8 @@ The wipe stays a signed CLI call. It is a row of SPECIAL-CASE-INVENTORY.md.
 
 ## Not in v1
 
-Annual plans, team trials and invoices by bank transfer; WorkOS
+Annual plans, team trials and Stripe's invoices by bank transfer (an
+org paid by invoice is an operator's mark, above); WorkOS
 Organizations and SSO; several orgs per person; usage sent to Stripe;
 refunds, which stay in Stripe's dashboard; paying with a key (decision
 50).
