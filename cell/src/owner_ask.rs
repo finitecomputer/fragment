@@ -226,7 +226,7 @@ impl FragmentCell {
             ("cap", None) => format!("{} default", p.card.fragment),
             _ => p.card.fragment.clone(),
         };
-        let open = "FROM asks WHERE answer IS NULL AND until > ?";
+        let open = "FROM owner_asks WHERE answer IS NULL AND until > ?";
         let same = self.count_of(&format!("SELECT COUNT(*) AS n {open} AND agent = ? AND asker = ? AND asks = ? AND what = ? AND about = ?"), vec![
             SqlStorageValue::Integer(now),
             p.agent.as_str().into(),
@@ -261,7 +261,7 @@ impl FragmentCell {
         // `asker`: a card is no one's words, and asks no agent anything
         let (record, _) = self.append_own(WORK, &body, &key, None).await?;
         self.exec(
-            "INSERT OR IGNORE INTO asks (seq, agent, asker, asks, what, about, key, until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO owner_asks (seq, agent, asker, asks, what, about, key, until) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 SqlStorageValue::Integer(record.seq),
                 p.agent.as_str().into(),
@@ -282,7 +282,7 @@ impl FragmentCell {
         if channel != WORK {
             return Ok(None);
         }
-        let rows: Vec<Asked> = self.typed("SELECT seq, agent, asker, what, about, key, until, answer, done FROM asks WHERE seq = ?", vec![SqlStorageValue::Integer(seq)])?;
+        let rows: Vec<Asked> = self.typed("SELECT seq, agent, asker, what, about, key, until, answer, done FROM owner_asks WHERE seq = ?", vec![SqlStorageValue::Integer(seq)])?;
         Ok(rows.into_iter().next())
     }
 
@@ -309,7 +309,7 @@ impl FragmentCell {
     /// again after one that did (Always here switched off since stays off,
     /// Allow once taken stays taken). The card is closed either way.
     pub(crate) async fn ask_answered(&self, ask: &Asked, answer: Answer, by: &str) -> CellResult<()> {
-        self.exec("UPDATE asks SET answer = ? WHERE seq = ? AND answer IS NULL", vec![answer.as_str().into(), SqlStorageValue::Integer(ask.seq)])?;
+        self.exec("UPDATE owner_asks SET answer = ? WHERE seq = ? AND answer IS NULL", vec![answer.as_str().into(), SqlStorageValue::Integer(ask.seq)])?;
         if let (Some(key), Answer::Once | Answer::Always, None) = (&ask.key, answer, ask.done) {
             let lent = LendAnswer { agent: ask.agent.clone(), asker: ask.asker.clone(), key: key.clone(), what: ask.what.clone(), always: answer == Answer::Always, by: by.to_string() };
             match ask.about == self.name()? {
@@ -317,7 +317,7 @@ impl FragmentCell {
                 false => crate::fragment::call(&self.env, &ask.about, &lent).await?,
             }
         }
-        self.exec("UPDATE asks SET done = 1 WHERE seq = ?", vec![SqlStorageValue::Integer(ask.seq)])?;
+        self.exec("UPDATE owner_asks SET done = 1 WHERE seq = ?", vec![SqlStorageValue::Integer(ask.seq)])?;
         let turn = self.rows("SELECT json_extract(body, '$.turn') AS turn FROM records WHERE channel = ? AND seq = ?", vec![WORK.into(), SqlStorageValue::Integer(ask.seq)])?;
         let body = json!({ "kind": "ask.closed", "ask": ask.seq, "turn": turn.first().map(|r| r["turn"].clone()), "agent": npub::display(&ask.agent), "option": answer.as_str(), "by": npub::display(by) });
         self.append_own(WORK, &body, &format!("ask.closed:{}", ask.seq), None).await?;

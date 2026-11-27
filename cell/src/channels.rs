@@ -354,10 +354,10 @@ impl FragmentCell {
     /// a channel they cannot read. The same post again is the record it
     /// appended (`posted`), whatever became of its question since. Read
     /// with no await before its append. An answer to the platform's own
-    /// card (asks.rs) is one it takes while open, in its one shape: that
+    /// card (owner_ask.rs) is one it takes while open, in its one shape: that
     /// card and the answer, for `ask_answered` (a retry's too, to finish it).
     #[allow(clippy::too_many_arguments)]
-    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<Option<(crate::asks::Asked, permit::Answer)>> {
+    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<Option<(crate::owner_ask::Asked, permit::Answer)>> {
         let Some(question) = permit::answers(body) else { return Ok(None) };
         let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
         if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?.is_empty() {

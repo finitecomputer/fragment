@@ -719,7 +719,7 @@ pub(crate) fn as_themselves(standing: Standing) -> bool {
 pub(crate) fn decide(visibility: Visibility, standing: Standing, action: Action) -> CellResult<Role> {
     match permit::decide(&permit::Facts { visibility, standing, action }) {
         Verdict::Allow(role) => Ok(role),
-        // what is dangerous asks on a card first (asks.rs `confirm_first`), and
+        // what is dangerous asks on a card first (owner_ask.rs `confirm_first`), and
         // its route's own `require` refuses an agent still
         Verdict::Ask(_) => Err(CellError::new(ErrorCode::Forbidden, "its owner confirms this, on a card")),
         Verdict::Refuse(refusal) => Err(CellError::new(if refusal.sign_in { ErrorCode::Unauthenticated } else { ErrorCode::Forbidden }, refusal.message())),

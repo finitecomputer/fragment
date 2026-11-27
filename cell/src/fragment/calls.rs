@@ -94,7 +94,7 @@ impl Call for FaceOf {
 /// a fragment made again under its name lends nothing.
 /// `asker`, whose ask it is, with `request`, their record that asked (its
 /// channel and seq): what their owner allowed once is lent to it alone
-/// (asks.rs `lent_once`); none takes nothing allowed once.
+/// (owner_ask.rs `lent_once`); none takes nothing allowed once.
 #[derive(Serialize, Deserialize)]
 pub(crate) struct LendOf {
     pub agent: String,
@@ -108,7 +108,7 @@ impl Call for LendOf {
     type Answer = fragment_proto::Lend;
 }
 
-/// What a card asks (asks.rs): `what` as `permit::Ask::what` names it,
+/// What a card asks (owner_ask.rs): `what` as `permit::Ask::what` names it,
 /// about `fragment` (a lend's place, with its `key`; a dangerous action's
 /// fragment, with its `title`, and a cap's `micros`, none the default).
 #[derive(Serialize, Deserialize, Clone)]

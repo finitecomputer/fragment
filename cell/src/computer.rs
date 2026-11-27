@@ -4611,11 +4611,11 @@ impl ComputerCell {
             let provider = self.cfg.providers.named(&p.provider, p.connection).expect("a catalog's, filtered so");
             // someone else's ask uses the owner's paid tools when the place
             // lends their credit, and their accounts and keys when it lends
-            // those; else it asks them, on a card (asks.rs)
+            // those; else it asks them, on a card (owner_ask.rs)
             let needs = if provider.kind == Kind::Operator { Lent::Spend } else { Lent::Accounts };
             if let Some(ask) = permit::lend_asks(grants.lend.unwrap_or(Lend::OWNER), needs) {
                 let unasked = format!("{agent}'s owner hasn't lent it {} for someone else's ask here", if needs == Lent::Spend { "their credit" } else { "their accounts and keys" });
-                return Err(crate::asks::refused(&self.env, agent, None, (&owner, true), crate::asks::lend_card(ask), &unasked).await);
+                return Err(crate::owner_ask::refused(&self.env, agent, None, (&owner, true), crate::owner_ask::lend_card(ask), &unasked).await);
             }
             if !grants.may_use(&provider.name) {
                 let list = grants.connections.as_deref().unwrap_or_default();
@@ -5502,7 +5502,7 @@ async fn egress_swap(mut req: Request, env: &Env, ctx: &Context, computer: &str)
         let vaulted: Vec<&Placeholder> = found.iter().filter(|p| vault_s(cfg, p)).collect();
         if !vaulted.is_empty() && answer["accounts"] == false {
             let unasked = format!("{agent}'s owner hasn't lent it their accounts and keys for someone else's ask here");
-            return Err(crate::asks::refused(env, &agent, None, (&owner, true), crate::asks::lend_card(permit::Ask::Lend(Lent::Accounts)), &unasked).await);
+            return Err(crate::owner_ask::refused(env, &agent, None, (&owner, true), crate::owner_ask::lend_card(permit::Ask::Lend(Lent::Accounts)), &unasked).await);
         }
         if !vaulted.is_empty() {
             let ask = crate::vault::FillAsk {
