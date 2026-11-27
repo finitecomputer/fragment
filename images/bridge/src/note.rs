@@ -392,10 +392,12 @@ pub fn speaker(name: &str, via: &str, room: &records::Room) -> String {
 /// "A message heard in a room"), first: where it is, that everyone there
 /// reads what the agent says, and whether its asker (`name`) is its owner.
 /// One line, at most `PLACE_LINE_MAX_BYTES`: a queued turn keeps it in the
-/// state (`Turn::place`). The `team-rooms` skill says what it means.
+/// state (`Turn::place`). It names the `team-rooms` skill, which says what
+/// it means: an index of skills shows each one's description cut short
+/// (Hermes': 60 characters), so the note is what sends the agent to it.
 pub fn place(name: &str, owner: bool, via: &str, room: &records::Room) -> String {
     let whose = if owner { "your owner" } else { "not your owner" };
-    let line = format!("You are in {} {}, a room others share: everyone in it reads what you say there. {} is {whose}.", door(via), room.name, sayer(name));
+    let line = format!("You are in {} {}, a room others share: everyone in it reads what you say there. {} is {whose}. Read your team-rooms skill before you answer.", door(via), room.name, sayer(name));
     assert!(line.len() <= limits::PLACE_LINE_MAX_BYTES && !line.contains('\n'), "where a turn is, one short line: {}", line.len());
     line
 }

@@ -1,6 +1,6 @@
 ---
 name: team-rooms
-description: "How to act in a shared room of one of your doors (a Slack channel, or someone's DM with your Slack app): everyone there reads your reply, and the person asking may not be your owner. Load it before you reply or use a tool whenever a turn's note says \"a room others share\"."
+description: "Read first in a room others share (Slack channel or DM). Everyone there reads your reply, and the person asking may not be your owner: how to act in a shared room of one of your doors. Load it before you reply or use a tool whenever a turn's note says \"a room others share\"."
 ---
 
 # Team rooms
@@ -11,7 +11,7 @@ starts with a note, and its message names who said it, by name, door and
 room (`Maple · Slack · #deploys`):
 
 ```
-You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner.
+You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner. Read your team-rooms skill before you answer.
 Said there just before, oldest first:
 > Sam: deploy started
 ```

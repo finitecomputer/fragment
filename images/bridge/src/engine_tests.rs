@@ -5281,7 +5281,7 @@ fn a_message_heard_in_a_room_is_its_speakers_in_that_rooms_conversation() {
     assert_eq!((t.room.as_deref(), t.conversation()), (Some("C0123"), "talk--k3x9/C0123".to_string()), "that room's own conversation");
     assert_eq!(
         t.place.as_deref(),
-        Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner.\nSaid there just before, oldest first:\n> Sam: deploy started\n> Your owner (a member): ship it")
+        Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. Maple is not your owner. Read your team-rooms skill before you answer.\nSaid there just before, oldest first:\n> Sam: deploy started\n> Your owner (a member): ship it")
     );
     let start = posts(&s).into_iter().find(|(_, b)| b["kind"] == "turn.start").expect("its claim").1;
     assert_eq!((&start["asker"], &start["room"]), (&json!("slack:U0456"), &json!("C0123")), "its claim names its speaker, and its room");
@@ -5297,7 +5297,7 @@ fn a_message_heard_in_a_room_is_its_speakers_in_that_rooms_conversation() {
     owners["room"] = json!({ "id": "C0123", "name": "#deploys" });
     let t = started(&said_by_door(&mut e, &a, &v, 3, SLACK, owners, T0 + 5)).expect("its owner's message, a turn");
     assert_eq!((t.asker.as_str(), t.asker_name.as_str(), t.conversation()), ("npub1paul", "paul · Slack · #deploys", "talk--k3x9/C0123".to_string()));
-    assert_eq!(t.place.as_deref(), Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. paul is your owner."));
+    assert_eq!(t.place.as_deref(), Some("You are in Slack #deploys, a room others share: everyone in it reads what you say there. paul is your owner. Read your team-rooms skill before you answer."));
     // a message of the chat's own, on its page: the chat's conversation, as ever
     ev(&mut e, Event::End { turn: t.turn, outcome: Outcome::Idle }, T0 + 6);
     let t = started(&said(&mut e, &a, &v, 4, "npub1paul", json!({ "text": "from the page" }), T0 + 7)).expect("a turn");
