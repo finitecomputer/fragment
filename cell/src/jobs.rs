@@ -70,6 +70,11 @@ use crate::fragment::calls::{JobAdvance, JobEffect, JobFinish};
 use crate::fragment::{json_response, missing, Caller, FragmentCell, MetaKey};
 use crate::ops::{Invocation, JOB_ID_PREFIX};
 use crate::{js, keys};
+
+/// Why a key its owner's Vault lends does not go (`lends_not`): its link
+/// opens it, or it was a connector that runs other code now.
+const LENT_WHILE_LINKED: &str = "its owner's Vault lends nothing to an app shared by link or public: make it members only first";
+const LENT_UNMADE: &str = "this app was a connector that runs other code now, so it is lent nothing from its owner's Vault: an editor can set the app's own";
 use fragment_core::gather::Gathered;
 
 /// How far a fetch carries the chain it is part of (another fragment's inbox reads it).
@@ -1009,20 +1014,63 @@ impl FragmentCell {
     /// `Idempotency-Key`, the same on every try and replay, unless the job
     /// named its own: a vendor that honours the header acts on it once.
     /// Secret `name`'s value, for a fetch to `url`: a secret's name, set,
-    /// for that host.
-    async fn fill(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
+    /// for that host; its own first, else one its owner lends it (`lent`),
+    /// and whether it was lent.
+    async fn fill(&self, name: &str, url: &url::Url) -> Result<(String, bool), StepFail> {
         if !valid_secret_name(name) {
             return Err(permanent(format!("{{{{{name}}}}} is not a secret name (^[A-Z][A-Z0-9_]*$)")));
         }
         // its hosts and its sealed value read in one statement, so the value
         // opened is the one those hosts were set with
-        let stored = self
-            .stored_secret(name)
-            .map_err(|e| StepFail::Retry(e.message))?
-            .ok_or_else(|| permanent(format!("no secret named {name} (set it with `fragment secret set <fragment> {name} --to <the API's host>`)")))?;
+        let Some(stored) = self.stored_secret(name).map_err(|e| StepFail::Retry(e.message))? else {
+            return Ok((self.lent(name, url).await?, true));
+        };
         fragment_core::secrets::may_fill(&stored.hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
         let secret = self.open_secret(name, &stored.sealed).await.map_err(|e| StepFail::Retry(e.message))?;
-        String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))
+        Ok((String::from_utf8(secret).map_err(|_| permanent(format!("secret {name} is not UTF-8 text")))?, false))
+    }
+
+    /// Secret `name` lent by its owner's Vault (FIN-615, PR 12; docs/
+    /// secrets.md, "A person's Vault"), for a fetch to `url`, where it holds
+    /// none of its own by that name: the one its owner bound to this app as
+    /// `name`, toward one of its hosts, and checked against them as its own
+    /// is. Asked only then, so an app that holds its keys waits on no hop.
+    /// An owner who is no person (an org's app) has no Vault, and while its
+    /// link opens it, it is lent nothing (a key is reach: reach.rs); nor
+    /// ever once it was a connector that ran other code (`Unmade`: what was
+    /// lent it while it was its owner's alone to edit is not the new
+    /// code's to send): `lends_not`.
+    async fn lent(&self, name: &str, url: &url::Url) -> Result<String, StepFail> {
+        let retry = |e: CellError| StepFail::Retry(e.message);
+        let needs = || permanent(format!("This app needs {name}. Its owner can lend it from their Vault, or an editor can set the app's own."));
+        let Some(owner) = self.meta(MetaKey::Owner).map_err(retry)?.filter(|o| npub::is_identity(o)) else {
+            return Err(needs());
+        };
+        if let Some(why) = self.lends_not().map_err(retry)? {
+            return Err(permanent(format!("{name}: {why}")));
+        }
+        let host = url.host_str().unwrap_or_default().trim_end_matches('.');
+        match crate::vault::lent(&self.env, &owner, &self.name().map_err(retry)?, name, host).await {
+            Ok(crate::vault::Lent(value, hosts)) => {
+                fragment_core::secrets::may_fill(&hosts, url, self.cfg.egress_local).map_err(|why| permanent(why.message(name)))?;
+                Ok(value)
+            }
+            Err(e) if e.code == ErrorCode::NotConnected => Err(needs()),
+            Err(e) if matches!(e.code, ErrorCode::Forbidden | ErrorCode::InvalidRequest) => Err(permanent(e.message)),
+            Err(e) => Err(retry(e)),
+        }
+    }
+
+    /// Why a key its owner's Vault lends may not go now, if it may not:
+    /// ever once it was a connector that ran other code (`Unmade`), and
+    /// while its link opens it (FIN-352: a key is reach). Read before the
+    /// Vault is asked and again as the fetch is sent, so a change meanwhile
+    /// sends none.
+    fn lends_not(&self) -> CellResult<Option<&'static str>> {
+        if self.meta(MetaKey::Unmade)?.is_some() {
+            return Ok(Some(LENT_UNMADE));
+        }
+        Ok((self.visibility()? != fragment_proto::Visibility::Members).then_some(LENT_WHILE_LINKED))
     }
 
     async fn step_fetch(&self, run: &RunRow, index: u32, f: Fetch) -> Result<Value, StepFail> {
@@ -1068,28 +1116,32 @@ impl FragmentCell {
             }
         }
         let headers = Headers::new();
-        // every value it fills, a header's or the URL's, is named as its
-        // placeholder in what goes back to the job (`redact`, below)
-        let mut filled = BTreeMap::new();
+        // each secret it names, its headers' then its URL's (checked against
+        // its host as it stands), opened once: the value it carries is the
+        // one named back as its placeholder in what goes back to the job
+        // (`redact`, below), whatever is set meanwhile
+        let mut filled: BTreeMap<String, String> = BTreeMap::new();
+        let mut lent = false;
+        let names: Vec<String> = f.headers.values().flat_map(|v| placeholders(v)).map(str::to_string).chain(in_url.iter().cloned()).collect();
+        for name in names {
+            if let std::collections::btree_map::Entry::Vacant(slot) = filled.entry(name) {
+                let (secret, was_lent) = self.fill(slot.key(), &url).await?;
+                lent |= was_lent;
+                slot.insert(secret);
+            }
+        }
         for (k, given) in &f.headers {
             let mut value = given.clone();
             for name in placeholders(given) {
-                let secret = self.fill(name, &url).await?;
-                value = value.replace(&format!("{{{{{name}}}}}"), &secret);
-                filled.insert(name.to_string(), secret);
+                value = value.replace(&format!("{{{{{name}}}}}"), &filled[name]);
             }
             headers.set(k, &value).map_err(|e| permanent(format!("header {k}: {e}")))?;
         }
-        // the URL's own: checked against its host as it stands, then filled
-        let mut opened = BTreeMap::new();
-        for name in &in_url {
-            opened.insert(name.clone(), self.fill(name, &url).await?);
-        }
         // a URL that names no secret goes as the job wrote it
-        let url = if opened.is_empty() {
+        let url = if in_url.is_empty() {
             url
         } else {
-            fragment_core::secrets::fill_url(&url, |name| opened.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
+            fragment_core::secrets::fill_url(&url, |name| filled.get(name).cloned().ok_or_else(|| format!("{{{{{name}}}}} unopened"))).map_err(|why| match why {
                 fragment_core::secrets::UrlUnfilled::Value(why) => permanent(why),
                 fragment_core::secrets::UrlUnfilled::Moved => permanent("a secret's value would change where this fetch goes (its host, or its path's segments or query's parameters): it is not sent"),
             })?
@@ -1098,7 +1150,6 @@ impl FragmentCell {
         // wrote it, however the vendor spelled it: a failure's message, and
         // an answer that echoes the request (a redirect's `location`, an
         // error page, a debug echo of its headers)
-        filled.extend(opened);
         let redact = |text: String| fragment_core::secrets::redact(text, &filled);
         if !matches!(method, Method::Get | Method::Head) && !f.headers.keys().any(|k| k.eq_ignore_ascii_case(IDEMPOTENCY_HEADER)) {
             let key = format!("{}-s{index}", self.run_key(run.id).map_err(|e| StepFail::Retry(e.message))?);
@@ -1147,6 +1198,13 @@ impl FragmentCell {
             init.with_body(Some(body.into()));
         }
         let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
+        // a lent key goes only while its link does not open it, decided in
+        // the turn it is sent: its owner's Vault was asked meanwhile
+        if lent {
+            if let Some(why) = self.lends_not().map_err(|e| StepFail::Retry(e.message))? {
+                return Err(permanent(why));
+            }
+        }
         let req = Request::new_with_init(&to, &init).map_err(|e| permanent(redact(e.to_string())))?;
         let host = url.host_str().unwrap_or("").to_string();
         let max = limits::FETCH_RESPONSE_MAX_BYTES;

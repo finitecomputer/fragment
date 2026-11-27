@@ -1214,6 +1214,15 @@ made public (403 `private_while_reaching`; a secret on one its link
 opens is 403 `unshare_first`). People you add by name, at any role, are
 fine, and they can use its keys.
 
+A key that is its owner's, not the app's (their API key, their bot's
+token), stays in their Vault: they lend it to the app themselves
+(`fragment vault set <secret> --app my-thing--k3x9=API_KEY --to
+api.example.com`; an agent can't), and `{{API_KEY}}` fills from there
+wherever the app holds no `API_KEY` of its own. Its own comes first.
+Anyone who can edit the app can make it use the key, toward its hosts
+alone; it is lent nothing while its link opens it. Until it is lent, the
+fetch fails saying the app needs it.
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1295,7 +1304,7 @@ fragment invites accept|decline <name>   # an agent: its owner's, acting for the
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
 fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
-fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held
+fragment vault set <secret> --agent A|--app APP=KEY [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held; --app lends it to an app of yours as its {{KEY}}
 fragment vault list                      fragment vault rm <secret>
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may

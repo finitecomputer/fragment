@@ -1,6 +1,6 @@
 //! A person's Vault (FIN-466; docs/secrets.md, "A person's Vault"): the
-//! secrets their agents use without holding them. A value goes in and
-//! never comes out: every answer here names a secret, never its value.
+//! secrets their agents and apps use without holding them. A value goes in
+//! and never comes out: every answer here names a secret, never its value.
 
 use serde::{Deserialize, Serialize};
 
@@ -26,9 +26,39 @@ pub struct PutSecret {
     #[serde(default)]
     #[cfg_attr(feature = "schema", schemars(extend("default" = {})))]
     pub place: Place,
-    /// The agents that may use it, each by its fragment's name: at least
-    /// one (Paul, 2026-11-09: per agent).
+    /// The agents that may use it, each by its fragment's name (Paul,
+    /// 2026-11-09: per agent). With `apps`, at least one between them.
     pub agents: Vec<String>,
+    /// The apps that may use it, each under the name its code fills
+    /// (FIN-615, PR 12: per app, as per agent).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
+    pub apps: Vec<AppUse>,
+}
+
+/// An app of its person's that may use a secret, and the name its code
+/// fills it by: `{{KEY}}` in a job's fetch, which an app's own secret of
+/// that name fills first (docs/secrets.md, "A person's Vault").
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct AppUse {
+    /// The app's fragment name.
+    pub app: String,
+    /// The secret's name in its code (`^[A-Z][A-Z0-9_]{0,63}$`).
+    pub key: String,
+}
+
+/// `PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under
+/// `key`, the name its code fills, in place of any name it had for that
+/// app; nothing else of the secret changes, so a lend never puts back what
+/// its person changed meanwhile (FIN-615, PR 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct LendSecret {
+    /// The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`).
+    pub key: String,
 }
 
 /// Where a secret goes on a request: one of a header in a format
@@ -71,6 +101,9 @@ pub struct Secret {
     pub hosts: Vec<String>,
     pub place: Place,
     pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = [])))]
+    pub apps: Vec<AppUse>,
     /// When its value was set, in ms since the epoch.
     pub set_at: i64,
 }

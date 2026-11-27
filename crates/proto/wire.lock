@@ -106,6 +106,7 @@ bound Place.header default null
 bound Place.query default null
 bound Place.sign default null
 bound PutDraft.text default null
+bound PutSecret.apps default []
 bound PutSecret.place default {}
 bound PutSecret.value default null
 bound Report.bytes default null
@@ -126,6 +127,7 @@ bound RosterAgent.picture_url default null
 bound RosterAgent.sites default []
 bound RosterTaken.bound range u32
 bound RosterTaken.withdrawn range u32
+bound Secret.apps default []
 bound Secret.setAt range i64
 bound Seen.unread range u32
 bound Sharing.guests range u64
@@ -160,6 +162,8 @@ branches LiveOut.result oneOf
 branches LiveOut.result.#1 status
 extends LiveOut.presence Present
 extends LiveOut.record ChannelRecord
+field AppUse.app required string
+field AppUse.key required string
 field Archived.archived required boolean
 field Archived.name required string
 field ChannelNewest.channel required string
@@ -232,6 +236,7 @@ field LeftBehind.path required string
 field LeftBehind.why required string
 field Lend.accounts required boolean
 field Lend.spend required boolean
+field LendSecret.key required string
 field ListWatchFrame.changed.type required "changed"
 field ListWatchFrame.hello.type required "hello"
 field ListWatchFrame.invited.type required "invited"
@@ -426,6 +431,7 @@ field Present.principal required string
 field PutDraft.text optional string|null
 field PutDraft.turn required string
 field PutSecret.agents required array<string>
+field PutSecret.apps optional array<AppUse>
 field PutSecret.hosts required array<string>
 field PutSecret.place optional Place
 field PutSecret.value optional string|null
@@ -461,6 +467,7 @@ field RosterTaken.withdrawn required integer
 field SearchAnswer.fragments required array<ListedFragment>
 field SearchAnswer.messages required array<MessageHit>
 field Secret.agents required array<string>
+field Secret.apps optional array<AppUse>
 field Secret.hosts required array<string>
 field Secret.name required string
 field Secret.place required Place
@@ -545,6 +552,8 @@ field migrations.secrets.path.old required string
 field migrations.yes.path.old required string
 field migrations.zip.path.stage required string
 field search.find.query.q required string
+field vault.lend.path.app required string
+field vault.lend.path.secret required string
 field vault.put.path.secret required string
 field vault.remove.path.secret required string
 other Author other
@@ -753,6 +762,13 @@ route search.find accepts session
 route search.find path search.find.path
 route search.find query search.find.query
 route search.find response SearchAnswer
+route vault.lend PUT /api/vault/{secret}/apps/{app}
+route vault.lend accepts nip98
+route vault.lend accepts session
+route vault.lend path vault.lend.path
+route vault.lend query vault.lend.query
+route vault.lend request LendSecret
+route vault.lend response Secret
 route vault.list GET /api/vault
 route vault.list accepts nip98
 route vault.list accepts session
@@ -772,6 +788,7 @@ route vault.remove accepts session
 route vault.remove path vault.remove.path
 route vault.remove query vault.remove.query
 route vault.remove response SecretRemoved
+type AppUse both object closed
 type Archived out object
 type Author out enum open
 type ChannelNewest out object
@@ -795,6 +812,7 @@ type Has in object
 type IdentityKind out enum
 type LeftBehind both object
 type Lend both object closed
+type LendSecret in object closed
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -974,6 +992,8 @@ type notices.list.path in object
 type notices.list.query in object
 type search.find.path in object
 type search.find.query in object
+type vault.lend.path in object
+type vault.lend.query in object
 type vault.list.path in object
 type vault.list.query in object
 type vault.put.path in object

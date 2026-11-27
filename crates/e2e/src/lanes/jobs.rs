@@ -532,6 +532,7 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
         &list,
     );
     secret_hosts(s, api, &owner, &upstream)?;
+    lent(s, api, &upstream)?;
     inbox_secret(s, api, &owner)?;
     inbox_hmac(s, api, &owner)?;
     launched_across_lives(s, api, &owner)?;
@@ -741,6 +742,127 @@ fn inbox_hmac(s: &mut Suite, api: &Api, owner: &Keys) -> Result<()> {
 /// own, whose secret names the fake's host; a fetch to the same fake by
 /// another name, and to a host it names over http; neither reaches
 /// anything, and each fails its step saying why.
+/// Goal: an app fills `{{KEY}}` from its owner's Vault, bound to it as KEY
+/// (FIN-615, PR 12; docs/secrets.md, "A person's Vault"), where it holds no
+/// secret of its own by that name, and the value never reaches its code:
+/// not in its answer however the vendor writes it back, its run, or a log.
+/// Method: an app of Ada's with no `API_KEY` of its own, before and after
+/// she lends it one, run by her and by an editor who isn't her; then each
+/// way it is not lent (another host, another person's app, its link open,
+/// a second binding), and its own coming first.
+fn lent(s: &mut Suite, api: &Api, upstream: &Upstream) -> Result<()> {
+    let long = Duration::from_secs(40);
+    let (ada, bob, ben) = (api.person()?, api.person()?, api.person()?);
+    let lent_value = format!("sk-lent-{}", &Keys::generate().pubkey_hex()[..20]);
+    let (name, _) = jobs_fragment(s, api, &ada, "lent", |_| {})?;
+    // a key is lent only where its owner and the people named are, as one
+    // of its own is held (FIN-352)
+    let private = |keys: &Keys, app: &str| -> Result<()> {
+        let r = api.signed(keys, "PUT", &format!("/api/f/{app}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(r.status == 200, "{app} made members only: {r}");
+        Ok(())
+    };
+    private(&ada, &name)?;
+    let spell = |keys: &Keys, app: &str, id: &str, host: &str| -> Result<Value> {
+        let url = upstream.url("/spell/{{API_KEY}}").replace("127.0.0.1", host);
+        let r = api.op(keys, app, "spell", id, json!({ "url": url }))?;
+        Ok(settle(api, keys, app, started(&r), &["succeeded", "held"], long))
+    };
+    let needs = |run: &Value| run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("This app needs API_KEY. Its owner can lend it from their Vault, or an editor can set the app's own."));
+    let before = spell(&ada, &name, "lent-none", "127.0.0.1")?;
+    s.ok("an app with no API_KEY of its own, and none lent, fails its fetch saying so", needs(&before), &before);
+
+    let vault = |keys: &Keys, secret: &str, body: Value| api.signed(keys, "PUT", &format!("/api/vault/{secret}"), Some(&body));
+    let binds = |app: &str| json!([{ "app": app, "key": "API_KEY" }]);
+    let set = vault(&ada, "jobs-key", json!({ "value": lent_value, "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&name) }))?;
+    s.ok(
+        "its owner lends it a secret of her Vault as API_KEY, for this app alone, answered with its binding, never its value",
+        set.status == 200 && set.body["apps"] == binds(&name) && set.body["agents"] == json!([]) && !set.text.contains(&lent_value),
+        &set,
+    );
+    let ran = spell(&ada, &name, "lent-ada", "127.0.0.1")?;
+    // the vendor wrote the value back in each spelling (`spellings`): the
+    // app's code reads each as its placeholder, and none of them
+    let forms = spellings(&[&lent_value, &format!("Bearer {lent_value}")]);
+    let unread = |run: &Value| {
+        let text = run["output"]["text"].as_str().unwrap_or("");
+        run["status"] == "succeeded" && text.lines().count() == forms.len() && text.lines().all(|l| l.contains("{{API_KEY}}")) && forms.iter().all(|f| !text.contains(f.as_str())) && !run.to_string().contains(&lent_value)
+    };
+    let hit = upstream.hits(&format!("/spell/{lent_value}"));
+    s.ok(
+        "its fetch is filled from her Vault, and a vendor that writes the value back (each spelling) reaches the app's code as {{API_KEY}}, never the value",
+        unread(&ran) && hit.len() == 1 && hit[0].authorization == format!("Bearer {lent_value}"),
+        json!({ "run": ran, "hits": hit.len() }),
+    );
+    let ben_id = api.identity(&ben)?;
+    let joined = api.share(&name, &ben_id, "editor")?;
+    anyhow::ensure!(joined.status == 200, "ben joins as an editor: {joined}");
+    let by_ben = spell(&ben, &name, "lent-ben", "127.0.0.1")?;
+    s.ok(
+        "an editor who isn't its owner runs it with the key she lent it (her grant to the app), never seeing the value",
+        unread(&by_ben) && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
+        &by_ben,
+    );
+    let elsewhere = spell(&ada, &name, "lent-elsewhere", "localhost")?;
+    s.ok(
+        "toward a host its Vault doesn't name, nothing is lent, and the step fails naming no host (a viewer reads it)",
+        elsewhere["status"] == "held" && elsewhere["error"].as_str().is_some_and(|e| e.contains("lent toward other hosts") && !e.contains("127.0.0.1") && !e.contains("localhost")) && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
+        &elsewhere,
+    );
+    let second = vault(&ada, "jobs-key-2", json!({ "value": "other-value", "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&name) }))?;
+    s.ok("a second secret of hers binding the same app's API_KEY is refused (409), and nothing is written", second.status == 409 && !api.signed(&ada, "GET", "/api/vault", None)?.text.contains("jobs-key-2"), &second);
+
+    // another person's app, named in her Vault: it asks its own owner's
+    let (bobs, _) = jobs_fragment(s, api, &bob, "lent-bob", |_| {})?;
+    private(&bob, &bobs)?;
+    let named = vault(&ada, "for-bob", json!({ "value": "not-bobs", "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&bobs) }))?;
+    anyhow::ensure!(named.status == 200, "her Vault names his app: {named}");
+    let bob_ran = spell(&bob, &bobs, "lent-bob", "127.0.0.1")?;
+    s.ok("another person's app named in her Vault is lent nothing of hers: it asks its own owner's Vault alone", needs(&bob_ran) && upstream.hits("/spell/not-bobs").is_empty(), &bob_ran);
+
+    // its link open: lent nothing until it is members only again (FIN-352)
+    let at = |v: &str| api.signed(&ada, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": v })));
+    let link = at("link")?;
+    let linked = spell(&ada, &name, "lent-link", "127.0.0.1")?;
+    let back = at("members")?;
+    s.ok(
+        "while its link opens it, it is lent nothing, and says to make it members only",
+        link.status == 200 && back.status == 200 && linked["status"] == "held" && linked["error"].as_str().is_some_and(|e| e.contains("shared by link or public")) && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
+        &linked,
+    );
+    // its own comes first
+    let own_value = format!("sk-own-{}", &Keys::generate().pubkey_hex()[..20]);
+    let own = set_secret(api, &ada, &name, &own_value, &["127.0.0.1"])?;
+    anyhow::ensure!(own.status == 200, "its own API_KEY: {own}");
+    let mine = spell(&ada, &name, "lent-own", "127.0.0.1")?;
+    s.ok(
+        "an API_KEY of the app's own fills first, and her Vault is not asked",
+        mine["status"] == "succeeded" && upstream.hits(&format!("/spell/{own_value}")).len() == 1 && upstream.hits(&format!("/spell/{lent_value}")).len() == 2,
+        &mine,
+    );
+    // a connector lent a key, then given other code (a fork's): what it was
+    // lent while its owner's alone to edit is not the new code's to send,
+    // as its own secrets go then (plane.rs)
+    let connector = s.named(api, &ada, "lent-tg")?;
+    let made = api.create_with(&ada, json!({ "name": connector, "template": "telegram" }))?;
+    anyhow::ensure!(made.status == 200, "a Telegram connector: {made}");
+    s.owned(&made.body, &ada);
+    let tg_value = format!("sk-tg-{}", &Keys::generate().pubkey_hex()[..20]);
+    let lent_tg = vault(&ada, "tg-key", json!({ "value": tg_value, "hosts": ["127.0.0.1"], "agents": [], "apps": binds(&connector) }))?;
+    anyhow::ensure!(lent_tg.status == 200, "lent to the connector: {lent_tg}");
+    ship(s, &made.body, JOBS_APP, JOBS_JSON);
+    private(&ada, &connector)?;
+    let unmade = spell(&ada, &connector, "lent-unmade", "127.0.0.1")?;
+    s.ok(
+        "a connector that ran other code is lent nothing its owner's Vault lent it as one, and says so",
+        unmade["status"] == "held" && unmade["error"].as_str().is_some_and(|e| e.contains("was a connector")) && upstream.hits(&format!("/spell/{tg_value}")).is_empty(),
+        &unmade,
+    );
+    let logs = super::vault::logs(s);
+    s.ok("no lent value is in any node log", !logs.is_empty() && !logs.contains(&lent_value) && !logs.contains(&tg_value), format!("{} bytes of logs", logs.len()));
+    Ok(())
+}
+
 fn secret_hosts(s: &mut Suite, api: &Api, owner: &Keys, upstream: &Upstream) -> Result<()> {
     let long = Duration::from_secs(40);
     let (name, _) = jobs_fragment(s, api, owner, "secret-hosts", |_| {})?;

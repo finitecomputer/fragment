@@ -512,6 +512,10 @@ pub(crate) enum MetaKey {
     /// CONNECTORS`), while it runs no other code: no one but its owner edits
     /// it, and only then may it be a door (doors.rs).
     DoorTemplate,
+    /// A connector that ran other code since (plane.rs), for good: what its
+    /// owner's Vault lent it as one is not the new code's to send (jobs.rs
+    /// `lent`), as its own secrets went then.
+    Unmade,
     /// Its owner's row was told its reach (`Sharing.reach`, reach.rs).
     ReachTold,
     /// Test fleets only: how many more paid AI steps fail just after their
@@ -624,6 +628,7 @@ impl MetaKey {
             MetaKey::DoorActor => "door_actor",
             MetaKey::InboxSecret => "inbox_secret",
             MetaKey::DoorTemplate => "door_template",
+            MetaKey::Unmade => "unmade",
             MetaKey::ReachTold => "reach_told",
             MetaKey::TestFailAfterPaid => "test_fail_after_paid",
             MetaKey::TestLoseVideoAnswers => "test_lose_video_answers",

@@ -13,7 +13,7 @@ its home; everything that uses it reads it from there.
 | A fragment's secret (an app's API key, a webhook signing key) | the fragment's Durable Object, sealed | its editors (docs/api.md), who may set and list secrets but never read one; a connector's, its owner alone (`cell/src/doors.rs`), and removed when it installs other code (a fork: Paul, 2026-10-31) |
 | A SimpleX connector's inbox secret, as its door delivers with it | the connector's door (cell/door.mjs), in its Durable Object's own storage, unsealed, as a webhook's sender holds one: given by the connector's `connect`, filled at the egress, never told back | its owner, setting the connector's `SIMPLEX_DOOR_SECRET` and connecting again |
 | A person's own key for an `own` provider | their Vault, sealed (below; M16: a computer from before hands its own over once) | the person; one with a sign-in is exchanged by the platform and sealed at once, never pasted; revoking it is the person's, at the provider |
-| A person's secret for their agents (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
+| A person's secret for their agents and apps (a token, a bot's, a Nostr key) | their Vault, a Durable Object of theirs, sealed (below) | the person alone, never an agent: `PUT /api/vault/{secret}` (docs/api.md, "A person's Vault"); or the platform's own code for them (`vault::put`: FIN-463's hand-off) |
 | A sign-in under way (its PKCE verifier) | sealed in the person's Vault (an own key's; one begun before the move, in their computer) or the registry (a connection's), until used or ten minutes pass | no one |
 | A fragment's nostr key (an agent's too) and its push key | made and sealed in the fragment's Durable Object, opened only to sign | no one |
 | A person's connections (Google, …) | WorkOS Pipes, which holds and refreshes them; a computer's swap asks it for a short-lived token on each call (decision 22) | the person (docs/pipes-browser-binding.md) |
@@ -76,11 +76,13 @@ only from that computer's egress, toward that provider.
 
 ## A person's Vault
 
-FIN-466: a person keeps secrets on the platform, and their agents use
-them without holding them. One `Vault` Durable Object a person, named by
-their identity (cell/src/vault.rs), holds each by its name: its value
-sealed for that object, the hosts it may go to, where it goes on a
-request, and the agents that may use it (Paul, 2026-11-09: per agent).
+FIN-466: a person keeps secrets on the platform, and their agents and
+apps use them without holding them. One `Vault` Durable Object a person,
+named by their identity (cell/src/vault.rs), holds each by its name: its
+value sealed for that object, the hosts it may go to, where it goes on an
+agent's request, and the agents and apps that may use it (Paul,
+2026-11-09: per agent; 2026-11-21, option B: a person's secrets live in
+their Vault and never move, and an app's own stay with the app).
 
 - **A value goes in and never comes out.** No answer, list, log, event or
   wipe report names one; the person who set it cannot read it back.
@@ -103,6 +105,23 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   that secret's row beside the catalog (`Catalog::with`). A request to
   those hosts carrying no placeholder goes on as it came, its own
   `Authorization` (a git remote's basic auth) untouched.
+- **An app uses one by the name its code fills** (FIN-615, PR 12): its
+  person binds it to an app of theirs as `{app, key}` (`apps`; `fragment
+  vault set … --app <fragment>=<KEY>`), and that app's `job.fetch` fills
+  `{{KEY}}` with it where the app holds no secret of its own by that
+  name. Its own comes first, so a team's or an org's app keeps its keys
+  with no Vault of anyone's, and an app that holds its keys waits on no
+  hop. Otherwise the app asks its owner's Vault (`vault/lent`), never
+  another's, which answers only the one secret bound to that app as KEY
+  (one secret binds an app's key: 409 for a second), toward one of its
+  hosts, and the app checks its fetch against those hosts as against its
+  own secret's; its answer and failures name the value as `{{KEY}}`, as
+  for its own. A Nostr key is no app's (it signs, and never leaves). An
+  app shared by link or public is lent nothing while its link opens it
+  (a key is reach: FIN-352). Whoever edits the app's code can make it
+  use the key toward its hosts (the binding is its owner's grant to that
+  app), so the CLI says so where it binds one. An app's inbox-verification
+  keys stay its own.
 - **A Nostr key signs, never leaves** (`place: {"sign": "nip98"}`): the
   Vault answers a fresh NIP-98 event over the request as it goes (its
   https URL, method and body's SHA-256) in `Authorization: Nostr …`, and
@@ -140,8 +159,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   takes the name of another agent's secret.
 - **A secret moves out once, whole**: its person may move one into a
   fragment they edit as that fragment's secret (`fromVault` on `PUT
-  /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`), as
-  a Telegram bot's token moves into its connector. The Vault claims the
+  /api/f/{name}/secrets/{KEY}`; `fragment secret set … --from-vault`).
+  Nothing of the platform's asks it since its apps fill from the Vault
+  (FIN-615, PR 13 removes it). The Vault claims the
   value for that one destination as the move reads it; the fragment keeps
   it, then the Vault removes it, for its claimant alone. So it has one
   home and is never lost between: a move into anywhere else is refused
@@ -155,8 +175,9 @@ request, and the agents that may use it (Paul, 2026-11-09: per agent).
   name, before the Vault is asked). A page runs its authors' code with its
   visitor's session, and an author may be the visitor's own agent, so a
   page's call says nothing of what they want. The Telegram connector's
-  setup page asks Settings instead (`vault-move`, frame-messages.js):
-  Settings moves only the bot it offered that frame, into that connector.
+  setup page asks Settings to lend its bot instead (`vault-lend`,
+  frame-messages.js): Settings binds only the bot it offered that frame,
+  to that connector, and the Vault keeps it.
   A move keeps the secret within the hosts its Vault names
   (`fragment_core::vault::within`, 400 otherwise, before it is claimed);
   a parked one's move names them.
