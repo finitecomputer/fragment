@@ -320,6 +320,14 @@ class Job {
     return this.#step("fetch", args).then((v) => new JobResponse(v));
   }
 
+  // Another fragment's query, asked as this app's viewer, its owner, and
+  // only while the app is theirs alone (no one else in it, no link): its
+  // result. Reads only: no other kind of operation.
+  read(app, op, input = {}) {
+    if (typeof app !== "string" || typeof op !== "string") throw new TypeError("job.read(fragment, op, input): a fragment's name and its query's");
+    return this.#step("read", { fragment: app, op, input: JSON.parse(JSON.stringify(input ?? {})) });
+  }
+
   // An operation of this fragment, as the run's principal. Calling a job
   // starts it and resolves to { run, status }.
   call(op, input = {}) {

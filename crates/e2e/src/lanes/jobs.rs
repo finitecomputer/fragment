@@ -537,7 +537,105 @@ pub fn jobs(s: &mut Suite, api: &Api) -> Result<()> {
     inbox_hmac(s, api, &owner)?;
     launched_across_lives(s, api, &owner)?;
     queued_before_a_card(s, api, &owner)?;
-    channel_run_inputs(s, api, &owner)
+    channel_run_inputs(s, api, &owner)?;
+    reads_as_owner(s, api)
+}
+
+/// Goal (FIN-615, PR 16b): an app reads another fragment's query as its
+/// viewer, its owner in person, while it is theirs alone: no one else in it
+/// (`Sharing::only_you`) and its code never written at anyone else's ask
+/// (`others_wrote`); what its owner may read there, a query alone. Method:
+/// Ana's dashboard and her notes (both members only, no one else in them)
+/// and Carl's own app. Valid: the dashboard's job reads her notes' items, as
+/// hers; again once Ben, a viewer, has left. Invalid: a mutation of her
+/// notes is refused (queries alone), and Carl's app (hers to read nowhere)
+/// refuses her; while Ben is in her dashboard, her agent's run for her, and
+/// after Carl edited its code and left, it reads none of her apps, saying
+/// why in plain words; and asked by Carl, who can't see her notes, the
+/// route tells a mutation from a missing operation by nothing.
+fn reads_as_owner(s: &mut Suite, api: &Api) -> Result<()> {
+    let long = Duration::from_secs(40);
+    let (ana, ben, carl) = (api.person()?, api.person()?, api.person()?);
+    let ((dash, _), (notes, _), (carls, _)) = (jobs_fragment(s, api, &ana, "dash", |_| {})?, jobs_fragment(s, api, &ana, "notes", |_| {})?, jobs_fragment(s, api, &carl, "carls", |_| {})?);
+    for (keys, name) in [(&ana, &dash), (&ana, &notes), (&carl, &carls)] {
+        let r = api.signed(keys, "PUT", &format!("/api/f/{name}/visibility"), Some(&json!({ "visibility": "members" })))?;
+        anyhow::ensure!(r.status == 200, "{name} members only: {r}");
+    }
+    let saved = api.op(&ana, &notes, "save", "s1", json!({ "texts": ["alpha"], "source": "notes" }))?;
+    anyhow::ensure!(saved.status == 200, "a note saved: {saved}");
+    let read = |id: &str, target: &str, op: &str| -> Result<Value> {
+        let r = api.op(&ana, &dash, "reads", id, json!({ "fragment": target, "op": op, "input": {} }))?;
+        anyhow::ensure!(r.status == 200, "the read started: {r}");
+        Ok(settle(api, &ana, &dash, started(&r), &["succeeded", "held"], long))
+    };
+    let hers = read("r1", &notes, "items")?;
+    s.ok(
+        "her app, hers alone, reads her other app's query as her: its result whole",
+        hers["status"] == "succeeded" && hers["output"] == json!([{ "text": "alpha", "source": "notes" }]),
+        &hers,
+    );
+    let (mutation, theirs) = (read("r2", &notes, "save")?, read("r3", &carls, "items")?);
+    s.ok(
+        "a mutation is refused (it reads queries alone), and an app she can't read refuses her",
+        mutation["status"] == "held" && mutation["error"].as_str().is_some_and(|e| e.contains("is no query")) && theirs["status"] == "held" && api.op(&ana, &notes, "items", "q2", json!({}))?.body["result"] == json!([{ "text": "alpha", "source": "notes" }]),
+        json!({ "mutation": mutation, "theirs": theirs }),
+    );
+    let alone = |run: &Value| run["status"] == "held" && run["error"].as_str().is_some_and(|e| e.contains("This app can read your other apps only while it's yours alone."));
+    let ben_id = api.identity(&ben)?;
+    let joined = api.share(&dash, &ben_id, "viewer")?;
+    anyhow::ensure!(joined.status == 200, "Ben in her dashboard: {joined}");
+    let shared = read("r4", &notes, "items")?;
+    s.ok("once someone else is in it, it reads none of her apps, and says why", alone(&shared), &shared);
+    let left = api.signed(&ana, "DELETE", &format!("/api/f/{dash}/members/{ben_id}"), None)?;
+    anyhow::ensure!(left.status == 200, "Ben removed: {left}");
+    let again = read("r5", &notes, "items")?;
+    s.ok("Ben gone (a viewer, who wrote none of its code), it reads her notes again", again["status"] == "succeeded" && again["output"] == hers["output"], &again);
+    // her own agent's run for her: capped where it reads, so as itself
+    let (agent, _) = api.own_agent(&ana)?;
+    let ana_id = api.identity(&ana)?;
+    let r = api.signed(&agent, "POST", &format!("/api/f/{dash}/ops/reads?for={ana_id}"), Some(&json!({ "id": "r6", "input": { "fragment": notes, "op": "items", "input": {} } })))?;
+    anyhow::ensure!(r.status == 200, "her agent's read started: {r}");
+    let agents = settle(api, &ana, &dash, started(&r), &["succeeded", "held"], long);
+    s.ok("her agent's run, for her, reads none of her apps (she reads as herself, in person)", alone(&agents), &agents);
+    // Carl, its editor: a write refused writes nothing, and leaves no mark
+    let carl_id = api.identity(&carl)?;
+    let (carl_in, carl_out) = (|| api.share(&dash, &carl_id, "editor"), || api.signed(&ana, "DELETE", &format!("/api/f/{dash}/members/{carl_id}"), None));
+    anyhow::ensure!(carl_in()?.status == 200, "Carl in her dashboard");
+    let refused = api.signed(&carl, "POST", &format!("/api/f/{dash}/files"), Some(&json!({ "files": [] })))?;
+    anyhow::ensure!(carl_out()?.status == 200, "Carl removed");
+    let unwritten = read("r7", &notes, "items")?;
+    s.ok("an editor's write refused (400) leaves no mark: gone, it reads her notes again", refused.status == 400 && unwritten["status"] == "succeeded", json!({ "refused": refused.status, "run": unwritten }));
+    // Carl wrote its code: even gone, it reads none again
+    anyhow::ensure!(carl_in()?.status == 200, "Carl in her dashboard again");
+    let wrote = api.signed(&carl, "POST", &format!("/api/f/{dash}/files"), Some(&json!({ "files": [{ "path": "site/carl.txt", "text": "Carl's\n" }] })))?;
+    anyhow::ensure!(wrote.status == 200, "Carl wrote a file: {wrote}");
+    anyhow::ensure!(carl_out()?.status == 200, "Carl removed again");
+    let others = read("r8", &notes, "items")?;
+    s.ok("once someone else wrote its code, it reads none of her apps, even with them gone", alone(&others), &others);
+    // the same through the app's own job: Dave, an editor of her second dashboard
+    let (dash2, _) = jobs_fragment(s, api, &ana, "dash2", |_| {})?;
+    let r = api.signed(&ana, "PUT", &format!("/api/f/{dash2}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "{dash2} members only: {r}");
+    let dave = api.person()?;
+    let dave_id = api.identity(&dave)?;
+    anyhow::ensure!(api.share(&dash2, &dave_id, "editor")?.status == 200, "Dave in her second dashboard");
+    let put = api.op(&dave, &dash2, "put_file", "d1", json!({ "path": "site/dave.txt", "text": "Dave's\n" }))?;
+    anyhow::ensure!(put.status == 200, "Dave's job started: {put}");
+    let put = settle(api, &dave, &dash2, started(&put), &["succeeded", "held"], long);
+    anyhow::ensure!(api.signed(&ana, "DELETE", &format!("/api/f/{dash2}/members/{dave_id}"), None)?.status == 200, "Dave removed");
+    let r = api.op(&ana, &dash2, "reads", "r9", json!({ "fragment": notes, "op": "items", "input": {} }))?;
+    anyhow::ensure!(r.status == 200, "the read started: {r}");
+    let by_job = settle(api, &ana, &dash2, started(&r), &["succeeded", "held"], long);
+    s.ok("code someone else wrote through the app's own job counts as theirs too", put["status"] == "succeeded" && alone(&by_job), json!({ "put": put, "read": by_job }));
+    // the route, asked by someone who can't see her notes: no kind told
+    let asked = |op: &str| api.signed(&carl, "POST", &format!("/api/f/{notes}/reads/{op}"), Some(&json!({ "id": "c1", "input": {} })));
+    let (mutation, missing) = (asked("save")?, asked("no_such_op")?);
+    s.ok(
+        "asked by Carl, who can't see her notes, a mutation and a missing operation answer alike",
+        mutation.status == missing.status && mutation.status >= 400 && !mutation.message().contains("is no query"),
+        json!({ "mutation": [mutation.status, mutation.message()], "missing": [missing.status, missing.message()] }),
+    );
+    Ok(())
 }
 
 /// Goal: a run queued while the alarm's pass works starts before that
