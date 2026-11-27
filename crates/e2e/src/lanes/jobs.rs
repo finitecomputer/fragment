@@ -1471,6 +1471,10 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
     s.ok("the inbox's job runs as the fragment itself", done["status"] == "succeeded" && done["via"] == "channel" && done["principal"] == own.as_str(), &done);
     let items = api.op(&owner, &name, "items", "q", json!({}))?;
     s.ok("and saved what was delivered", items.body["result"] == json!([{ "text": "from the inbox", "source": "github" }]), &items);
+    // its token posts, and asks nothing of what runs here: the quiet
+    // question is a door's of its own connector (Codex's check of 5038d9523)
+    let asked = api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox/quiet", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), extra: vec![("x-fragment-inbox-token", token.clone())], ..Call::default() })?;
+    s.ok("an inbox's token asks nothing of what runs there (its quiet question is a door's)", asked.status == 404 && asked.body.get("busy").is_none(), &asked);
     let recs = records(api, &owner, &name, "inbox");
     s.ok("the inbox channel keeps the delivery", recs.len() == 1 && recs[0]["body"]["source"] == "github" && recs[0]["principal"] == "inbox", json!(recs));
     let r = api.call(Call {
@@ -1513,6 +1517,16 @@ pub fn triggers(s: &mut Suite, api: &Api, cron: Option<Result<Option<Cron>, Stri
         json!(pings.iter().map(|r| (r["depth"].clone(), r["status"].clone())).collect::<Vec<_>>()),
     );
     s.ok("the event log says a loop was stopped", events(api, &owner, &name).iter().any(|e| e["kind"] == "cycle.detected"), "no cycle.detected");
+    // a page's counts are every run's, of its op's alone when it names one:
+    // the SimpleX move's way back counts its connector's unfinished intake
+    // so, however many newer runs are past its page (Codex's round on #1541)
+    let page = api.signed(&owner, "GET", &format!("/api/f/{name}/runs?op=ping&limit=1"), None)?;
+    let of = |status: &str| pings.iter().filter(|r| r["status"] == status).count() as u64;
+    s.ok(
+        "a page of one run counts every run of its op by status, and its op's alone",
+        page.body["runs"].as_array().map(Vec::len) == Some(1) && page.body["counts"] == json!({ "blocked": of("blocked"), "succeeded": of("succeeded") }) && of("succeeded") > 1,
+        json!({ "counts": page.body["counts"], "pings": pings.len() }),
+    );
 
     // held runs pause an operation's triggers at the count, not one
     // before; calls still work

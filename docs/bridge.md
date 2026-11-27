@@ -655,6 +655,36 @@ never reaches another agent's core.
   it is gone. Their app is told its new name, and once that it moved. A
   stage that is not whole, or names no contact of that identity as its
   owner, is let go, and Link SimpleX works as before.
+- **A link moves into a door** (D4, FIN-731: the operators' `fragment
+  operator simplex-move`, cell/src/simplex_move.rs), carrying its data:
+  the platform asks the bridge on its screen port with a ticket of its
+  own, `handover` (`POST /simplex/handover`; the platform's alone, never
+  its owner's Settings). The bridge refuses a link that is not bound, one
+  whose agent works in its chat, or whose files or messages are on their
+  way (`busy`: each would be lost or doubled across the move); else it
+  marks the link moved in `link.json` (`moved`), stops its core for good,
+  and answers that door's first save: its stopped databases (each settled
+  first, so a journal is rolled back) and its link as the door's runner
+  keeps it (its cursor, its outbox), checked as the door's restore checks
+  it, with its SHA-256. The same ticket again is answered again, from the
+  same stopped files. A link is moved while its `link.json` says so, or
+  the platform's record does (`simplexMoved` in its view, which a save of
+  this computer's from before the move, restored, cannot take back): no
+  core of it ever starts here then (a release assertion), nothing it holds
+  changes, and its relayed records go nowhere. An owner's staged chat with
+  their old agent (above), never kept here, moves as staged: read once as
+  its adoption would read it, the save holding that read and an unbound
+  link, kept or let go in its door at its owner's word alone. The way back
+  (`back`, `POST /simplex/back`, its ticket in `x-door-ticket`) takes its
+  door key back at the platform, then places its door's newest save as
+  its databases and link (one behind its door's newest effects forces a
+  sync first, as a rollback's does), or, from a door that never ran,
+  nothing: its own databases are its link's still. What its door took and
+  had not sent (its replies' words, and a note for their files, which
+  stay with that door) is kept in `link.json` (`carried`) and sent once
+  its core is next up. A staged chat its door never kept is never placed
+  as its link: its staged copy here stays as it was. Its databases stay
+  here, untouched, until D5.
 - **Another client on its databases** (FIN-483: a core run elsewhere on
   a copy of them, such as an old finite.computer agent started again after
   its conversation moved) takes the contact's queues, and the core says so

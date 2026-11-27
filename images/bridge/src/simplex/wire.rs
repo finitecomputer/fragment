@@ -742,6 +742,13 @@ fn item(info: &Value, ci: &Value) -> Option<Item> {
     Some(Item { id, contact, received, content, shared, at: cut(meta["itemTs"].as_str().unwrap_or(""), 64).into(), file })
 }
 
+/// A sender's id as the core's JSON names it (`itemSharedMsgId`), from the
+/// bytes its database keeps: simplexmq's `strEncode`, URL-safe base64,
+/// padded. What a handover asks its chat of and its door skips by.
+pub fn shared_id(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE, bytes)
+}
+
 /// A path the core names in its files folder: relative, one name or a few,
 /// none of them `.` or `..`.
 pub fn file_path_ok(p: &str) -> bool {

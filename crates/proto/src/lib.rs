@@ -145,6 +145,9 @@ pub mod limits {
     pub const TURN_HOLD_MS: i64 = 0;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
+    /// Post ids one `channels.held` ask names, at most (the bridge's
+    /// copy, `HELD_IDS_MAX`, held to it by xtask's guards).
+    pub const HELD_IDS_MAX: usize = 256;
     /// A page of a channel on the live socket also ends at about this many
     /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
     pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -627,6 +630,10 @@ pub fn valid_kind(kind: &str) -> bool {
 pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
   return typeof kind === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(kind);
 }"#;
+
+/// The message of the one `not_found` a fragment never made, or deleted,
+/// answers whatever it is asked (cell/src/fragment.rs `not_created`).
+pub const NOT_CREATED: &str = "no such fragment";
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
 ///
@@ -2284,6 +2291,24 @@ pub struct PutDraft {
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub text: Option<String>,
+}
+
+/// `POST /api/f/<name>/channels/<channel>/held`: the post ids (each one a
+/// `PostRecord::id`) the asker wonders whether it posted there, at most
+/// `limits::HELD_IDS_MAX`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PostsHeldAsk {
+    pub ids: Vec<String>,
+}
+
+/// Its answer: those of them the channel holds as the asker's own posts,
+/// in the order asked. It never answers of another poster's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PostsHeld {
+    pub held: Vec<String>,
 }
 
 /// A post's answer: the record, and whether this id had posted it before.

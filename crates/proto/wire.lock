@@ -425,6 +425,8 @@ field PostRecord.body required any
 field PostRecord.id required string
 field Posted.record required ChannelRecord
 field Posted.replayed required boolean
+field PostsHeld.held required array<string>
+field PostsHeldAsk.ids required array<string>
 field Present.data required any
 field Present.id required string
 field Present.principal required string
@@ -514,6 +516,8 @@ field Urls.canonical required string
 field Urls.platform required string
 field channels.draft.path.channel required string
 field channels.draft.path.name required string
+field channels.held.path.channel required string
+field channels.held.path.name required string
 field channels.newest.path.channel required string
 field channels.newest.path.name required string
 field channels.post.path.channel required string
@@ -565,6 +569,13 @@ route channels.draft path channels.draft.path
 route channels.draft query channels.draft.query
 route channels.draft request PutDraft
 route channels.draft response Done
+route channels.held POST /api/f/{name}/channels/{channel}/held
+route channels.held accepts nip98
+route channels.held accepts session
+route channels.held path channels.held.path
+route channels.held query channels.held.query
+route channels.held request PostsHeldAsk
+route channels.held response PostsHeld
 route channels.newest GET /api/f/{name}/channels/{channel}/newest
 route channels.newest accepts nip98
 route channels.newest accepts session
@@ -893,6 +904,8 @@ type Pins out object
 type Place both object closed
 type PostRecord in object closed
 type Posted out object
+type PostsHeld out object
+type PostsHeldAsk in object closed
 type Present out object
 type PutDraft in object
 type PutSecret in object closed
@@ -928,6 +941,8 @@ type Urls out object
 type Visibility out enum
 type channels.draft.path in object
 type channels.draft.query in object
+type channels.held.path in object
+type channels.held.query in object
 type channels.newest.path in object
 type channels.newest.query in object
 type channels.post.path in object

@@ -131,6 +131,15 @@ A fragment's channels: its records, read, posted and drafted.
 - Answer: [`Done`](#done)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
 
+#### `channels.held`
+
+`POST /api/f/{name}/channels/{channel}/held`: Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`PostsHeldAsk`](#postsheldask)
+- Answer: [`PostsHeld`](#postsheld)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `channels.newest`
 
 `GET /api/f/{name}/channels/{channel}/newest`: Each poster's newest record of each kind the channel keeps the newest of, the newest first.
@@ -1038,6 +1047,22 @@ out. A post's answer: the record, and whether this id had posted it before.
 | --- | --- | --- | --- |
 | `record` | [`ChannelRecord`](#channelrecord) | required |  |
 | `replayed` | `boolean` | required |  |
+
+### `PostsHeld`
+
+out. Its answer: those of them the channel holds as the asker's own posts, in the order asked. It never answers of another poster's.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `held` | `array` of `string` | required |  |
+
+### `PostsHeldAsk`
+
+in, closed. `POST /api/f/<name>/channels/<channel>/held`: the post ids (each one a `PostRecord::id`) the asker wonders whether it posted there, at most `limits::HELD_IDS_MAX`.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `ids` | `array` of `string` | required |  |
 
 ### `Present`
 

@@ -84,6 +84,11 @@ const IDEMPOTENCY_HEADER: &str = "idempotency-key";
 /// A run whose Workflow could not be started is tried again this soon.
 const QUEUED_RETRY_MS: i64 = 10_000;
 
+/// The bridge's bound on a turn that says nothing (images/bridge/src/
+/// limits.rs, its own workspace): a copy, held to it by xtask's guards, as
+/// the shell's is. Past it, a turn's last record says no one is at work.
+const TURN_IDLE_MS_MAX: i64 = 15 * 60 * 1000;
+
 /// A launch under way (`launch_queued`), ended however it returns.
 struct Launching<'a>(&'a std::cell::Cell<bool>);
 
@@ -1195,7 +1200,13 @@ impl FragmentCell {
             init.with_body(Some(JsValue::from_str(&body)));
         }
         if let Some(body) = blob {
-            init.with_body(Some(body.into()));
+            // to its door, another object, through a stream of its own
+            // (`js::passed_on`, Cloudflare's reorder)
+            let body = match door {
+                Some(_) => js::passed_on(body.into()),
+                None => body.into(),
+            };
+            init.with_body(Some(body));
         }
         let to = if door.is_some() { format!("https://{}/job{}", fragment_core::door::DOOR_HOST, url.path()) } else { url.as_str().to_string() };
         // a lent key goes only while its link does not open it, decided in
@@ -1255,10 +1266,13 @@ impl FragmentCell {
             if !recorded || js::blob_head(&self.env, &key).await.map_err(retry)?.is_none() {
                 let ResponseBody::Stream(body) = resp.body() else { return Err(permanent(format!("{host} answered no bytes"))) };
                 let body = body.clone();
-                let digest = js::blob_put(&self.env, &key, body, size).await.map_err(retry)?;
+                let digest = js::blob_put(&self.env, &key, body, size, &sha).await.map_err(retry)?;
+                // a copy damaged on its way (FIN-775): never kept (R2 checks
+                // the name as it stores it, so a copy stored meanwhile
+                // stays), and asked for again, its door's own whole (it
+                // named it as it holds it)
                 if digest != sha {
-                    js::blob_delete(&self.env, js::BLOBS, &[key]).await.map_err(retry)?;
-                    return Err(permanent(format!("{host}'s file hashes to {digest}, not {sha}")));
+                    return Err(StepFail::Retry(format!("{host}'s file came damaged on its way: it hashes to {digest}, not {sha}")));
                 }
             }
             self.record_blob(&sha, size, mime).map_err(retry)?;
@@ -1769,9 +1783,9 @@ impl FragmentCell {
             q.push_str(" AND status = ?");
             binds.push(s.as_str().into());
         }
-        if let Some(op) = op {
+        if let Some(op) = &op {
             q.push_str(" AND op = ?");
-            binds.push(op.into());
+            binds.push(op.as_str().into());
         }
         q.push_str(" ORDER BY id DESC LIMIT ?");
         binds.push(SqlStorageValue::Integer(limit.clamp(1, 200) as i64));
@@ -1782,8 +1796,15 @@ impl FragmentCell {
             let shown = self.input_shown(role, &run)?;
             runs.push(run_view(run, r["cost_micros"].as_i64(), None, shown));
         }
+        // every row's, not the page's: of `op`'s runs alone when it names
+        // one (the SimpleX move's way back asks whether any intake run is
+        // unfinished, cell/src/simplex_move.rs)
+        let (q, binds) = match op {
+            Some(op) => ("SELECT status, COUNT(*) AS n FROM runs WHERE op = ? GROUP BY status", vec![op.into()]),
+            None => ("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![]),
+        };
         let mut counts = BTreeMap::new();
-        for r in self.rows("SELECT status, COUNT(*) AS n FROM runs GROUP BY status", vec![])? {
+        for r in self.rows(q, binds)? {
             let status = r["status"].as_str().expect("runs.status is TEXT NOT NULL").to_string();
             counts.insert(status, r["n"].as_u64().expect("COUNT answers a count"));
         }
@@ -1890,40 +1911,7 @@ impl FragmentCell {
     /// the record. Records whose runs have not succeeded are pending; past
     /// the cap a post is refused, so overload is a 429, not memory.
     pub(crate) async fn inbox(&self, given: Admits, hops: u32, body: &[u8]) -> CellResult<Response> {
-        self.name()?;
-        let answer = match given {
-            Admits::Token(token) => {
-                if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
-                    return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
-                }
-                None
-            }
-            Admits::Code { inbox, headers } => {
-                let name = inbox.check.secret();
-                // nothing is taken before its secret is set
-                let key = match self.stored_secret(name)? {
-                    Some(stored) => Some(self.open_secret(name, &stored.sealed).await?),
-                    None => None,
-                };
-                let read = |h: &str| headers.get(h).ok().flatten();
-                match &inbox.check {
-                    InboxCheck::Header { header, .. } => {
-                        let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
-                        let key = key.ok_or_else(refused)?;
-                        let given = read(header).unwrap_or_default();
-                        if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&key)) {
-                            return Err(refused());
-                        }
-                    }
-                    InboxCheck::Hmac(h) => {
-                        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("bad inbox signature ({}): this inbox takes a delivery only signed by its secret{why}", h.header));
-                        let key = key.ok_or_else(|| refused(""))?;
-                        h.check(&key, &read, body, js::now_ms() / 1000).map_err(|why| refused(&format!(": {}", why.message())))?;
-                    }
-                }
-                inbox.answer
-            }
-        };
+        let answer = self.admitted(given, body).await?;
         // a delivery to the inbox is a write
         self.writable().await?;
 
@@ -1965,6 +1953,69 @@ impl FragmentCell {
                 Ok(Response::ok(text)?.with_headers(h))
             }
         }
+    }
+
+    /// `POST /api/f/<name>/inbox/quiet`, admitted as a delivery is: whether
+    /// anything is on its way through this fragment's inbox and its
+    /// answers, asked by a door before it stops (cell/door.mjs, a way back):
+    /// a run its triggers started (a message in, a reply or a question
+    /// out) not done, or a member at work in it (its newest turn record on
+    /// `work`, as its list row says it: started, a step, or a card answered,
+    /// at most the bridge's `TURN_IDLE_MS_MAX` ago). `{busy}`: why, or null.
+    pub(crate) async fn inbox_quiet(&self, given: Admits, body: &[u8]) -> CellResult<Response> {
+        // its door's question alone: a connector's (its template a door's),
+        // under its code's inbox secret, never a webhook's token (what runs
+        // here is its members' to read: Codex's check of 5038d9523)
+        if matches!(given, Admits::Token(_)) || self.meta(MetaKey::DoorTemplate)?.is_none() {
+            return Err(CellError::new(ErrorCode::NotFound, "no route POST /api/inbox/quiet"));
+        }
+        self.admitted(given, body).await?;
+        let run = self.rows("SELECT op, status FROM runs WHERE via = 'channel' AND status IN ('queued', 'running', 'held', 'blocked') ORDER BY id LIMIT 1", vec![])?;
+        let at_work = "SELECT 1 FROM listed WHERE channel = 'work' AND at > ? AND (kind IN ('turn.start', 'turn.step') OR (kind = 'turn.prompt.closed' AND json_extract(fields, '$.outcome') = 'answered')) LIMIT 1";
+        let busy = match run.first() {
+            Some(r) => Some(format!("has a {} run {}", r["op"].as_str().unwrap_or(""), r["status"].as_str().unwrap_or(""))),
+            None => (!self.rows(at_work, vec![SqlStorageValue::Integer(js::now_ms() - TURN_IDLE_MS_MAX)])?.is_empty()).then(|| "has its agent at work in it".to_string()),
+        };
+        json_response(&json!({ "busy": busy }))
+    }
+
+    /// Whether `body` is let in, as its inbox lets a delivery in (its code's
+    /// secret, else its inbox token): the operation that answers it, if any.
+    async fn admitted(&self, given: Admits, body: &[u8]) -> CellResult<Option<String>> {
+        self.name()?;
+        Ok(match given {
+            Admits::Token(token) => {
+                if !crate::serve::eq_ct(&token, &self.must(MetaKey::InboxToken)?) {
+                    return Err(CellError::new(ErrorCode::Forbidden, "bad inbox token (x-fragment-inbox-token, or ?t=)"));
+                }
+                None
+            }
+            Admits::Code { inbox, headers } => {
+                let name = inbox.check.secret();
+                // nothing is taken before its secret is set
+                let key = match self.stored_secret(name)? {
+                    Some(stored) => Some(self.open_secret(name, &stored.sealed).await?),
+                    None => None,
+                };
+                let read = |h: &str| headers.get(h).ok().flatten();
+                match &inbox.check {
+                    InboxCheck::Header { header, .. } => {
+                        let refused = || CellError::new(ErrorCode::Forbidden, format!("bad inbox secret ({header}): this inbox takes a delivery only with its secret there"));
+                        let key = key.ok_or_else(refused)?;
+                        let given = read(header).unwrap_or_default();
+                        if given.is_empty() || !crate::serve::eq_ct(&given, &String::from_utf8_lossy(&key)) {
+                            return Err(refused());
+                        }
+                    }
+                    InboxCheck::Hmac(h) => {
+                        let refused = |why: &str| CellError::new(ErrorCode::Forbidden, format!("bad inbox signature ({}): this inbox takes a delivery only signed by its secret{why}", h.header));
+                        let key = key.ok_or_else(|| refused(""))?;
+                        h.check(&key, &read, body, js::now_ms() / 1000).map_err(|why| refused(&format!(": {}", why.message())))?;
+                    }
+                }
+                inbox.answer
+            }
+        })
     }
 
     /// Its `answer` query, asked with a delivery it stored as its triggers

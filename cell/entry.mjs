@@ -15,6 +15,7 @@ import * as rs from "./build/index.js";
 // A SimpleX door's object and its container's egress: JavaScript of its
 // own (door.mjs), no Rust in the cell's Wasm
 import { DoorEgress as DoorCalls } from "./door.mjs";
+import { flipped } from "./door-rules.mjs";
 export { SimplexDoor } from "./door.mjs";
 
 // Every call a door's container makes to `door.fragment.internal` goes to
@@ -57,24 +58,6 @@ export class DirectoryBackupGateway extends SandboxGateway {
     };
     return readAgain(read, again);
   }
-}
-
-// `body` with one byte of its first chunk flipped, its length kept: the
-// lever `damage-restores`, as FIN-775's transfers came. The chunk is
-// copied, never written in place.
-function flipped(body) {
-  let done = false;
-  const flip = new TransformStream({
-    transform(chunk, out) {
-      if (!done && chunk.byteLength > 0) {
-        chunk = new Uint8Array(chunk);
-        chunk[chunk.byteLength >> 1] ^= 0xff;
-        done = true;
-      }
-      out.enqueue(chunk);
-    },
-  });
-  return body.pipeThrough(flip);
 }
 
 export default rs.default;
@@ -358,6 +341,13 @@ class ContainerHost {
   // The destroys begun of whatever runs or of the start that runs: a start
   // that sees one begin while it registers its intercepts starts nothing.
   #destroys = 0;
+  // The e2e's levers on its bridge's paths through `port` (cell/src/
+  // computer.rs): `damage`, the next `n` answers on one damaged on their way
+  // out of its container, as FIN-775's handover was; `fail`, the next `n`
+  // answered 500 once its container answered (a handover's answer lost
+  // after its bridge packed, its core stopped).
+  #portDamage = null;
+  #portFail = null;
   // The e2e's lever `damage-restores` (computer.rs): how many of the next
   // restores' grants the gateway damages, one each.
   #damage = 0;
@@ -710,9 +700,16 @@ class ContainerHost {
   async port(port, request, usedEvery) {
     if (usedEvery > 0) this.#usedEvery = usedEvery;
     const sleeps = this.#sleeps;
+    const path = (this.#portDamage || this.#portFail) && new URL(request.url).pathname;
+    const damaged = !!this.#portDamage && this.#portDamage.path === path && this.#portDamage.n-- > 0;
+    const failed = !!this.#portFail && this.#portFail.path === path && this.#portFail.n-- > 0;
     const resp = await this.#c.getTcpPort(port).fetch(request);
+    if (failed) {
+      await resp.body?.cancel();
+      return new Response("the test lever's failure, once its container answered", { status: 500 });
+    }
     const upstream = resp.webSocket;
-    if (!upstream) return resp;
+    if (!upstream) return damaged && resp.body ? new Response(flipped(resp.body), resp) : resp;
     const [client, server] = Object.values(new WebSocketPair());
     if (this.#sleeps !== sleeps) {
       // a sleep began as its upgrade waited: closed with its why, as the
@@ -772,6 +769,15 @@ class ContainerHost {
     await this.#report("computer/tab", { open: true });
     told = true;
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // The levers `damage` and `fail` on its bridge's `path` (computer.rs).
+  damagePort(path, n) {
+    this.#portDamage = { path, n };
+  }
+
+  failPort(path, n) {
+    this.#portFail = { path, n };
   }
 
   // A sleep (or a restart's) begins, before its hold: each open port tab

@@ -20,7 +20,8 @@ use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, R
 use crate::notice::NoticeList;
 use crate::vault::{LendSecret, PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
-    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
+    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, PostsHeld, PostsHeldAsk, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen,
+    SetArchived,
     SetDock, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, Conflict, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
@@ -368,6 +369,17 @@ pub const ROUTES: &[Route] = &[
         request: Some(Body::Json(ty::<PostRecord>())),
         answer: Answer::Json(ty::<Posted>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, ConflictingBody, TooLarge, BudgetUsedUp],
+    },
+    Route {
+        operation: "channels.held",
+        method: Method::Post,
+        path: "/api/f/{name}/channels/{channel}/held",
+        summary: "Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.",
+        auth: SIGNED,
+        params: &[NAME, CHANNEL],
+        request: Some(Body::Json(ty::<PostsHeldAsk>())),
+        answer: Answer::Json(ty::<PostsHeld>()),
+        errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, TooLarge],
     },
     Route {
         operation: "channels.draft",

@@ -17,9 +17,9 @@ export const DELIVERIES_KEPT = 256;
 // (images/simplex-door/src/main.rs, "Marks").
 export const STALE_ASKS = 3;
 
-// The header its deliveries carry its connector's inbox secret in: the one
-// templates/simplex/fragment.json's `inbox` names.
-export const INBOX_HEADER = "x-simplex-door-secret";
+// The header its deliveries carry their signature in, by its connector's
+// inbox secret: the one templates/simplex/fragment.json's `inbox` names.
+export const INBOX_SIGNATURE_HEADER = "x-simplex-door-signature";
 
 // What its connector's jobs ask (cell/src/jobs.rs sends each as
 // `/job/<ask>`): nothing of its runner's own or its levers'. `file` is a
@@ -41,8 +41,9 @@ export const FILE_KEPT_MS = 24 * 60 * 60 * 1000;
 // A reply's files, at most: a chat record's (fragment_proto
 // `limits::FILES_PER_MESSAGE`, held to it by xtask/src/guards.rs).
 export const REPLY_FILES_MAX = 8;
-// The header a file the door answers names its SHA-256 in
-// (fragment_core::door::FILE_SHA_HEADER).
+// The header a body names its SHA-256 in, as its producer hashed it: a
+// file the door answers, and every body between a door and its runner,
+// either way (fragment_core::door::FILE_SHA_HEADER).
 export const FILE_SHA_HEADER = "x-door-sha256";
 
 // The door's schema, step by step, from 1: a step released is never edited
@@ -66,6 +67,13 @@ export const STEPS = [
   // its runner's give (`given`) until the delivery naming it is made; each
   // once, so an answer said again releases nothing more
   "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
+  // the save it was given to begin from (`/door/import`), by its SHA-256:
+  // at most one, ever
+  "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL, staged INTEGER NOT NULL DEFAULT 0)",
+  // each save's SHA-256, as its maker hashed it (its runner, or the
+  // computer that handed it over), which every copy of it given carries
+  // (none for a save from before it, hashed when it is first given)
+  "ALTER TABLE saves ADD COLUMN sha TEXT",
 ];
 
 // The steps a schema at `version` has yet to take, in order.
@@ -200,4 +208,58 @@ export const saveId = (s) => `${s.generation}-${s.seq}`;
 export function parseSaveId(id) {
   const m = typeof id === "string" ? /^([0-9]{1,15})-([0-9]{1,15})$/.exec(id) : null;
   return m ? { generation: Number(m[1]), seq: Number(m[2]) } : null;
+}
+
+const hexOf = (digest) => [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+
+// Bytes' SHA-256, in lowercase hex.
+export async function sha256Hex(bytes) {
+  return hexOf(await crypto.subtle.digest("SHA-256", bytes));
+}
+
+// A delivery's signature for its connector's inbox (`INBOX_SIGNATURE_HEADER`,
+// its inbox's `hmac`: templates/simplex fragment.json): HMAC-SHA256 of its
+// body by the inbox's secret, so a body changed on its way is refused.
+export async function inboxSignature(secret, body) {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return `sha256=${hexOf(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body)))}`;
+}
+
+// A transfer as the e2e's levers damage one on its way (the door's and
+// the port's `damage`, a computer's `damage-restores`, as FIN-775's were
+// between a container and its Worker): one byte of its first chunk
+// flipped, its length kept. The chunk, a view or a buffer, is copied,
+// never written in place.
+export function flipped(body) {
+  let done = false;
+  return body.pipeThrough(
+    new TransformStream({
+      transform(chunk, c) {
+        if (!done && chunk.byteLength > 0) {
+          chunk = new Uint8Array(chunk).slice();
+          chunk[chunk.byteLength >> 1] ^= 0xff;
+          done = true;
+        }
+        c.enqueue(chunk);
+      },
+    }),
+  );
+}
+
+// A stream passed through as it comes, its SHA-256 taken on the way (hex,
+// `digest` once it ends), one chunk at a time with its backpressure, never
+// the whole held at once (a save may be 64 MiB).
+export function hashing() {
+  const digest = new crypto.DigestStream("SHA-256");
+  const w = digest.getWriter();
+  const stream = new TransformStream({
+    async transform(chunk, c) {
+      await w.write(chunk.slice());
+      c.enqueue(chunk);
+    },
+    async flush() {
+      await w.close();
+    },
+  });
+  return { stream, digest: digest.digest.then(hexOf) };
 }

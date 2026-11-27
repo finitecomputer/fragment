@@ -55,6 +55,13 @@ const SEEN_MAX = 2000;
 // (two steps a round, within a job's JOB_STEPS_MAX of 256).
 const REPLY_ASKS_MAX = 30;
 const REPLY_WAIT_MAX_MS = 30_000;
+// An ask of its door, or its answer, damaged on its way, asked again at
+// most this often (`door`).
+const DOOR_ASKS = 3;
+// A reply's file the door found damaged on its way (422: not the bytes its
+// name, its SHA-256, says; FIN-775), given again at most this often before
+// it stays in the chat alone: the chat's own copy is whole.
+const GIVE_ASKS = 3;
 // The door's invitation, looked for this many times a second apart once
 // asked (two steps a round).
 const INVITE_LOOKS_MAX = 30;
@@ -67,9 +74,25 @@ const QR_SIZE_MAX = 177;
 // The steps a failure names, the one its setup page tries again.
 const STEPS = ["connect", "link", "unlink"];
 
+// A text's SHA-256, lowercase hex.
+const sha256 = async (text) => [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+
 // An ask of its door, as its job's fetch: its status, and what it said.
+// Its body is named by its SHA-256, which its door checks before it takes
+// it, and its answer is used only as its door named it. Either damaged on
+// its way (FIN-775) is asked again, the same ask (its door answers a reply
+// it took by its key, a link or unlink by its number), at most `DOOR_ASKS`
+// times; still damaged, its step fails, to be tried again.
 async function door(job, ask, body = {}, headers = {}) {
-  const resp = await job.fetch(`${DOOR}/${ask}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const sent = JSON.stringify(body);
+  const named = await sha256(sent);
+  let resp;
+  // bounded: `DOOR_ASKS`
+  for (let n = 1; ; n += 1) {
+    resp = await job.fetch(`${DOOR}/${ask}`, { method: "POST", headers: { "content-type": "application/json", "x-door-sha256": named, ...headers }, body: sent });
+    if (resp.status !== 422 && resp.headers.get("x-door-sha256") === (await sha256(resp.text()))) break;
+    if (n >= DOOR_ASKS) throw new Error(`its door's ${ask} came damaged on its way ${n} times`);
+  }
   let said = {};
   try {
     said = resp.json() ?? {};
@@ -122,11 +145,15 @@ async function reply(job, key, text, files = []) {
 
 // A reply's file, one of this chat's blobs, given to its door for reply
 // `key` (which uses it until it is done): whether the door holds it now (a
-// step that fails for good is one it does not).
+// step that fails for good is one it does not). A copy the door found
+// damaged on its way is given again, at most `GIVE_ASKS` times.
 async function give(job, a, key) {
   try {
-    const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream", "x-door-for": key } });
-    return r.ok;
+    // bounded: `GIVE_ASKS`
+    for (let ask = 1; ; ask += 1) {
+      const r = await job.fetch(`${DOOR}/file/${a.sha256}`, { method: "PUT", blob: a.sha256, headers: { "content-type": typeof a.type === "string" ? a.type : "application/octet-stream", "x-door-for": key } });
+      if (r.status !== 422 || ask >= GIVE_ASKS) return r.ok;
+    }
   } catch {
     return false;
   }
@@ -180,8 +207,10 @@ export class App extends DurableObject {
     return { connected: this.get("door") !== null, invitation: this.get("invitation"), linked: this.get("linked"), why: this.get("why") };
   }
 
-  async connect({ name } = {}, job) {
-    const { status, said } = await door(job, "connect", { name }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
+  // `keep`: its owner's word on their SimpleX chat with their old agent,
+  // where its door holds one (its connect refuses `staged` until they say)
+  async connect({ name, keep } = {}, job) {
+    const { status, said } = await door(job, "connect", keep === undefined ? { name } : { name, keep }, { "x-door-secret": "{{SIMPLEX_DOOR_SECRET}}" });
     if (status !== 200) {
       const error = answered(status, said);
       await job.call("failed", { why: error, code: codeOf(said), step: "connect" });
@@ -308,7 +337,14 @@ export class App extends DurableObject {
   // earlier life of its name made is another's): the door may deliver one
   // again (an answer from the inbox lost; its runner restored from an
   // older save)
-  seen({ id, door }) {
+  seen({ id, door, own }) {
+    // none recorded yet: its connect under way (`unknown`, which `intake`
+    // settles by asking which door its own fetch reaches, then says so:
+    // `own`, recorded here, as its connect's `connected` would)
+    if (this.get("door") === null) {
+      if (own !== true) return { fresh: false, unknown: true };
+      this.put("door", String(door));
+    }
     if (door !== this.get("door")) return { fresh: false, other: true };
     const fresh = this.ctx.storage.sql.exec("INSERT INTO seen (id, n) VALUES (?, (SELECT coalesce(max(n), 0) + 1 FROM seen)) ON CONFLICT DO NOTHING RETURNING n", id).toArray().length === 1;
     this.ctx.storage.sql.exec("DELETE FROM seen WHERE n < (SELECT max(n) FROM seen) - ?", SEEN_MAX);
@@ -320,8 +356,17 @@ export class App extends DurableObject {
     if (job.via !== "channel") return { ignored: "only its inbox's trigger" };
     const m = record?.body?.payload;
     if (typeof m?.id !== "string" || !m.id || m.id.length > 64 || typeof m.text !== "string" || typeof m.door !== "string") return { ignored: "not a message" };
-    const seen = await job.call("seen", { id: m.id, door: m.door });
-    if (seen.other) return { ignored: "not its door's" };
+    let seen = await job.call("seen", { id: m.id, door: m.door });
+    // delivered before its connect recorded its door (a moved link's door
+    // runs linked at once, and delivers what came as it moved): its life's
+    // door, the one its own fetch reaches, recorded now, never a message
+    // let go as no door's
+    if (seen.unknown) {
+      const { said } = await door(job, "state");
+      if (said?.door?.door !== m.door) return { ignored: "not its door's" };
+      seen = await job.call("seen", { id: m.id, door: m.door, own: true });
+    }
+    if (seen.other || seen.unknown) return { ignored: "not its door's" };
     if (!seen.fresh) return { ignored: "taken already" };
     // its binding, as the platform tells it: no guess at which agent
     if (!job.door) {

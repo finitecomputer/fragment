@@ -599,6 +599,27 @@ enum OperatorCmd {
         #[arg(long)]
         key_file: Option<PathBuf>,
     },
+    /// Move an agent's SimpleX link from its person's computer into a
+    /// SimpleX connector of theirs, on a door of its own: the same contact
+    /// in their SimpleX app, its databases carried, nothing for them to
+    /// do; their old SimpleX chat archived. Alone (or --dry-run) it says
+    /// what it would do next and changes nothing; --yes moves it, going on
+    /// where it stopped; --back takes it back to the computer from
+    /// wherever it stopped
+    SimplexMove {
+        /// The person (an npub)
+        npub: String,
+        /// The agent fragment (`<label>--<suffix>`)
+        agent: String,
+        #[arg(long, conflicts_with_all = ["yes", "back"])]
+        dry_run: bool,
+        #[arg(long, conflicts_with = "back")]
+        yes: bool,
+        #[arg(long)]
+        back: bool,
+        #[arg(long)]
+        key_file: Option<PathBuf>,
+    },
     /// Start a person's computer from one of the saves it keeps (its
     /// number, as `person` lists them), while it is asleep or won't wake:
     /// its next start restores that save, and the newer are set aside, kept
@@ -820,9 +841,36 @@ fn operator_client(host: &Option<String>, verbose: bool, key_file: Option<&std::
 /// The ids a wake's failure names (every one, and why, is on stderr).
 const WAKE_NAMED_MAX: usize = 20;
 
+/// What a SimpleX move does next from the step its record stands at
+/// (`operator simplex-move`; the admin Worker says only the step).
+fn simplex_next(step: &str) -> &'static str {
+    match step {
+        "" => "make its connector, hand its link over, connect its door",
+        "making" => "make its connector by the name its record holds (one a stopped move made: --back first), hand its link over, connect its door",
+        "made" => "hand its link over, connect its door",
+        "imported" => "bind its connector and connect its door",
+        "bound" => "connect its door",
+        "connecting" => "wait for its door to link",
+        "offered" => "nothing: its person keeps it, or starts a new chat, on its connector's setup page",
+        "done" => "nothing: moved",
+        _ => "a step this release does not know",
+    }
+}
+
 /// An admin call's answer as JSON, or its refusal.
 fn admin_answer(c: &api::Client, resp: api::Resp) -> Result<Value> {
     c.call_as::<Value>(resp)
+}
+
+/// A SimpleX move's `go` refused because its connector's name is taken:
+/// made by a move that stopped. Its next step is the move's own, never
+/// `name_taken`'s hint to remove the fragment (the move deletes nothing:
+/// `--back` archives it).
+fn stopped_making(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<CodedError>() {
+        Some(ce) if ce.code == Code::NameTaken => anyhow::Error::new(CodedError { code: Code::InvalidRequest, msg: format!("{}: its connector was made by a move that stopped: --back archives it, then --yes", ce.msg) }),
+        _ => e,
+    }
 }
 
 #[derive(Subcommand)]
@@ -1757,6 +1805,56 @@ fn run(cli: Cli) -> Result<()> {
             let told = if v["notices"].as_array().is_some_and(|n| n.iter().any(|n| n["kind"] == "update")) { "; its owner is told an update is ready" } else { "" };
             println!("pinned {npub}'s computer to {}: {runs}, its next start runs {}{told}", v["image"].as_str().unwrap_or("?"), v["latest"].as_str().unwrap_or("?"));
             return Ok(());
+        }
+        Cmd::Operator { sub: OperatorCmd::SimplexMove { npub, agent, dry_run, yes, back, key_file } } => {
+            let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
+            let path = format!("/api/admin/people/{npub}/simplex-move");
+            let ask = |act: &str| -> Result<Value> { admin_answer(&c, c.post_json(&path, &json!({ "agent": agent, "act": act }))?) };
+            if back {
+                let v = ask("back")?;
+                json_exit(j, &v);
+                match v["connector"].as_str() {
+                    Some(c) => println!("{agent}'s SimpleX is on its computer again; {c} unbound and archived, its history kept"),
+                    None => println!("{agent}'s SimpleX is on its computer again; no connector to archive"),
+                }
+                return Ok(());
+            }
+            if dry_run || !yes {
+                let v = ask("plan")?;
+                json_exit(j, &v);
+                println!("{agent}: next, {}", simplex_next(v["record"]["step"].as_str().unwrap_or("")));
+                println!("  its computer {}, its link {}", if v["awake"] == true { "awake" } else { "asleep" }, v["link"]["phase"].as_str().unwrap_or("unread"));
+                if let Some(why) = v["blocked"].as_str() {
+                    println!("  it may not begin: {why}");
+                }
+                if !dry_run {
+                    println!("say --dry-run to only see it, --yes to move it");
+                }
+                return Ok(());
+            }
+            // bounded: a door links within minutes; each ask goes on from its record
+            let t0 = std::time::Instant::now();
+            loop {
+                let v = ask("go").map_err(stopped_making)?;
+                let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
+                if step == "done" || step == "offered" {
+                    json_exit(j, &v);
+                    let into = v["record"]["connector"].as_str().unwrap_or("?");
+                    match step.as_str() {
+                        "done" => println!("{agent}'s SimpleX moved into {into}: the same contact, its old chat archived"),
+                        _ => println!("{agent}'s staged SimpleX chat moved into {into}: its person keeps it, or starts a new chat, on its setup page"),
+                    }
+                    return Ok(());
+                }
+                if !j {
+                    println!("  {step}: {}", simplex_next(&step));
+                }
+                if t0.elapsed() > std::time::Duration::from_secs(15 * 60) {
+                    json_exit(j, &v);
+                    anyhow::bail!("{agent}'s move is at {step} after 15 minutes: --yes again goes on, --back goes back");
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
         }
         Cmd::Operator { sub: OperatorCmd::StartFrom { npub, save, key_file } } => {
             let c = operator_client(&cli.host, cli.verbose, key_file.as_deref())?;
@@ -3428,6 +3526,21 @@ mod tests {
 
         let (err, _) = error_body(&coded(Code::OutcomeUnknown));
         assert!(err.get("id").is_none() && !err["hint"].as_str().unwrap_or("").contains("--id"), "{err}");
+    }
+
+    /// Goal: a SimpleX move refused because its connector's name is taken
+    /// (a move that stopped made it) says `--back`, and never hints that
+    /// the fragment be removed. Invalid: any other refusal keeps its own
+    /// code and hint.
+    #[test]
+    fn a_stopped_making_says_back_never_remove() {
+        let taken = anyhow::Error::new(CodedError { code: Code::NameTaken, msg: "its connector's making: 409 already_exists: juniper-simplex--k3x9 exists".into() });
+        let (err, _) = error_body(&stopped_making(taken));
+        let (message, hint) = (err["message"].as_str().unwrap_or(""), err["hint"].as_str().unwrap_or(""));
+        assert!(message.contains("--back archives it, then --yes"), "{err}");
+        assert!(!hint.contains("fragment rm") && !message.contains("fragment rm"), "{err}");
+        let (err, _) = error_body(&stopped_making(coded(Code::Conflict)));
+        assert_eq!((err["code"].as_str(), err["hint"].as_str()), (Some("conflict"), Some(Code::Conflict.hint())));
     }
 
     /// Goal: `fragment host <url>` changes the host and keeps the config's

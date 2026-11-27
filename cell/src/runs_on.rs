@@ -468,23 +468,29 @@ impl FragmentCell {
                 if act.opens() {
                     self.reach_while_private()?;
                 }
-                let nonce = hex::encode(js::random_bytes::<16>());
-                let ticket = door::Ticket { door: text("door").into(), act, agent: self.name()?, computer: text("computer").into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
-                assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
-                match act {
-                    door::Act::Link | door::Act::Adopt => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
-                    // closed the moment its owner asks: its door signs nothing more
-                    door::Act::Unlink => {
-                        self.del_meta(MetaKey::DoorTicket)?;
-                        if self.meta(MetaKey::Door)?.is_some() {
-                            self.del_meta(MetaKey::Door)?;
-                            self.event("door.closed", "its door closed by its owner", json!({ "door": ticket.door }));
-                            self.sharing_changed()?;
-                        }
-                    }
+                self.door_ticket(text("door"), act, text("computer")).await
+            }
+            // the operators' move of its computer's SimpleX link into its
+            // connector's door (docs/bridge.md, "SimpleX"), its Computer
+            // object's alone to ask: a handover's ticket while its computer's
+            // link holds its door open, the way back's (it opens again, as a
+            // link's does), and its door closed once its connector's door
+            // holds the link
+            "simplex-move" => {
+                let body: Value = crate::json_body(body)?;
+                let text = |k: &str| body[k].as_str().unwrap_or("");
+                self.assigned_to(text("computer"))?;
+                let act = match text("act") {
+                    "handover" => door::Act::Handover,
+                    "back" => door::Act::Back,
+                    "closed" => return Ok(json!({ "closed": self.close_door(door::SIMPLEX, "its SimpleX link moved into its own chat's door")? })),
+                    _ => return Err(CellError::invalid("act: handover, back or closed")),
+                };
+                self.door_allowed(door::SIMPLEX, if act.opens() { Action::Link } else { Action::Unlink })?;
+                if act.opens() {
+                    self.reach_while_private()?;
                 }
-                let sig = self.own_keys().await?.sign_digest(&ticket.digest());
-                Ok(json!({ "door": ticket.door, "act": act.as_str(), "agent": ticket.agent, "computer": ticket.computer, "nonce": ticket.nonce, "exp": ticket.exp, "sig": sig }))
+                self.door_ticket(door::SIMPLEX, act, text("computer")).await
             }
             "door-key" => {
                 let body: Value = crate::json_body(body)?;
@@ -755,6 +761,39 @@ impl FragmentCell {
 
     /// Its own key, opened from its seal (resealed in place when the seal
     /// moved on).
+    /// A ticket for `act` on its `door`, for `computer`, signed as this
+    /// agent: a link's, an adoption's and a way back's open the door for
+    /// the key redeemed with it; an unlink's closes it at once; a
+    /// handover's leaves it open until its connector's door holds the link.
+    async fn door_ticket(&self, door: &str, act: door::Act, computer: &str) -> CellResult<Value> {
+        let nonce = hex::encode(js::random_bytes::<16>());
+        let ticket = door::Ticket { door: door.into(), act, agent: self.name()?, computer: computer.into(), nonce, exp: js::now_ms() + door::TICKET_MS, sig: String::new() };
+        assert!(ticket.well_formed(), "a ticket the platform makes is well formed");
+        match act {
+            door::Act::Link | door::Act::Adopt | door::Act::Back => self.set_meta(MetaKey::DoorTicket, &format!("{} {} {}", ticket.door, ticket.nonce, ticket.exp))?,
+            // closed the moment its owner asks: its door signs nothing more
+            door::Act::Unlink => {
+                self.close_door(&ticket.door, "its door closed by its owner")?;
+            }
+            door::Act::Handover => {}
+        }
+        let sig = self.own_keys().await?.sign_digest(&ticket.digest());
+        Ok(json!({ "door": ticket.door, "act": act.as_str(), "agent": ticket.agent, "computer": ticket.computer, "nonce": ticket.nonce, "exp": ticket.exp, "sig": sig }))
+    }
+
+    /// Its door closed: no ticket pending, no key, so nothing its computer
+    /// signs relays its owner again. Whether it was open.
+    fn close_door(&self, door: &str, why: &str) -> CellResult<bool> {
+        self.del_meta(MetaKey::DoorTicket)?;
+        if self.meta(MetaKey::Door)?.is_none() {
+            return Ok(false);
+        }
+        self.del_meta(MetaKey::Door)?;
+        self.event("door.closed", why, json!({ "door": door }));
+        self.sharing_changed()?;
+        Ok(true)
+    }
+
     async fn own_keys(&self) -> CellResult<fragment_nip98::Keys> {
         let sealed = self.must(MetaKey::FragmentSecret)?;
         let opened = crate::keys::open(&self.env, &self.scope(), &sealed).await?;

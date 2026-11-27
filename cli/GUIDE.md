@@ -1331,6 +1331,7 @@ fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator start-from <npub> <save> [--key-file F]   # asleep or won't wake: its next start restores that save; the newer are set aside
+fragment operator simplex-move <npub> <agent> [--dry-run | --yes | --back] [--key-file F]   # its SimpleX link from its computer into a connector of its person's own, its data carried: alone (or --dry-run) says what is next; --yes moves it, going on where it stopped; --back goes back
 fragment operator orgs [--after A] [--key-file F]
 fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]
