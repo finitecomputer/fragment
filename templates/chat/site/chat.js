@@ -2921,12 +2921,12 @@ export function mount(root) {
     renderAttachments();
     send(input.value);
   }
-  // The microphone is its person's to lend (FIN-615 PR 11): framed by the
-  // shell, which names it in this page's policy (the platform's code), a
-  // voice memo asks it first, from its press (`microphone?`), and records
-  // only on its yes: the shell asks its person once, for every chat. Then
-  // comes the browser's own prompt. One the browser refused says where it
-  // is allowed again (the page can do nothing more: Okay closes it).
+  // The microphone is the shell's to lend (FIN-615 PR 11): framed by it, a
+  // voice memo asks it first, from its press (`microphone?`). The shell asks
+  // its person once, for every chat, and makes this frame again, lent it (a
+  // frame made after their yes is lent from the first); then comes the
+  // browser's own prompt. One the browser refused says where it is allowed
+  // again (the page can do nothing more: Okay closes it).
   const MIC_ASK_MS = 120_000;
   const MIC_DENIED = ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"];
   async function micPermission() {

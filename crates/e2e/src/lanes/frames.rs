@@ -157,9 +157,9 @@ pub fn frames(s: &mut Suite, api: &Api) -> Result<()> {
 /// but its Reload takes the yes; the window's ⋯ in the first tab takes it
 /// back, and the other tab's frame is made again, lent none. The same app
 /// at a chat's address (`/?chat=`, an alert's), framed in the middle
-/// column, is lent none either. A chat of the release's (its page the
-/// platform's code, which asks the yes before it records: the chat
-/// section, `mic_in_frame`) names its origin from the first.
+/// column, is lent none either. A chat is lent none until its person's one
+/// yes for every chat (the shell's `PUT …/microphone`, as their Allow),
+/// which lends every chat of theirs.
 fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_nip98::Keys, &str), guest_id: &str, guest_session: &str) -> Result<()> {
     let wait = Duration::from_secs(20);
     let app = made(api, owner, &s.name("fmic"), "blank", json!([{ "path": "site/index.html", "text": MIC_PAGE }]), "members")?;
@@ -337,11 +337,26 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let listed = reaches && chrome.until(&apps, &format!("!!{row}"), wait);
     chrome.eval(&apps, &format!("({row}?.click(), true)"))?;
     let window = listed && chrome.until(&apps, &format!("!!document.querySelector({})", serde_json::to_string(&format!("#stack iframe[data-fragment=\"{chat}\"]"))?), wait);
-    let allow = allow_of(&mut chrome, &apps, "#stack", &chat)?;
+    let before = allow_of(&mut chrome, &apps, "#stack", &chat)?;
+    chrome.close(apps)?;
+    // their one yes for every chat (the shell's Allow), from this chat
+    let other = api.qualified(owner, &s.name("fmicother"))?;
+    let r = api.create_with(owner, json!({ "name": other, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "making {other}: {r}");
+    let yes = super::shell::shell(api, owner_session, "PUT", &format!("/api/fragments/{chat}/microphone"), Some(&json!({ "microphone": true })), &[])?;
+    let lent = |name: &str| -> bool {
+        super::shell::shell(api, owner_session, "GET", "/api/fragments", None, &[]).ok().and_then(|r| r.body["fragments"].as_array().and_then(|a| a.iter().find(|f| f["name"] == name).map(|f| f["microphone"] == true))) == Some(true)
+    };
+    let both = s.eventually(wait, || lent(&chat) && lent(&other));
+    let apps = chrome.open(&format!("{}/apps", api.base))?;
+    let listed_again = chrome.until(&apps, &format!("!!{row}"), wait);
+    chrome.eval(&apps, &format!("({row}?.click(), true)"))?;
+    let window_again = listed_again && chrome.until(&apps, &format!("!!document.querySelector({})", serde_json::to_string(&format!("#stack iframe[data-fragment=\"{chat}\"]"))?), wait);
+    let after = allow_of(&mut chrome, &apps, "#stack", &chat)?;
     s.ok(
-        "a chat of the release's (its row says so), opened from Apps, names its own origin in its window's policy from the first, its page the platform's, which asks the yes before it records",
-        window && allow == json!(format!("clipboard-write; microphone {}", api.site_origin(&chat))),
-        json!({ "reaches": reaches, "listed": listed, "window": window, "allow": allow }),
+        "a chat of the release's (its row says so) is lent no microphone until its person's yes; their one yes for chats lends every chat of theirs, and its window then names the chat's own origin",
+        window && before == json!("clipboard-write") && yes.status == 200 && both && window_again && after == json!(format!("clipboard-write; microphone {}", api.site_origin(&chat))),
+        json!({ "reaches": reaches, "before": before, "yes": yes.status, "both": both, "after": after }),
     );
     chrome.close(apps)?;
     Ok(())

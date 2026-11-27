@@ -1350,8 +1350,7 @@ pub struct ListedFragment {
     pub microphone: bool,
     /// It runs the release's chat template, its page the platform's code,
     /// as its face says (its blessed release): `microphone` is then the
-    /// signer's one yes for every such chat, which that page asks for
-    /// before it records. Left out while false.
+    /// signer's one yes for every such chat. Left out while false.
     #[serde(default, rename = "chatRelease", skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub chat_release: bool,

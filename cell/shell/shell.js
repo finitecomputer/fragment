@@ -327,17 +327,14 @@ function show(spec) {
 }
 
 // A fragment's page's policy, as its row says now: the microphone lent by
-// its person's yes (`microphone`: asked once, `micAsk` below), or, a chat
-// of the release's (`chatRelease`), whose page is the platform's code, from
-// the first: that page asks their one yes for chats before it records, so
-// their Allow makes no page again (which would drop what they are writing).
-// No row (a visitor's), none. A bare `microphone` is the src's origin's,
-// the mint's on this page's; the page lands at the fragment's own, which
-// the browser would refuse without asking, so it names that origin (known
-// here, no request).
+// its person's yes alone (`microphone`: asked once, `micAsk` below; a chat
+// of the release's, their one yes for every such chat). No row (a
+// visitor's), none. A bare `microphone` is the src's origin's, the mint's
+// on this page's; the page lands at the fragment's own, which the browser
+// would refuse without asking, so it names that origin (known here, no
+// request).
 function allowOf(name) {
-  const f = byName(name);
-  return f && (f.microphone || f.chatRelease) ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
+  return byName(name)?.microphone === true ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
 }
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket). A
 // fragment's page (`lends`: its chat's, its window's) has `allowOf`'s
@@ -642,12 +639,13 @@ function pressedIn(frame) {
 // not theirs, its owner's email not theirs to see, decision 48; for a chat
 // of the release's chat template, one yes for every such chat), and only
 // behind a press in it (`pressedIn`; a release chat's page, the platform's
-// code, asks only from its mic's press, as with alerts). Allow is kept on their row (`PUT
-// /api/fragments/{name}/microphone`), and a frame its policy did not lend
-// (an app's) is made again, lent it; Not now keeps nothing. Answered
-// `{fragment: KIND.micAnswer, nonce, ok, error?, reload?}` (`reload`: its
-// frame is being made again, lent it). A frame of a fragment not on their
-// list (no row to keep it on: a visitor's) is answered nothing.
+// code, asks only from its mic's press, as with alerts). Allow is kept on
+// their row (`PUT /api/fragments/{name}/microphone`), and its frame is made
+// again, lent it (for chats, once: their next frames are made lent); Not
+// now keeps nothing. Answered `{fragment: KIND.micAnswer, nonce, ok, error?,
+// reload?}` (`reload`: its frame is being made again, lent it). A frame of a
+// fragment not on their list (no row to keep it on: a visitor's) is
+// answered nothing.
 addEventListener("message", async (event) => {
   const d = event.data;
   if (d?.fragment !== KIND.micAsk || typeof d.nonce !== "string" || d.nonce.length > 64) return;
@@ -665,7 +663,7 @@ addEventListener("message", async (event) => {
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
   const answer = (ok, error, reload = false) => event.source.postMessage({ fragment: KIND.micAnswer, nonce: d.nonce, ok, ...(error ? { error } : {}), ...(reload ? { reload } : {}) }, origin);
-  // lent: at once, its frame made again first if it was made before the yes (an app's, open in another window)
+  // lent: at once, its frame made again first if it was made before the yes (in another window, or tab)
   const lent = () => {
     const stale = frame.allow !== allowOf(name);
     answer(true, null, stale);
@@ -691,9 +689,9 @@ addEventListener("message", async (event) => {
 // Fragments' pages made again whose policy their rows say otherwise now (a
 // policy holds from a navigation on): `only`'s, for its own yes; with none,
 // every page lent what its row no longer lends (a yes taken back, here or in
-// another tab, every chat's for a chat's; a chat no longer the release's),
-// as the list says each change (`load`). A page lent nothing is made again
-// only by its own ask (an app's, `micAsk`), never under the person's hand.
+// another tab; every chat's, for a chat's), as the list says each change
+// (`load`). A page lent nothing is made again only by its own ask
+// (`micAsk`), never under the person's hand.
 function relend(only = null) {
   for (const frame of document.querySelectorAll("iframe[data-lends]")) {
     const name = frame.dataset.fragment;

@@ -97,13 +97,13 @@ export const MESSAGES = Object.freeze({
     kind: "microphone?",
     from: "a frame of a fragment on the person's list → the shell, from a press in it",
     fields: "{nonce}",
-    says: "Asks to use the person's microphone: the shell asks them once per app in its one ask dialog (\"Let Recipes use your microphone?\", \"an app shared with you\" when not theirs; one yes for every release chat), only behind a press in that frame; Allow is kept on their row, and a frame whose policy lent none (an app's) is made again, lent it (a release chat's names it from the first, its page asking before it records). Answered `microphone`.",
+    says: "Asks to use the person's microphone: the shell asks them once per app in its one ask dialog (\"Let Recipes use your microphone?\", \"an app shared with you\" when not theirs; one yes for every release chat), only behind a press in that frame (a release chat's, its mic's); Allow is kept on their row and the frame is made again, lent it. Answered `microphone`.",
   },
   micAnswer: {
     kind: "microphone",
     from: "the shell → that frame",
     fields: "{nonce, ok, error?, reload?}",
-    says: "`microphone?`'s answer: ok when lent (at once if lent already); `reload` when its frame is being made again, lent it (an app's, whose policy lent none); `error` \"asked with no click\", \"asked too soon after a press in the shell\", \"declined\", \"not answered\", \"busy\", or the API's refusal.",
+    says: "`microphone?`'s answer: ok when lent (at once if lent already); `reload` when its frame is being made again, lent it (made before the yes); `error` \"asked with no click\", \"asked too soon after a press in the shell\", \"declined\", \"not answered\", \"busy\", or the API's refusal.",
   },
   confirm: {
     kind: "confirm",

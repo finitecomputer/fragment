@@ -325,21 +325,22 @@ fn still_loading_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, chat: 
     Ok(())
 }
 
-/// The chat's mic in the shell's frame (FIN-615 PR 11). A chat of the
-/// release's is the platform's page, so the shell's frame names the chat's
-/// own origin for the microphone from the first (a bare
+/// The chat's mic in the shell's frame (FIN-615 PR 11): the shell lends it
+/// only once its person says yes, in its one ask dialog, from a press on the
+/// chat's mic; one yes for every chat of theirs, taken back from any chat's
+/// ⋯ for all. A lent frame names the chat's own origin (a bare
 /// `allow="microphone"` names its `src`'s, the platform's, which the
-/// browser refused the chat's page without asking: PR 582), and the page
-/// asks its person's one yes for every chat, in the shell's one ask dialog,
-/// before it records. Valid: the frame navigates at once naming the chat's
-/// origin (no read of the chat's status first); a press on the mic, a
-/// moment after their press in the shell opening it, asks "Use your
-/// microphone in chats?", whose Not now keeps nothing and records nothing;
-/// pressed again, Allow keeps the yes on their row for this chat and their
-/// other, and the memo starts at once in the same page (nothing it holds is
-/// dropped: it is not made again); the chat's ⋯ in the sidebar says Turn
-/// off microphone (all chats), which takes the yes back from both, and its
-/// next press asks again. The ask and the item, shot into `shots`.
+/// browser refused the chat's page without asking: PR 582). Valid: before
+/// the yes, the frame navigates at once naming no microphone (no read of
+/// the chat's status first); a press on the mic, a moment after their press
+/// in the shell opening it, asks "Use your microphone in chats?", whose Not
+/// now keeps nothing and records nothing; pressed again, Allow keeps the yes
+/// on their row for this chat and their other, and makes the frame again
+/// naming the chat's origin, where the chat is told it may record (Chrome's
+/// fake, as a person's Allow) and a press records at once; the chat's ⋯ in
+/// the sidebar says Turn off microphone (all chats), which takes the yes
+/// back from both and makes the frame again, naming none; its next press
+/// asks again. The ask and the item, shot into `shots`.
 fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, chat: &str, shots: &Path) -> Result<()> {
     let wait = Duration::from_secs(30);
     // their other chat, which the one yes lends too
@@ -370,6 +371,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
         return chrome.close(shell);
     }
     let origin_allow = json!(format!("clipboard-write; microphone {}", api.site_origin(chat)));
+    let unlent_allow = json!("clipboard-write");
     // its origin is the shell page's to know (its `fragment-origin` meta):
     // the frame names it in its policy and navigates, no status read first
     let asked: Vec<String> = chrome
@@ -382,19 +384,17 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
     let navigated = asked.iter().position(|u| u.contains(&format!("/auth/frame?name={chat}")));
     let read_first = navigated.is_some_and(|i| asked[..i].iter().any(|u| u.contains(&format!("/api/f/{chat}/status"))));
     s.ok(
-        "the shell's frame of a chat of the release's names the chat's own origin in its policy from the first, before any yes, and navigates at once: no read of the chat's status first",
-        allow == origin_allow && lent(chat) == Some(false) && navigated.is_some() && !read_first,
+        "before its person's yes, the shell's frame of a chat names no microphone in its policy, and navigates at once: no read of the chat's status first",
+        allow == unlent_allow && lent(chat) == Some(false) && navigated.is_some() && !read_first,
         json!({ "allow": allow, "navigated": navigated, "read_first": read_first }),
     );
-    // what the page holds, which a page made again would not; and what the
-    // shell answers its asks (for a failure's account)
-    chrome.eval_in_frame(&shell, chat, "(document.body.dataset.kept = '1', addEventListener('message', (e) => { if (e.data?.fragment === 'microphone') document.body.dataset.micAnswer = JSON.stringify(e.data); }), true)")?;
+    // what the shell answers its asks (for a failure's account)
+    chrome.eval_in_frame(&shell, chat, "(addEventListener('message', (e) => { if (e.data?.fragment === 'microphone') document.body.dataset.micAnswer = JSON.stringify(e.data); }), true)")?;
     let why = |chrome: &mut Browser| -> Value {
         let shell_side = chrome.eval(&shell, &format!("({{ active: document.activeElement === document.querySelector({frame_of}) ? 'frame' : (document.activeElement?.id || document.activeElement?.tagName), activation: navigator.userActivation?.isActive }})")).unwrap_or_default();
         let frame_side = chrome.eval_in_frame(&shell, chat, "({ answer: document.body.dataset.micAnswer ?? null, record: !!document.getElementById('record') && !document.getElementById('record').hidden && !document.getElementById('record').disabled, banner: document.getElementById('banner').hidden ? null : document.getElementById('banner-text').textContent })").unwrap_or_default();
         json!({ "shell": shell_side, "frame": frame_side })
     };
-    let kept = "document.body.dataset.kept === '1'";
     let recording = "document.getElementById('record').classList.contains('on')";
     // a press on its mic, as a hand makes it, in the frame
     let press_mic = |chrome: &mut Browser| -> Result<()> {
@@ -423,22 +423,24 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
         asked && title == "Use your microphone in chats?" && buttons == json!(["Not now", "Allow"]) && closed && lent(chat) == Some(false) && on == false,
         json!({ "asked": asked, "title": title, "buttons": buttons, "closed": closed, "recording": on }),
     );
-    // pressed again: Allow, and the memo starts in the same page
+    // pressed again: Allow, and the frame made again, lent it
     press_mic(chrome)?;
     let again = chrome.until(&shell, &asking, wait);
     let armed = chrome.until(&shell, "!document.getElementById('ask-go').disabled", wait);
     shell_shots(chrome, &shell, shots, "mic-ask-chats", (1280, 860))?;
     chrome.click(&shell, "#ask-go")?;
-    let started = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &format!("{recording} && !document.getElementById('recording').hidden")).ok() == Some(Value::Bool(true)));
-    let same = chrome.eval_in_frame(&shell, chat, kept)? == true;
+    let relent = chrome.until(&shell, &format!("document.querySelector({frame_of})?.allow === {origin_allow}"), wait);
     let both = s.eventually(wait, || lent(chat) == Some(true) && lent(&other) == Some(true));
+    let ready_again = relent && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
     let told = chrome.eval_in_frame(&shell, chat, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)")?;
+    chrome.eval_in_frame(&shell, chat, "(document.getElementById('record').click(), true)")?;
+    let started = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &format!("{recording} && !document.getElementById('recording').hidden && document.getElementById('mic-card').hidden")).ok() == Some(Value::Bool(true)));
     chrome.eval_in_frame(&shell, chat, "(document.getElementById('discard').click(), true)")?;
     let off = s.eventually(wait, || chrome.eval_in_frame(&shell, chat, &format!("!{recording}")).ok() == Some(Value::Bool(true)));
     s.ok(
-        "Allow keeps the one yes on their row, for this chat and their other, and the memo starts at once in the same page, which holds what it held (not made again); the x lets it go",
-        again && armed && started && same && both && told == "granted" && off,
-        json!({ "again": again, "armed": armed, "started": started, "same page": same, "both": both, "told": told, "off": off }),
+        "Allow keeps the one yes on their row, for this chat and their other, and the shell makes the frame again naming the chat's own origin: the chat may use the microphone, and its mic records at once; the x lets it go",
+        again && armed && relent && both && ready_again && told == "granted" && started && off,
+        json!({ "again": again, "armed": armed, "relent": relent, "both": both, "told": told, "started": started, "off": off }),
     );
     // the chat's ⋯ in the sidebar: the yes taken back, from every chat
     let more = format!("document.querySelector({})", js(&format!("#chats [data-key=\"chat:{chat}\"] .row-more")));
@@ -452,17 +454,16 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
     chrome.until(&shell, &format!("!!{item}"), wait);
     chrome.eval(&shell, &format!("({item}?.click(), true)"))?;
     let neither = s.eventually(wait, || lent(chat) == Some(false) && lent(&other) == Some(false));
-    std::thread::sleep(Duration::from_millis(500));
-    let still = chrome.eval(&shell, &allow_now)?;
-    let same = chrome.eval_in_frame(&shell, chat, kept)? == true;
+    let unlent = chrome.until(&shell, &format!("document.querySelector({frame_of})?.allow === 'clipboard-write'"), wait);
+    let ready_again = unlent && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
     press_mic(chrome)?;
     let asks_again = chrome.until(&shell, &asking, wait);
     chrome.click(&shell, "#ask-cancel")?;
     let shut = chrome.until(&shell, &format!("!{dialog}.open"), wait);
     s.ok(
-        "the chat's ⋯ in the sidebar offers Turn off microphone (all chats) while lent, which takes the one yes back from both; its next press asks again",
-        offered && says.as_str().is_some_and(|t| t.ends_with("Turn off microphone (all chats)")) && neither && still == origin_allow && same && asks_again && shut,
-        json!({ "offered": offered, "says": says, "neither": neither, "still": still, "same page": same, "asks again": asks_again }),
+        "the chat's ⋯ in the sidebar offers Turn off microphone (all chats) while lent, which takes the one yes back from both and makes the frame again, naming none; its next press asks again",
+        offered && says.as_str().is_some_and(|t| t.ends_with("Turn off microphone (all chats)")) && neither && unlent && ready_again && asks_again && shut,
+        json!({ "offered": offered, "says": says, "neither": neither, "unlent": unlent, "asks again": asks_again }),
     );
     chrome.close(shell)?;
     Ok(())
