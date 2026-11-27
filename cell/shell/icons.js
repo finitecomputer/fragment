@@ -33,6 +33,8 @@ const ICON = {
   more: [["circle", { cx: 5, cy: 12, r: 1.3 }], ["circle", { cx: 12, cy: 12, r: 1.3 }], ["circle", { cx: 19, cy: 12, r: 1.3 }]],
   people: [["circle", { cx: 9, cy: 8, r: 3.2 }], ["path", { d: "M3 19a6 6 0 0 1 12 0" }], ["path", { d: "M16 5.2a3.2 3.2 0 0 1 0 5.6M18 19a6 6 0 0 0-2.5-4.9" }]],
   globe: [["circle", { cx: 12, cy: 12, r: 9 }], ["path", { d: "M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" }]],
+  // a microphone (Lucide's mic), the chat's own
+  mic: [["path", { d: "M12 19v3" }], ["path", { d: "M19 10v2a7 7 0 0 1-14 0v-2" }], ["rect", { x: 9, y: 2, width: 6, height: 13, rx: 3 }]],
   lock: [["rect", { x: 5, y: 11, width: 14, height: 10, rx: 2 }], ["path", { d: "M8 11V7a4 4 0 0 1 8 0v4" }]],
   screen: [["rect", { x: 3, y: 4, width: 18, height: 12, rx: 2 }], ["path", { d: "M8 20h8M12 16v4" }]],
   // a pushpin (Lucide's pin)

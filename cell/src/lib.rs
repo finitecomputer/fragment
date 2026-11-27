@@ -39,6 +39,7 @@ mod ai;
 mod address;
 mod alone;
 mod asks;
+mod owner_ask;
 mod assets;
 mod auth;
 mod billing;
@@ -717,7 +718,7 @@ async fn reachable(env: &Env, agent: &Signed, asker: &str) -> CellResult<Fragmen
             // archiving and their dock) stays theirs, as do the listed
             // records their role reads: the agent's capped role may read less
             let owned = f.role == Role::Owner;
-            permit::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, owned, listed: vec![], ..f })
+            permit::listed_role(Some(f.role), cap).map(|role| ListedFragment { role, sharing: None, preview: None, preview_at: None, unread: 0, archived: false, dock: true, pinned: false, microphone: false, only_you: false, owned, listed: vec![], ..f })
         })
         .collect();
     Ok(FragmentList { fragments, limits: Some(Config::from_env(env).uploads_for(agent.identity.kind)) })
@@ -1411,6 +1412,16 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             let name = named_fragment(name)?;
             principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Dock, on: set.dock }).await?;
             json_answer(&fragment_proto::Docked { name, dock: set.dock })
+        }
+        // whether the signer lets a fragment's page use their microphone
+        // (principal.rs): their own yes, the shell's to ask (one ask)
+        (Method::Put, ["api", "fragments", name, "microphone"]) => {
+            let body = read_body(&mut req, OWN_VIEW_BODY_MAX_BYTES).await?;
+            let set: fragment_proto::SetMicrophone = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            let who = signer(env, &req, &url, &body).await?;
+            let name = named_fragment(name)?;
+            principal::ask(env, &who.identity.id, &SetOwn { fragment: name.clone(), own: Own::Microphone, on: set.microphone }).await?;
+            json_answer(&fragment_proto::Microphone { name, microphone: set.microphone })
         }
         // whether the signer pinned a fragment of theirs (principal.rs):
         // their own view again, as archiving is

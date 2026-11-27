@@ -55,6 +55,11 @@
 //!    that is a member lends it.
 //! 7. **Short of the role**, an anonymous caller is told to sign in (401)
 //!    and a signed one is refused (403).
+//! 8. **A dangerous action an agent asks for someone** (`Action::Dangerous`),
+//!    unheld, asks the fragment's owner to confirm it (`Ask::Confirm`): the
+//!    asker, when they own it, else the agent's own owner, when the asker
+//!    is in it too. Anyone else's fragment is its owner's alone: refused,
+//!    as rule 7.
 //!
 //! Some control routes need more than a role (`reserved`). Sharing
 //! (members, invites, visibility, the links) is the owner's, and, since
@@ -76,16 +81,23 @@
 //! and the platform's own records answer nothing. Invites and offers are
 //! asked on the person's own routes (registry/invites.rs, offers.rs).
 //!
-//! Deleting a fragment and setting its money cap are dangerous
-//! (`Reserved::Dangerous`): today an agent is refused them, whomever it
-//! acts for, and its owner does them. That is not the design. Paul,
-//! 2026-11-21: "I want my agent to be able to delete fragments, it should
-//! just pop open an approval card for that. just like it has me confirm
-//! when I do it myself in the UI." The target is in `the_rule_table`'s
-//! comment.
+//! **One ask** (FIN-615). Where a call is not refused but needs someone's
+//! yes, it asks them on one card (`Ask`), in the chat it was asked in:
+//!
+//! - **A dangerous action** (`Action::Dangerous`: deleting the fragment,
+//!   setting its money cap) an agent asks for someone is its owner's to
+//!   confirm, every time, never remembered (Paul, 2026-11-21: "I want my
+//!   agent to be able to delete fragments, it should just pop open an
+//!   approval card for that. just like it has me confirm when I do it
+//!   myself in the UI"): the asker's, when they own it, else the agent's
+//!   own owner's (`decide`'s rule 8). Its Confirm is the owner's own
+//!   request, in person; the agent never holds the right.
+//! - **Someone else's ask needs what its place doesn't lend** (`lend_asks`):
+//!   asked of the agent's owner, who answers Allow once (the asker's next
+//!   request there), Always here (the place's lend) or No.
 
 use fragment_proto::ledger::{Plan, SeatState};
-use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Member, Role, Visibility};
+use fragment_proto::{valid_channel_name, Author, FragmentKind, IdentityKind, Lend, Member, Role, Visibility};
 use serde_json::Value;
 
 /// What `decide` decides over: the fragment's visibility, what the caller
@@ -114,6 +126,9 @@ pub enum Action {
     /// …/blobs/<sha256>`), an editor's act; on a connector, its bound
     /// agent's too (rule 5's exception).
     Upload,
+    /// Something dangerous: its owner's, and an agent's asks its owner to
+    /// confirm it (rule 8).
+    Dangerous(Danger),
 }
 
 impl Action {
@@ -121,8 +136,18 @@ impl Action {
         match self {
             Action::Read(role) | Action::Act(role) | Action::Repo(role) => role,
             Action::Upload => Role::Editor,
+            Action::Dangerous(_) => Role::Owner,
         }
     }
+}
+
+/// What is dangerous to a fragment (docs/ledger.md for its cap).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Danger {
+    /// Deleting it (`DELETE /api/f/<name>`).
+    Delete,
+    /// Setting its monthly cap (`PUT /api/f/<name>/cap`).
+    Cap,
 }
 
 /// What a caller brings to a fragment.
@@ -185,11 +210,138 @@ pub enum Verdict {
     Refuse(Refusal),
 }
 
-/// Whom a verdict asks, and for what. No rule of today's asks: the grant,
-/// lend and device rules will, each with a variant of its own. Until then
-/// `Verdict::Ask` cannot be made, and a caller's `match ask {}` proves it.
+/// Whom a call asks, and for what: one card, in the chat it was asked in
+/// (docs/api.md, "One ask"). The grant and device rules will add theirs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Ask {}
+pub enum Ask {
+    /// Someone else's ask needs what its place does not lend (`lend_asks`):
+    /// asked of the agent's owner.
+    Lend(Lent),
+    /// A dangerous action, asked of `of` each time (rule 8).
+    Confirm { danger: Danger, of: Whom },
+}
+
+/// What of its owner's an agent's call uses on someone else's ask, as a
+/// place's lend keeps it (`fragment_proto::Lend`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lent {
+    /// Their credit, for paid tools.
+    Spend,
+    /// Their accounts and keys.
+    Accounts,
+}
+
+/// Whom a confirm asks: the agent's asker, or its own owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whom {
+    Asker,
+    AgentsOwner,
+}
+
+/// An answer to an `Ask`, as its card's option names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answer {
+    /// The asker's next request there, all its calls, then gone.
+    Once,
+    /// Written in the place's lend: the same facts are not asked again.
+    Always,
+    No,
+    /// A confirm's: its owner did it, in person.
+    Yes,
+}
+
+impl Ask {
+    /// What a card names it (`what`).
+    pub fn what(self) -> &'static str {
+        match self {
+            Ask::Lend(Lent::Spend) => "spend",
+            Ask::Lend(Lent::Accounts) => "accounts",
+            Ask::Confirm { danger: Danger::Delete, .. } => "delete",
+            Ask::Confirm { danger: Danger::Cap, .. } => "cap",
+        }
+    }
+
+    /// The answers it takes: a lend's three, a confirm's two (never
+    /// remembered, so no "always").
+    pub fn answers(self) -> &'static [Answer] {
+        answers_of(self.what()).expect("what an ask names takes answers")
+    }
+}
+
+/// The answers a card asking `what` (`Ask::what`) takes, or `None` for a
+/// `what` no ask names.
+pub fn answers_of(what: &str) -> Option<&'static [Answer]> {
+    match what {
+        "spend" | "accounts" => Some(&[Answer::Once, Answer::Always, Answer::No]),
+        "delete" | "cap" => Some(&[Answer::Yes, Answer::No]),
+        _ => None,
+    }
+}
+
+/// An answer to the platform's card asking `what` (docs/api.md, "One
+/// ask"): `{kind: "ask_answer", option, answers}` alone, `option` one it
+/// takes. Never words, nor a message: a bridge starts no turn on it, so an
+/// answer resumes nothing and never wakes an agent on its answerer's
+/// authority. What is wrong with any other.
+pub fn ask_answer(body: &Value, what: &str) -> Result<Answer, &'static str> {
+    let shape = "is {kind: \"ask_answer\", option, answers} alone";
+    let o = body.as_object().filter(|o| o.len() == 3 && o.contains_key("answers")).ok_or(shape)?;
+    if o.get("kind").and_then(Value::as_str) != Some("ask_answer") {
+        return Err(shape);
+    }
+    let option = o.get("option").and_then(Value::as_str).ok_or(shape)?;
+    answers_of(what).and_then(|a| a.iter().copied().find(|a| a.as_str() == option)).ok_or("names one of its card's options")
+}
+
+impl Lent {
+    /// The lent thing a card names (`what`), or `None` for a confirm's.
+    pub fn of_what(what: &str) -> Option<Lent> {
+        match what {
+            "spend" => Some(Lent::Spend),
+            "accounts" => Some(Lent::Accounts),
+            _ => None,
+        }
+    }
+
+    /// Whether `lend` lends it.
+    pub fn in_lend(self, lend: Lend) -> bool {
+        match self {
+            Lent::Spend => lend.spend,
+            Lent::Accounts => lend.accounts,
+        }
+    }
+
+    /// `lend` with it lent too.
+    pub fn added_to(self, lend: Lend) -> Lend {
+        match self {
+            Lent::Spend => Lend { spend: true, ..lend },
+            Lent::Accounts => Lend { accounts: true, ..lend },
+        }
+    }
+}
+
+impl Answer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Answer::Once => "once",
+            Answer::Always => "always",
+            Answer::No => "no",
+            Answer::Yes => "yes",
+        }
+    }
+
+    /// The answer an option names, if `ask` takes it.
+    pub fn of(option: &str, ask: Ask) -> Option<Answer> {
+        ask.answers().iter().copied().find(|a| a.as_str() == option)
+    }
+}
+
+/// Whether someone else's ask may use `needs` of its agent's owner's,
+/// where its places lend `lend` now: `None` lent, else what it asks the
+/// owner (FIN-720; the swap, computer.rs).
+pub fn lend_asks(lend: Lend, needs: Lent) -> Option<Ask> {
+    (!needs.in_lend(lend)).then_some(Ask::Lend(needs))
+}
 
 /// Why `decide` refused, as one refusal says it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,9 +402,23 @@ pub fn decide(facts: &Facts) -> Verdict {
     if door_upload {
         return Verdict::Allow(Role::Editor);
     }
+    // rule 8: an agent's dangerous ask for someone is its owner's to
+    // confirm, unheld: the asker's when they own it, else its owner's
+    // when the asker is in it too (what they cannot open, they never
+    // have an agent ask about)
+    if let (Action::Dangerous(danger), Some(cap), None) = (action, standing.cap, standing.held) {
+        let of = match (standing.member, cap.owner) {
+            (Some(Role::Owner), _) => Some(Whom::Asker),
+            (Some(_), Some(Role::Owner)) => Some(Whom::AgentsOwner),
+            _ => None,
+        };
+        if let Some(of) = of {
+            return Verdict::Ask(Ask::Confirm { danger, of });
+        }
+    }
     let purpose = match action {
         Action::Read(_) | Action::Repo(_) => Purpose::Read,
-        Action::Act(_) | Action::Upload => Purpose::Act,
+        Action::Act(_) | Action::Upload | Action::Dangerous(_) => Purpose::Act,
     };
     let role = match effective_role(visibility, standing, purpose) {
         Some(role) if role >= needs => role,
@@ -361,8 +527,8 @@ pub fn listed_role(asker: Option<Role>, cap: Cap) -> Option<Role> {
     // every role is at least `public`: what it acts with at all lists it
     match decide(&Facts { visibility: Visibility::Members, standing, action: Action::Act(Role::Public) }) {
         Verdict::Allow(role) => Some(role),
-        Verdict::Ask(ask) => match ask {},
-        Verdict::Refuse(_) => None,
+        // only what is dangerous asks, and listing is not
+        Verdict::Ask(_) | Verdict::Refuse(_) => None,
     }
 }
 
@@ -404,23 +570,17 @@ pub enum Reserved {
     /// invites, visibility, rotating links, and claiming an app address. The owner's, and their
     /// own agent's acting for them (`agent_shares`; Paul, 2026-10-04).
     Sharing,
-    /// Dangerous: deleting the fragment, and its money cap
-    /// (docs/ledger.md). Today the owner's own, refused to any agent
-    /// whomever it acts for; the target asks the owner instead, each time
-    /// (`the_rule_table`).
-    Dangerous,
 }
 
 /// What a control API request (`method`, and its path under
 /// `/api/f/<name>`) reserves, or `None` when a role alone decides it. A
-/// member leaving (`DELETE members/me`) reserves nothing. The router asks
-/// this of its undecoded path; the fragment's handlers decide again on
-/// their own, so a path spelled otherwise (`%69nvites`) gains nothing.
+/// member leaving (`DELETE members/me`) reserves nothing, nor does what is
+/// dangerous (deleting, the cap): its fragment decides that (rule 8). The
+/// router asks this of its undecoded path; the fragment's handlers decide
+/// again on their own, so a path spelled otherwise (`%69nvites`) gains
+/// nothing.
 pub fn reserved(method: &str, rest: &[&str]) -> Option<Reserved> {
     match (method, rest) {
-        ("DELETE", [] | [""]) => Some(Reserved::Dangerous),
-        // a fragment's cap is its owner's money (docs/ledger.md)
-        ("PUT", ["cap"]) => Some(Reserved::Dangerous),
         ("PUT", ["address"]) => Some(Reserved::Sharing),
         ("PUT", ["members", _]) => Some(Reserved::Sharing),
         ("DELETE", ["members", "me"]) => None,
@@ -456,9 +616,6 @@ impl Sharer {
 /// authority (403).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareRefusal {
-    /// Deleting the fragment, or setting its cap: dangerous, and today its
-    /// owner's own.
-    Dangerous,
     /// It acts as itself, or for someone other than its owner.
     NotForOwner,
     /// Its owner holds it below them, and sharing is above every hold.
@@ -471,7 +628,6 @@ pub enum ShareRefusal {
 impl ShareRefusal {
     pub fn message(self) -> &'static str {
         match self {
-            ShareRefusal::Dangerous => "an agent never deletes a fragment or sets its cap: its owner does",
             ShareRefusal::NotForOwner => "an agent shares only acting for its own owner (`for=<its owner>`), never as itself or for anyone else",
             ShareRefusal::Held => "an agent its owner holds below them shares nothing",
             ShareRefusal::NotOwner => "an agent shares only what its owner owns",
@@ -484,7 +640,6 @@ impl ShareRefusal {
 /// fragment, which decides the rest from its owner's share there.
 pub fn agent_may_ask(reserved: Reserved, sharer: Sharer) -> Result<(), ShareRefusal> {
     match reserved {
-        Reserved::Dangerous => Err(ShareRefusal::Dangerous),
         Reserved::Sharing => {
             if !sharer.for_owner {
                 return Err(ShareRefusal::NotForOwner);
@@ -703,8 +858,7 @@ mod tests {
     fn allowed(visibility: Visibility, standing: Standing, action: Action) -> Option<Role> {
         match verdict(visibility, standing, action) {
             Verdict::Allow(role) => Some(role),
-            Verdict::Ask(ask) => match ask {},
-            Verdict::Refuse(_) => None,
+            Verdict::Ask(_) | Verdict::Refuse(_) => None,
         }
     }
 
@@ -731,8 +885,8 @@ mod tests {
     ///   agent changing its own grants) asks for a confirm card instead,
     ///   of whoever would click Confirm in the UI: the thing's owner. It is
     ///   asked every time, like the UI's own confirm, and never remembered
-    ///   as "always". Today it refuses an agent (`Reserved::Dangerous`), as
-    ///   master does; the flip lands with the one ask (PR 10).
+    ///   as "always". Deleting and the cap do (rule 8); the rest are still
+    ///   their owner's, in person.
     /// - **What should obviously work, works** (Paul: "let's make sure
     ///   things that should obviously work do work"): `the_obvious_cases`.
     /// - **A secret lives with whoever it belongs to** (Paul, 2026-11-21:
@@ -743,7 +897,8 @@ mod tests {
     ///   stay; only the move between them goes.
     #[test]
     fn the_rule_table() {
-        use Action::{Act, Read, Repo, Upload};
+        use Action::{Act, Dangerous, Read, Repo, Upload};
+        let confirm = |danger, of| Verdict::Ask(Ask::Confirm { danger, of });
         let anon = st(None, false, false);
         let link = st(None, true, false);
         let signed = st(None, false, true);
@@ -822,6 +977,14 @@ mod tests {
             ("an agent's owner reads, but not its repo", V::Members, owner_of_agent(), Repo(Viewer), refused(Viewer, Why::RepoIsMembers, false)),
             ("for its owner who owns it: the repo at most editor", V::Members, acting(Some(Owner), None, Some(Owner)), Repo(Editor), Verdict::Allow(Editor)),
             ("held at viewer: the repo's viewer", V::Members, held(Viewer, acting(Some(Editor), None, Some(Editor))), Repo(Viewer), Verdict::Allow(Viewer)),
+            // rule 8: what is dangerous is its owner's, and an agent's asks them to confirm
+            ("the owner deletes, in person", V::Members, member(Owner), Dangerous(Danger::Delete), Verdict::Allow(Owner)),
+            ("an editor never deletes", V::Members, member(Editor), Dangerous(Danger::Delete), refused(Owner, Why::Short, false)),
+            ("for its owner, who owns it: a confirm for them", V::Members, acting(Some(Owner), None, Some(Owner)), Dangerous(Danger::Cap), confirm(Danger::Cap, Whom::Asker)),
+            ("for an editor, its owner owning it: a confirm for its owner", V::Members, acting(Some(Editor), None, Some(Owner)), Dangerous(Danger::Delete), confirm(Danger::Delete, Whom::AgentsOwner)),
+            ("for an asker not in it: refused, whoever owns it", V::Members, acting(None, None, Some(Owner)), Dangerous(Danger::Delete), refused(Owner, Why::Capped, false)),
+            ("for an asker who owns it, held: refused", V::Members, held(Editor, acting(Some(Owner), None, Some(Owner))), Dangerous(Danger::Delete), refused(Owner, Why::Capped, false)),
+            ("as itself, an editor: refused", V::Members, member(Editor), Dangerous(Danger::Cap), refused(Owner, Why::Short, false)),
         ];
         for &(row, visibility, standing, action, want) in rows {
             let facts = Facts { visibility, standing, action };
@@ -907,7 +1070,7 @@ mod tests {
     /// the same agent holds signing as itself.
     #[test]
     fn the_obvious_cases() {
-        use Action::{Act, Read};
+        use Action::{Act, Dangerous, Read};
         // Juniper is Ana's agent, Fred her second; Ben is in Ana's shared
         // chat; the facts as the cell reads them (fragment.rs `standing`,
         // after `as_whom`)
@@ -1004,6 +1167,26 @@ mod tests {
                 refused(Editor, Why::ThroughAgent, false),
             ),
             ("Juniper, for Ana, never owns Ben's fragment", Facts { action: Act(Owner), ..bens }, refused(Owner, Why::Short, false), refused(Owner, Why::Short, false)),
+            // a dangerous ask pops a confirm for its owner, each time (Paul, 2026-11-21)
+            (
+                "Ana asks Juniper to delete an app she owns",
+                Facts { visibility: V::Members, standing: for_ana(Some(Owner), None), action: Dangerous(Danger::Delete) },
+                Verdict::Ask(Ask::Confirm { danger: Danger::Delete, of: Whom::Asker }),
+                Verdict::Ask(Ask::Confirm { danger: Danger::Delete, of: Whom::Asker }),
+            ),
+            (
+                "Ben asks Juniper to delete the app Ana shared with him",
+                Facts { visibility: V::Members, standing: acting(Some(Editor), Some(Editor), Some(Owner)), action: Dangerous(Danger::Delete) },
+                Verdict::Ask(Ask::Confirm { danger: Danger::Delete, of: Whom::AgentsOwner }),
+                Verdict::Ask(Ask::Confirm { danger: Danger::Delete, of: Whom::AgentsOwner }),
+            ),
+            (
+                "Ben asks Juniper to set the cap of his own app",
+                Facts { visibility: V::Members, standing: acting(Some(Owner), Some(Editor), Some(Editor)), action: Dangerous(Danger::Cap) },
+                Verdict::Ask(Ask::Confirm { danger: Danger::Cap, of: Whom::Asker }),
+                Verdict::Ask(Ask::Confirm { danger: Danger::Cap, of: Whom::Asker }),
+            ),
+            ("Juniper, for Ana, never deletes Ben's fragment", Facts { action: Dangerous(Danger::Delete), ..bens }, refused(Owner, Why::Short, false), refused(Owner, Why::Short, false)),
         ];
         for &(case, facts, today, target) in rows {
             assert_eq!(decide(&facts), today, "{case}: today");
@@ -1013,10 +1196,8 @@ mod tests {
         // and what Ana could do herself through Fred includes sharing what she owns
         let for_ana = Sharer { for_owner: true, held: None };
         assert_eq!(agent_shares(for_ana, Some(Owner)), Ok(Owner), "Fred shares Ana's app for her");
-        // and Juniper never deletes Ben's fragment or sets its cap, for Ana
-        // (the router refuses), nor shares it: its request there is its own,
-        // and as itself it shares nothing
-        assert_eq!(agent_may_ask(Reserved::Dangerous, for_ana), Err(ShareRefusal::Dangerous), "nor deletes it or sets its cap");
+        // and Juniper never shares Ben's fragment: its request there is its
+        // own, and as itself it shares nothing
         assert_eq!(agent_shares(Sharer { for_owner: false, held: None }, None), Err(ShareRefusal::NotForOwner), "nor shares it");
     }
 
@@ -1231,8 +1412,9 @@ mod tests {
 
     #[test]
     fn reserved_routes() {
+        // what is dangerous its fragment decides (rule 8), whoever signs
         for (method, rest) in [("DELETE", &[][..]), ("DELETE", &[""][..]), ("PUT", &["cap"][..])] {
-            assert_eq!(reserved(method, rest), Some(Reserved::Dangerous), "{method} {rest:?}");
+            assert_eq!(reserved(method, rest), None, "{method} {rest:?}");
         }
         for (method, rest) in [
             ("PUT", &["address"][..]),
@@ -1301,13 +1483,6 @@ mod tests {
             assert_eq!(agent_may_ask(Reserved::Sharing, held), Err(ShareRefusal::Held));
             assert_eq!(agent_shares(held, owns), Err(ShareRefusal::Held));
         }
-        // deleting and the cap are dangerous: refused to an agent today, for whomever it acts
-        for sharer in [for_owner, not_for_owner, Sharer { for_owner: true, held: Some(Viewer) }] {
-            for (method, rest) in [("DELETE", &[][..]), ("PUT", &["cap"][..])] {
-                let route = reserved(method, rest).expect("a reserved route");
-                assert_eq!(agent_may_ask(route, sharer), Err(ShareRefusal::Dangerous), "{method} {rest:?}");
-            }
-        }
         // and the lent authority is no role: acting for its owner it is
         // still an editor, so what needs owner (deleting) is refused there too
         let acting_for_owner = acting(Some(Owner), None, Some(Owner));
@@ -1319,6 +1494,63 @@ mod tests {
         let first = refuse_set_role(Some(Owner), None, Viewer);
         let again = refuse_set_role(Some(Owner), Some(Viewer), Viewer);
         assert_eq!((first, again), (None, None));
+    }
+
+    /// Goal: one ask (FIN-615). Someone else's ask that needs what its
+    /// place doesn't lend asks the agent's owner, who answers Allow once,
+    /// Always here or No; a confirm takes Yes or No and nothing else, so it
+    /// is never remembered. Method: each lend against each need; each
+    /// option against each ask, its name read back; decided twice.
+    #[test]
+    fn one_ask() {
+        for (lend, spend, accounts) in [(Lend::NONE, false, false), (Lend::DEFAULT, true, false), (Lend::OWNER, true, true)] {
+            for (needs, lent) in [(Lent::Spend, spend), (Lent::Accounts, accounts)] {
+                let want = (!lent).then_some(Ask::Lend(needs));
+                assert_eq!(lend_asks(lend, needs), want, "{lend:?} {needs:?}");
+                assert_eq!(lend_asks(lend, needs), want, "again");
+                assert!(needs.in_lend(needs.added_to(lend)), "always here lends it from then on");
+            }
+        }
+        let lend = Ask::Lend(Lent::Accounts);
+        let confirm = Ask::Confirm { danger: Danger::Delete, of: Whom::Asker };
+        for (option, of_lend, of_confirm) in [("once", Some(Answer::Once), None), ("always", Some(Answer::Always), None), ("no", Some(Answer::No), Some(Answer::No)), ("yes", None, Some(Answer::Yes)), ("maybe", None, None)] {
+            assert_eq!(Answer::of(option, lend), of_lend, "{option}");
+            assert_eq!(Answer::of(option, confirm), of_confirm, "{option}");
+        }
+        for ask in [lend, Ask::Lend(Lent::Spend), confirm, Ask::Confirm { danger: Danger::Cap, of: Whom::AgentsOwner }] {
+            assert!(ask.answers().iter().all(|a| Answer::of(a.as_str(), ask) == Some(*a)), "{ask:?}");
+            assert_eq!(Lent::of_what(ask.what()).map(Ask::Lend), matches!(ask, Ask::Lend(_)).then_some(ask), "{ask:?}");
+        }
+    }
+
+    /// Goal: an answer to the platform's card never starts a turn: it is
+    /// `{kind: "ask_answer", option, answers}` and nothing else, so no
+    /// bridge reads it as a message (Ana pressing Allow wakes her agent on
+    /// no one's authority). Method: valid, each option a card takes;
+    /// invalid, words (a message a bridge starts a turn on), a runtime
+    /// card's `prompt_response`, an option it does not take, any field
+    /// more; read twice, the same.
+    #[test]
+    fn a_cards_answer_starts_no_turn() {
+        let answers = serde_json::json!({ "channel": "work", "seq": 7 });
+        let answer = |option: &str| serde_json::json!({ "kind": "ask_answer", "option": option, "answers": answers });
+        for (what, option, want) in [("accounts", "once", Answer::Once), ("spend", "always", Answer::Always), ("accounts", "no", Answer::No), ("delete", "yes", Answer::Yes), ("cap", "no", Answer::No)] {
+            assert_eq!(ask_answer(&answer(option), what), Ok(want), "{what} {option}");
+            assert_eq!(ask_answer(&answer(option), what), Ok(want), "again");
+        }
+        let bad = [
+            ("words, a message a bridge starts a turn on", serde_json::json!({ "text": "Allow once", "answers": answers }), "accounts"),
+            ("a message naming its kind", serde_json::json!({ "kind": "message", "text": "yes", "answers": answers }), "delete"),
+            ("a runtime card's answer", serde_json::json!({ "kind": "prompt_response", "option": "once", "answers": answers }), "accounts"),
+            ("with words beside it", serde_json::json!({ "kind": "ask_answer", "option": "once", "answers": answers, "text": "go on" }), "accounts"),
+            ("a confirm remembered", answer("always"), "delete"),
+            ("a lend confirmed", answer("yes"), "spend"),
+            ("no option", serde_json::json!({ "kind": "ask_answer", "answers": answers, "x": 1 }), "spend"),
+            ("an ask no card names", answer("no"), "grant"),
+        ];
+        for (case, body, what) in bad {
+            assert!(ask_answer(&body, what).is_err(), "{case}");
+        }
     }
 
     #[test]

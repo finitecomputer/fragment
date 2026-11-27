@@ -366,13 +366,16 @@ impl FragmentCell {
     /// and one asking someone else are one refusal, which tells nothing of
     /// a channel they cannot read. The same post again is the record it
     /// appended (`posted`), whatever became of its question since. Read
-    /// with no await before its append.
+    /// with no await before its append. An answer to the platform's own
+    /// card (owner_ask.rs) is one it takes while open, in its one shape: that
+    /// card and the answer, for `ask_answered` (a retry's too, to finish it).
     #[allow(clippy::too_many_arguments)]
-    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<()> {
-        let Some(question) = permit::answers(body) else { return Ok(()) };
+    fn answer_admitted(&self, caller: &Caller, facts: &Facts, standing: Standing, principal: &str, author: Author, key: &str, body: &Value) -> CellResult<Option<(crate::owner_ask::Asked, permit::Answer)>> {
+        let Some(question) = permit::answers(body) else { return Ok(None) };
         let question = question.map_err(|why| CellError::invalid(format!("an answer's `answers` {why}")))?;
         if !self.rows("SELECT 1 AS x FROM records WHERE op = ? AND idx = ?", vec![key.into(), SqlStorageValue::Integer(POST_INDEX)])?.is_empty() {
-            return Ok(());
+            let ask = self.platform_ask(&question.channel, question.seq)?;
+            return Ok(ask.and_then(|a| permit::ask_answer(body, a.what()).ok().filter(|ans| a.answered_as(*ans)).map(|ans| (a, ans))));
         }
         let readable = match self.channel_read_role(&question.channel) {
             Ok(read) => decide(facts.visibility, standing, Action::Read(read)).is_ok(),
@@ -381,9 +384,12 @@ impl FragmentCell {
         };
         let asks = if readable { self.asks(&question)? } else { None };
         let acts_for = caller.signed.as_ref().and_then(|s| s.acting_for.as_deref());
-        match permit::may_answer(asks.as_deref(), principal, author, acts_for) {
-            true => Ok(()),
-            false => Err(CellError::new(ErrorCode::Forbidden, "a question is answered only by whom it asks, in their own post")),
+        if !permit::may_answer(asks.as_deref(), principal, author, acts_for) {
+            return Err(CellError::new(ErrorCode::Forbidden, "a question is answered only by whom it asks, in their own post"));
+        }
+        match self.platform_ask(&question.channel, question.seq)? {
+            Some(ask) => Ok(Some((self.ask_open(&ask, body)?, ask)).map(|(answer, ask)| (ask, answer))),
+            None => Ok(None),
         }
     }
 
@@ -643,7 +649,7 @@ impl FragmentCell {
             (false, Some(IdentityKind::Agent)) => Author::Agent,
             (false, Some(IdentityKind::Person) | None) => Author::Person,
         };
-        self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
+        let asked = self.answer_admitted(caller, facts, standing, principal, author, &key, body)?;
         // an agent's words on someone's proven ask keep that ask, in the
         // append's own step (`append_with`)
         let carried = caller.signed.as_ref().filter(|s| author == Author::Agent && s.mandated).and_then(|s| s.mandate.as_deref());
@@ -653,6 +659,16 @@ impl FragmentCell {
             None => (self.posted(&key, channel, body)?, false),
         };
         laps.lap("append");
+        // a person's words: the first of theirs since an Allow once here is
+        // its one request, bound in this step (owner_ask.rs `bind_lent_once`)
+        if appended && channel == "chat" && author == Author::Person {
+            self.bind_lent_once(principal, record.seq)?;
+        }
+        // the platform's card answered: taken in this step too, so a second
+        // answer finds it answered, then written where its fact lives
+        if let Some((ask, answer)) = asked {
+            self.ask_answered(&ask, answer, principal).await?;
+        }
         // an agent's claim of a record here, taken, opens its ask again, and
         // is answered once its agent fragment holds it (asks.rs): until then
         // 502, and its retry finds the claim and asks again

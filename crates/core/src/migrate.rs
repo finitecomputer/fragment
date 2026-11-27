@@ -128,6 +128,7 @@ pub const FRAGMENT: Class = Class {
         step!("askers", "fragment/0015_askers.sql"),
         step!("carried_asks", "fragment/0016_carried_asks.sql"),
         step!("asks", "fragment/0017_asks.sql"),
+        step!("owner_ask", "fragment/0018_owner_ask.sql"),
     ],
     variants: &[Variant {
         name: "members",
@@ -160,7 +161,7 @@ pub const REGISTRY: Class = Class {
 
 pub const PRINCIPAL: Class = Class {
     name: "Principal",
-    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql"), step!("memberships_pinned", "principal/0004_memberships_pinned.sql")],
+    steps: &[step!("baseline", "principal/0001_baseline.sql"), step!("listed", "principal/0002_listed.sql"), step!("memberships_dock", "principal/0003_memberships_dock.sql"), step!("memberships_pinned", "principal/0004_memberships_pinned.sql"), step!("microphone", "principal/0005_microphone.sql")],
     variants: &[],
     kept: &["wiped"],
 };

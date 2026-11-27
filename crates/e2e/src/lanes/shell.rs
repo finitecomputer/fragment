@@ -10589,13 +10589,13 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
             js(&first)
         ),
     )?;
-    let dialog = "document.getElementById('add-agent-dialog')";
-    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.agent === {}", js(&first)), wait);
-    let text = b.eval(page, "document.getElementById('add-agent-text').textContent")?;
-    let armed_late = b.eval(page, "document.getElementById('add-agent-go').disabled")? == true;
+    let dialog = "document.getElementById('ask-dialog')";
+    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.ask === {}", js(&first)), wait);
+    let text = b.eval(page, "document.getElementById('ask-text').textContent")?;
+    let armed_late = b.eval(page, "document.getElementById('ask-go').disabled")? == true;
     std::thread::sleep(std::time::Duration::from_secs(2));
     let while_open = agents_in(api);
-    b.click(page, "#add-agent-cancel")?;
+    b.click(page, "#ask-cancel")?;
     let mut answer = Value::Null;
     let _ = s.eventually(wait, || {
         answer = b.eval_in_frame(page, &host, "document.documentElement.dataset.e2eAdded ?? null").unwrap_or(Value::Null);
@@ -10631,11 +10631,11 @@ fn roster_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, me: &Person
     )?;
     s.ok("typing its name's start narrows @ to it, and Enter picks it", narrowed == only && picked == format!("@{} ", me.first).as_str() && sent == true, json!({ "narrowed": narrowed, "picked": picked }));
     // sending asks the person first, in the shell: they press Add
-    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.agent === {}", js(&first)), wait);
+    let asked = b.until(page, &format!("{dialog}.open && {dialog}.dataset.ask === {}", js(&first)), wait);
     let unsent = agents_in(api) == vec![json!(reader)] && replies(api, me.session, &chat, &first, said) == 0;
     let _ = b.screenshot(page, &shots.join("desktop-roster-confirm.png"));
-    let armed = b.until(page, "!document.getElementById('add-agent-go').disabled", wait);
-    b.click(page, "#add-agent-go")?;
+    let armed = b.until(page, "!document.getElementById('ask-go').disabled", wait);
+    b.click(page, "#ask-go")?;
     let closed = b.until(page, &format!("!{dialog}.open"), wait);
     s.ok("sending asks the person in the shell's dialog first, and nothing is added or sent until they press Add", asked && unsent && armed && closed, json!({ "asked": asked, "unsent": unsent }));
     let mut members = Value::Null;
