@@ -20,7 +20,7 @@
 // Settings binds it as its agent's door as it makes it; `__door` is read
 // here only to say so when it is not.
 import * as fragment from "./__fragment.js";
-import { button, el, platformJson, randomHex, row, signedIn, stepper } from "./setup-page.js";
+import { button, copyButton, el, platformJson, randomHex, row, signedIn, stepper } from "./setup-page.js";
 
 const SLACK_HOST = "slack.com";
 const POLL_MS = 1000;
@@ -192,12 +192,12 @@ export async function setup(root) {
       if (p) {
         const said = `pair ${p.code}`;
         const code = el("code", "setup-code", said);
-        const copy = button("Copy", "quiet", () => navigator.clipboard?.writeText(said).then(() => (copy.textContent = "Copied"), () => {}));
+        const copy = copyButton(said, code, "the pairing message");
         pollUntil(async () => {
           const s = await fragment.call("state");
           return !s.pairing || !!s.pairing.candidate;
         });
-        return say(el("p", "setup-now", `Send ${bot} this in a Slack DM:`), row(code, copy));
+        return say(el("p", "setup-now", `Send ${bot} this in a Slack DM:`), row(code, copy.button), copy.said);
       }
       return say(el("p", "setup-now", `${where}.`), el("p", null, "Pair your own Slack account, so your words there are yours."), row(button("Pair your Slack", "", act(() => fragment.call("pair"))), again()));
     }
