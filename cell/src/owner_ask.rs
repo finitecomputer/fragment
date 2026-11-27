@@ -327,9 +327,10 @@ impl FragmentCell {
     pub(crate) async fn ask_answered(&self, ask: &Asked, answer: Answer, by: &str) -> CellResult<()> {
         self.exec("UPDATE owner_asks SET answer = ? WHERE seq = ? AND answer IS NULL", vec![answer.as_str().into(), SqlStorageValue::Integer(ask.seq)])?;
         if let (Some(key), Answer::Once | Answer::Always, None) = (&ask.key, answer, ask.done) {
-            // the card (this chat, its seq) names the answer: its write, retried, is the same one
+            // the card (this chat's own key, of its life, and its seq) names
+            // the answer: its write, retried, is the same one
             let lent = LendAnswer {
-                ask: format!("{}:{}", self.name()?, ask.seq),
+                ask: format!("{}:{}", self.must(MetaKey::Npub)?, ask.seq),
                 agent: ask.agent.clone(),
                 asker: ask.asker.clone(),
                 key: key.clone(),
@@ -368,18 +369,14 @@ impl FragmentCell {
             }
             // lent to the asker's first words here from now (after the chat's
             // newest record now), bound as they are posted (`bind_lent_once`);
-            // by its card, once: the same answer again writes nothing more
+            // by its card, once, its row kept for good (one per owner's press):
+            // the same answer again, however late, writes nothing more
             false => {
                 let newest = self.rows("SELECT seq FROM records WHERE channel = ? ORDER BY seq DESC LIMIT 1", vec![CHAT.into()])?;
                 let after = newest.first().and_then(|r| r["seq"].as_i64()).unwrap_or(0);
                 self.exec(
                     "INSERT OR IGNORE INTO lent_once (ask, agent, asker, what, after) VALUES (?, ?, ?, ?, ?)",
                     vec![a.ask.as_str().into(), agent.as_str().into(), asker.as_str().into(), a.what.as_str().into(), SqlStorageValue::Integer(after)],
-                )?;
-                // what bound a request retention has dropped is spent for good
-                self.exec(
-                    "DELETE FROM lent_once WHERE request < (SELECT COALESCE(MIN(seq), 0) FROM records WHERE channel = ?)",
-                    vec![CHAT.into()],
                 )?;
                 self.event("member.lent-once", &format!("{agent} lent {} once, for {asker}", a.what), json!({ "agent": agent, "asker": asker, "what": a.what, "ask": a.ask }));
             }

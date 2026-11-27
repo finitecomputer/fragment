@@ -5,7 +5,8 @@
 -- cap) and that place's key, when it runs out, its answer once given, and
 -- whether that answer's write is done (once, whatever retries it). And
 -- what an agent member's owner allowed once here (`lent_once`), by the card
--- that asked (`ask`: its chat and seq, so a retried answer writes it once):
+-- that asked (`ask`: its chat's key and seq, so a retried answer writes it
+-- once, its row kept for good):
 -- its use, for one asker, of what its lend keeps off, bound to that asker's
 -- first record on `chat` after `after` (a seq) as it is appended
 -- (`request`), and lent to that request alone.

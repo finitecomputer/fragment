@@ -21,7 +21,7 @@ step Fragment 14 trigger_kinds e4accb2c78ba5f08
 step Fragment 15 askers 14b4892acdccbe6a
 step Fragment 16 carried_asks fb079586722eb2c1
 step Fragment 17 asks 7081acc901c95835
-step Fragment 18 owner_ask f267c09a4740e750
+step Fragment 18 owner_ask ce03b0eb0765b1cb
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
