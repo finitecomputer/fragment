@@ -1113,10 +1113,17 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         json!({ "agents": agents, "chats": chats, "routines": routines, "error": b.eval(&page, "document.querySelector('#move-page .form-error')?.textContent")? }),
     );
 
-    // Upgrade again: the same agent, its Yes, then its hello
+    // Upgrade again: the same agent, its Yes, then its hello (asked after
+    // the Yes, never waited for by the page: it may land after the row says
+    // asked)
     b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
     let asked = b.until(&page, &format!("{row}?.dataset.state === 'asked'"), agent_wait);
-    let (routines, again, _) = mine()?;
+    let (mut routines, mut again) = (vec![], vec![]);
+    s.eventually(wait, || {
+        let Ok((r, a, _)) = mine() else { return false };
+        (routines, again) = (r, a);
+        !routines.is_empty()
+    });
     s.ok(
         "Upgrade again goes on with that agent, never a second: its Yes lands, and only then its hello, the move's, said once",
         asked && again == agents && routines.len() == 1 && routines.iter().all(under_way),

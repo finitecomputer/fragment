@@ -375,8 +375,8 @@ export function createOnboarding({ api, ui, account, fragments, computer, naviga
   // `<label>`. Not yet in it, it is made on from there, named as it was:
   // Add made its agent, its job and its role before its chat (`makeAgent`).
   // In it, only its hello may be missing: it is posted again (the same
-  // record), once a page; a move's, only once its move names it. Put off,
-  // as the first run is, while a read failed.
+  // record), once a page; a move's, only while it is due (`helloDue`). Put
+  // off, as the first run is, while a read failed.
   const helloAgain = new Set();
   async function resumeAdd() {
     if (setup || isGuest()) return;
