@@ -327,18 +327,18 @@ function show(spec) {
 }
 
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket).
-// Only a chat's page is lent the microphone (`microphone`: its voice
-// memo), by the kind its row says, wherever it is framed (the middle
-// column, or Apps' window of a chat that reaches the person's accounts);
-// any other (an app's, a Session Archive's, a files view's, a setup's,
-// a port's) is lent none.
-function frameOf(src, title, name = null, { microphone = false } = {}) {
+// A fragment's page (`lends`: its chat's, its window's) is lent the
+// microphone only by its person's yes, which their row says (`microphone`:
+// asked once, `micAsk` below); any other frame (a files view's, a setup's,
+// a port's) is lent none, and asks for none.
+function frameOf(src, title, name = null, { lends = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
   frame.allow = "clipboard-write";
   frame.dataset.src = src;
   if (name) frame.dataset.fragment = name;
-  if (name && microphone) {
+  if (name && lends) frame.dataset.lends = "";
+  if (name && lends && byName(name)?.microphone === true) {
     // A bare `microphone` is the src's origin's, the mint's on this page's;
     // the page lands at the fragment's own, which the browser would refuse
     // without asking. So it names that origin before the frame navigates
@@ -574,10 +574,11 @@ const ASK_ARM_MS = 800;
 const askDialog = $("ask-dialog");
 let asking = null; // { resolve, timer, arm, outcome }
 // `of` names what it asks (`data-ask`): the agent added, or `delete:<name>`.
-function askPerson({ of, title, text = "", go, danger = false }) {
+function askPerson({ of, title, text = "", go, cancel = "Cancel", danger = false }) {
   if (asking) return Promise.resolve("busy");
   return new Promise((resolve) => {
     askDialog.dataset.ask = of;
+    $("ask-cancel").textContent = cancel;
     $("ask-title").textContent = title;
     $("ask-text").textContent = text;
     $("ask-text").hidden = !text;
@@ -614,6 +615,75 @@ $("ask-form").onsubmit = (e) => {
 };
 $("ask-cancel").onclick = () => askDialog.close();
 
+// A fragment's page asks for its person's microphone (`{fragment:
+// KIND.micAsk, nonce}`; FIN-615 PR 11): once per app, in the one ask dialog
+// ("Let Recipes use your microphone?"; "…, an app shared with you, …" when
+// not theirs, its owner's email not theirs to see, decision 48; for a chat
+// of the release's chat template, one yes for every such chat), and only
+// behind a press in it: this page's activation is live (a press in a frame
+// activates its ancestors too) and focus is in that frame (where a press
+// leaves it; the person's press in the shell, opening it, leaves it here).
+// Allow is kept on their row (`PUT /api/fragments/{name}/microphone`) and
+// its frame made again, lent it; Not now keeps nothing. Answered
+// `{fragment: KIND.micAnswer, nonce, ok, error?, reload?}` (`reload`: its
+// frame is being made again, lent it). A frame of a fragment not on their
+// list (no row to keep it on: a visitor's) is answered nothing.
+addEventListener("message", async (event) => {
+  const d = event.data;
+  if (d?.fragment !== KIND.micAsk || typeof d.nonce !== "string" || d.nonce.length > 64) return;
+  const frame = [...document.querySelectorAll("iframe[data-lends]")].find((f) => f.contentWindow === event.source);
+  // the click in it that sent it, read before any wait
+  const clicked = navigator.userActivation?.isActive === true && !!frame && document.activeElement === frame;
+  const name = frame?.dataset.fragment;
+  const row = name && byName(name);
+  if (!row) return;
+  let origin;
+  try {
+    origin = await originOf(name);
+  } catch {
+    return;
+  }
+  if (event.origin !== origin || frame.contentWindow !== event.source) return;
+  const answer = (ok, error, reload = false) => event.source.postMessage({ fragment: KIND.micAnswer, nonce: d.nonce, ok, ...(error ? { error } : {}), ...(reload ? { reload } : {}) }, origin);
+  // lent already: at once, its frame made again first if it was made before the yes (a chat's, from another chat)
+  if (row.microphone) {
+    const stale = !frame.allow.includes("microphone");
+    answer(true, null, stale);
+    if (stale) relend(name);
+    return;
+  }
+  if (!clicked) return answer(false, "asked with no click");
+  let chats = false;
+  try {
+    chats = row.kind === "chat" && String((await api("GET", `/api/f/${seg(name)}/status`)).code?.id ?? "").startsWith("blessed:chat@");
+  } catch {}
+  const title = titleOf(name);
+  const asked = chats ? "Use your microphone in chats?" : own(row) ? `Let ${title} use your microphone?` : `Let ${title}, an app shared with you, use your microphone?`;
+  const said = await askPerson({ of: `mic:${name}`, title: asked, go: "Allow", cancel: "Not now" });
+  if (said !== "yes") return answer(false, said);
+  try {
+    await api("PUT", `/api/fragments/${seg(name)}/microphone`, { microphone: true });
+    await load();
+  } catch (e) {
+    return answer(false, e.message);
+  }
+  answer(true, null, true);
+  relend(name);
+});
+// Fragments' pages made again whose policy their rows no longer say (a
+// policy holds from a navigation on, so a yes taken back reaches an open
+// page only so): `only`'s alone, for its own Allow; every one, for a yes
+// taken back (a chat's, every chat's).
+function relend(only = null) {
+  for (const frame of document.querySelectorAll("iframe[data-lends]")) {
+    const name = frame.dataset.fragment;
+    if (only && name !== only) continue;
+    const allow = byName(name)?.microphone === true ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
+    if (frame.allow === allow) continue;
+    frame.allow = allow;
+    go(frame, frame.dataset.src);
+  }
+}
 // A card of the platform's in a chat it framed (docs/chat-records.md,
 // `ask`) asks its person to confirm what their agent asked for
 // (`{fragment: KIND.confirm, nonce, what: "delete" | "cap", name, micros?}`):
@@ -969,7 +1039,7 @@ const { renderHeading, renderChats, primaryAgent, newChatAgent, askedAgent, ownA
   selection: { current: () => state.current, page: () => state.page, getFrame: (name) => state.frames.get(name), making: () => state.making,
     onScreen: () => making.shownChat(state.making, state.current, state.page),
     reading: () => making.readChat(state.making, state.current, state.page) },
-  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem, deleteItems },
+  menus: { menu, menuEdge, menuOwner: () => menuFor, openMenu, closeMenu, shareItem, archiveItem, pinItem, micItem, deleteItems },
   navigation: { newChat, rename: (name) => rename(name), openChat: pickChat, openApp, openScreen, leaveSidebar, seg },
   listLive, load, store,
 });
@@ -1100,7 +1170,7 @@ function chatFrame(name, path = setupFor(name) ? "/?setup=1" : "/") {
   // a chat the launcher just made may come before its row (`newChat`):
   // only a row that says it is no chat (an app at `/?chat=`, a Session
   // Archive) withholds the microphone
-  const frame = frameOf(framed(name, path), titleOf(name), name, { microphone: !byName(name) || isChat(name) });
+  const frame = frameOf(framed(name, path), titleOf(name), name, { lends: true });
   $("frames").append(frame);
   state.frames.set(name, frame);
   standins.add(frame);
@@ -1246,7 +1316,7 @@ function openApp(name, path = "/") {
   const f = byName(name);
   const shown = document.querySelector(`#stack .pane[data-key="${CSS.escape(`app:${name}`)}"] iframe`);
   if (shown && path !== "/") go(shown, framed(name, path));
-  const frame = named(frameOf(framed(name, path), titleOf(name), name, { microphone: isChat(name) }), name, (t) => t, "aria-label");
+  const frame = named(frameOf(framed(name, path), titleOf(name), name, { lends: true }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
   if (f) status.append(...badges(f));
   show({
@@ -1290,6 +1360,7 @@ function windowActions(name, frame, path, files) {
         // someone else's: who else is in it, and leaving it
         ...(f && !own(f) ? [shareItem(name)] : []),
         ...(f && (own(f) || f.role === "editor") ? [{ icon: "image", text: "Icon…", onClick: () => openIconSheet(iconHelpers, name, titleOf(name), byName(name)) }] : []),
+        ...micItem(name),
         ...(f ? [archiveItem(name)] : []),
       ]),
     },
@@ -1298,6 +1369,23 @@ function windowActions(name, frame, path, files) {
 
 // the icon sheet's (app-icon.js): the list again, which takes a new icon to the dock
 const iconHelpers = { api, reload: () => load() };
+
+// the microphone lent by the person's yes: shown only while it is, the
+// item takes it back (one yes for every release chat, so a chat's says so)
+function micItem(name) {
+  const f = byName(name);
+  if (!f?.microphone) return [];
+  return [{ icon: "mic", text: f.kind === "chat" ? "Turn off microphone (all chats)" : "Turn off microphone", onClick: () => setMicrophone(name, false) }];
+}
+async function setMicrophone(name, microphone) {
+  try {
+    await api("PUT", `/api/fragments/${seg(name)}/microphone`, { microphone });
+    await load();
+    relend();
+  } catch (e) {
+    notice("The microphone was not turned off", e.message);
+  }
+}
 
 // ---- archiving: the person's own view (their list's row), not the fragment's ----
 // Pinned, a chat heads its section of the sidebar (Paul, 2026-10-31), and
