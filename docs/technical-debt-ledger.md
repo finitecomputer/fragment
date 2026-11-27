@@ -770,6 +770,18 @@ unfinished design, not debt.
   **Delete when:** every computer runs an image whose bridge no longer
   calls it (FIN-615 PR 8, with bare `for=`).
 
+## A card's answer resumes nothing
+
+- **Shortcut:** a platform card's answer (docs/api.md, "One ask") is
+  written where its fact lives and resumes nothing: the call that asked was
+  refused, and its asker asks again. An answer starts no turn, neither its
+  answerer's nor anyone's (`permit::ask_answer`).
+- **Risk:** a person answers, then has to ask once more; Allow once waits
+  for that next request.
+- **Delete when:** the bridge (images/) carries a card's answer back to
+  the turn that asked as its asker's (never its answerer's), with a test
+  that an owner's Allow wakes nothing on their own authority.
+
 ## A paid call's charge is best effort
 
 - **Shortcut:** billing never interrupts a call (decision 62), so model

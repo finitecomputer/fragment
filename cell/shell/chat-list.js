@@ -64,7 +64,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
   // alone marked seen and counted nothing unread (a chat being made's room
   // shows none)
   const { current, page, getFrame, making, onScreen, reading } = selection;
-  const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem, deleteItems } = menus;
+  const { menu, menuEdge, menuOwner, openMenu, closeMenu, shareItem, archiveItem, pinItem, micItem, deleteItems } = menus;
   const { newChat, rename, openChat, openApp, openScreen, leaveSidebar, seg } = navigation;
   // ---- chats: one flat list, newest first, the open one in the middle column ----
   function renderHeading() {
@@ -244,7 +244,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
     more.setAttribute("aria-controls", "menu");
     const shownMore = $("chats").querySelector(`[data-key="${CSS.escape(row.dataset.key)}"] .row-more`);
     more.setAttribute("aria-expanded", String(!!shownMore && menuOwner()?.button === shownMore));
-    more.onclick = () => openMenu(more, [pinItem(f.name), { icon: "rename", text: "Rename…", onClick: () => rename(f.name) }, archiveItem(f.name), ...deleteItems(f.name)]);
+    more.onclick = () => openMenu(more, [pinItem(f.name), { icon: "rename", text: "Rename…", onClick: () => rename(f.name) }, ...micItem(f.name), archiveItem(f.name), ...deleteItems(f.name)]);
     row.append(open, more);
     return [row, next];
   }
@@ -566,6 +566,7 @@ export function createChatList({ api, ui, data, selection, menus, navigation, li
       shareItem(name),
       ...profiles,
       ...screens,
+      ...micItem(name),
       archiveItem(name),
       ...deleteItems(name),
     ]);

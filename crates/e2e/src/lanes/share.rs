@@ -36,6 +36,7 @@ use crate::browser::{Browser, Page};
 use crate::Suite;
 
 mod at_signin;
+mod label;
 
 /// Runs on a node restarted with the platform and the fragments on two domains
 /// (as fragment.club is), then restarts it as it was for the lanes after.
@@ -1088,5 +1089,6 @@ fn run(s: &mut Suite, api: &Api) -> Result<()> {
         format!("listed {listed} windowed {windowed} offered {offered} shown {shown}: {text}"),
     );
     drop(chrome);
+    label::only_you_label(s, api)?;
     at_signin::invite_asked_first(s, api, &owner)
 }

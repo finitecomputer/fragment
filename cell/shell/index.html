@@ -152,13 +152,14 @@
       <div class="rename-actions"><button id="rename-cancel" type="button">Cancel</button><button type="submit">Save name</button></div>
     </form>
   </dialog>
-  <!-- a page of the person's own asks to add one of their agents to its
-       fragment: the shell asks them, here, never in the frame (docs/api.md, The shell) -->
-  <dialog class="rename-agent" id="add-agent-dialog" aria-labelledby="add-agent-title" aria-describedby="add-agent-text">
-    <form id="add-agent-form">
-      <h2 id="add-agent-title">Add an agent?</h2>
-      <p id="add-agent-text"></p>
-      <div class="rename-actions"><button id="add-agent-cancel" type="button">Cancel</button><button type="submit" id="add-agent-go" disabled>Add</button></div>
+  <!-- one ask: a page asks the shell for the person's yes (adding one of
+       their agents, a dangerous action their agent asked for), and the
+       shell asks them, here, never in the frame (docs/api.md, The shell) -->
+  <dialog class="rename-agent" id="ask-dialog" aria-labelledby="ask-title" aria-describedby="ask-text">
+    <form id="ask-form">
+      <h2 id="ask-title"></h2>
+      <p id="ask-text" hidden></p>
+      <div class="rename-actions"><button id="ask-cancel" type="button">Cancel</button><button type="submit" id="ask-go" disabled></button></div>
     </form>
   </dialog>
   <!-- a chat of the person's own deleted: asked once more, naming it (shell.js `askDelete`) -->

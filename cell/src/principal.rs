@@ -11,13 +11,18 @@
 //! (below). So the platform's page reads this one cell and wakes no
 //! fragment. Which keys an identity holds is the registry's (registry.rs).
 //!
-//! Five things here are the person's own, not a fragment's:
+//! Six things here are the person's own, not a fragment's:
 //!
 //! - **Archived**, **on their dock** and **pinned**, flags on their row
 //!   (`PUT /api/fragments/{name}/archived`, `…/dock`, `…/pinned`): their
 //!   view of the fragment, which no fragment's change touches. Each goes
 //!   when they leave the fragment, or it is made again (not archived, on
 //!   the dock, not pinned).
+//! - **The microphone** (`PUT /api/fragments/{name}/microphone`): their yes
+//!   to its page using it, asked once by the shell (FIN-615, PR 11), on its
+//!   row, gone as a pin goes; for a chat of the release's chat template
+//!   (its face says so), their one yes for every such chat (`person_own`).
+//!   A row's list says which is lent (`microphone`), derived, never kept.
 //! - **Seen** (`PUT /api/fragments/{name}/seen`): the place in a chat's
 //!   search entries (below) up to which they have seen its messages, so
 //!   its row counts the rest as `unread` (at most
@@ -110,6 +115,7 @@ const CHANGED: &str = r#"{"type":"changed"}"#;
 /// bound number (`limits::LISTED_UNREAD_MAX`, `listed_binds`). Its
 /// readers order it, and a search narrows it to the rows it names.
 const LISTED: &str = "SELECT fragment AS name, role, sharing, face, archived, dock, pinned,
+  CASE WHEN json_extract(face, '$.chatRelease') THEN COALESCE((SELECT value FROM person_own WHERE name = 'microphone-chats'), 0) ELSE microphone END AS microphone,
   (SELECT records FROM listed l WHERE l.fragment = m.fragment) AS listed,
   CASE WHEN json_extract(face, '$.kind') = 'chat'
     THEN (SELECT text FROM search_entries e WHERE e.fragment = m.fragment ORDER BY e.n DESC LIMIT 1) END AS said,
@@ -145,6 +151,7 @@ struct Listed {
     sharing: Option<String>,
     face: Option<String>,
     archived: i64,
+    microphone: i64,
     dock: i64,
     pinned: i64,
     listed: Option<String>,
@@ -160,6 +167,7 @@ impl Own {
             Own::Archived => "archived",
             Own::Dock => "dock",
             Own::Pinned => "pinned",
+            Own::Microphone => "microphone",
         }
     }
 }
@@ -486,7 +494,8 @@ impl PrincipalCell {
                sharing = excluded.sharing, face = excluded.face, searched = excluded.searched,
                archived = CASE WHEN ? THEN 0 ELSE memberships.archived END,
                dock = CASE WHEN ? THEN 1 ELSE memberships.dock END,
-               pinned = CASE WHEN ? THEN 0 ELSE memberships.pinned END",
+               pinned = CASE WHEN ? THEN 0 ELSE memberships.pinned END,
+               microphone = CASE WHEN ? THEN 0 ELSE memberships.microphone END",
             vec![
                 c.fragment.as_str().into(),
                 role,
@@ -495,6 +504,7 @@ impl PrincipalCell {
                 sharing,
                 face,
                 searched.clone(),
+                SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
                 SqlStorageValue::Integer(i64::from(gone)),
@@ -535,6 +545,20 @@ impl PrincipalCell {
             return Err(CellError::invalid(format!("{fragment:?} is not a fragment's name (<label>--<suffix>)")));
         }
         let column = own.column();
+        // a release chat's microphone is their one yes for every such chat
+        if let Own::Microphone = own {
+            let rows = self.rows("SELECT json_extract(face, '$.chatRelease') AS chat FROM memberships WHERE fragment = ? AND role IS NOT NULL", vec![fragment.into()])?;
+            let Some(row) = rows.first() else {
+                return Err(CellError::new(ErrorCode::NotFound, format!("no fragment {fragment} of yours")));
+            };
+            if row["chat"].as_i64() == Some(1) {
+                self.rows(
+                    "INSERT INTO person_own (name, value) VALUES ('microphone-chats', ?) ON CONFLICT (name) DO UPDATE SET value = excluded.value",
+                    vec![SqlStorageValue::Integer(i64::from(on))],
+                )?;
+                return Ok(());
+            }
+        }
         let changed = self.rows(
             &format!("UPDATE memberships SET {column} = ? WHERE fragment = ? AND role IS NOT NULL RETURNING {column}"),
             vec![SqlStorageValue::Integer(i64::from(on)), fragment.into()],
@@ -797,7 +821,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => None,
     };
     let face = r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok());
-    let (kind, title, picture, agent_role, agents) = face.map_or((FragmentKind::App, None, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.role, f.agents));
+    let (kind, title, picture, agent_role, agents, chat_release) = face.map_or((FragmentKind::App, None, None, None, Vec::new(), false), |f| (f.kind, f.title, f.picture, f.role, f.agents, f.chat_release));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
@@ -808,5 +832,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, owned: false, listed })
+    // the label, read off the one test as the row is read (FIN-615 PR 18)
+    let only_you = r.role == Role::Owner && sharing.as_ref().is_some_and(Sharing::only_you);
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, microphone: r.microphone != 0, chat_release, only_you, owned: false, listed })
 }

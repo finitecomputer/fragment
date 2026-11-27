@@ -130,6 +130,12 @@ pub mod limits {
     /// A mandate's text, at most: its names are each bounded, so one the
     /// platform makes is about half this.
     pub const MANDATE_MAX_BYTES: usize = 1024;
+    /// How long a card the platform asks on stays answerable (docs/api.md,
+    /// "One ask"): a mandate's day, as its asker's request lasts.
+    pub const ASK_LIFE_MS: i64 = MANDATE_LIFE_MS;
+    /// The platform's cards open in one chat at once: past it an agent's
+    /// next ask there is refused (429) until one is answered or runs out.
+    pub const ASKS_OPEN_MAX: u64 = 8;
     /// Open turns an agent fragment holds as its places open them (cell
     /// runs_on.rs `turn_opened`): past it a turn is refused, and its ask
     /// waits.
@@ -1214,6 +1220,12 @@ pub struct FragmentStatus {
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
+    /// Why its link and public stay shut, if they do (`LinkShut`): the
+    /// reason its visibility refuses them with, which its share sheet
+    /// shows. Left out while they may open it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
+    pub link_shut: Option<LinkShut>,
     /// Editors and up see the inbox token.
     pub inbox_token: Option<String>,
     pub urls: Urls,
@@ -1347,6 +1359,26 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub pinned: bool,
+    /// The signer lets its page use their microphone: their own yes, asked
+    /// in the shell once (docs/api.md, "One ask"; `PUT
+    /// /api/fragments/{name}/microphone`), one for every chat on the
+    /// release's chat template. Left out while false.
+    #[serde(default, skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub microphone: bool,
+    /// It runs the release's chat template, its page the platform's code,
+    /// as its face says (its blessed release): `microphone` is then the
+    /// signer's one yes for every such chat. Left out while false.
+    #[serde(default, rename = "chatRelease", skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub chat_release: bool,
+    /// Its signer's own and theirs alone (`Sharing::only_you`): the label
+    /// "Only you", which a row they own without it reads as "Shared"
+    /// (FIN-615 PR 18). Derived as the row is read, never kept; left out
+    /// while false, and on a row they don't own.
+    #[serde(default, rename = "onlyYou", skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub only_you: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -1403,6 +1435,23 @@ pub struct Archived {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct SetDock {
     pub dock: bool,
+}
+
+/// `PUT /api/fragments/{name}/microphone`: the signer's own yes (or its
+/// taking back) to a fragment's page using their microphone; on a chat of
+/// the release's chat template, their one yes for every such chat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct SetMicrophone {
+    pub microphone: bool,
+}
+
+/// Its answer: the fragment, and whether its page is lent the microphone now.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Microphone {
+    pub name: String,
+    pub microphone: bool,
 }
 
 /// `PUT /api/fragments/{name}/pinned`: the signer's own choice of whether
@@ -1498,6 +1547,19 @@ pub struct Sharing {
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub reach: bool,
+}
+
+/// Why a fragment's link and public stay shut (FIN-615 PR 18): the one
+/// reason, decided in its own cell (`FragmentCell::link_shut`), that its
+/// visibility refuses them with, its status says and its share sheet shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum LinkShut {
+    /// An agent's own page: its owner's alone (FIN-544).
+    Alone,
+    /// It holds a key or a door, so it is shared by name only (FIN-352).
+    Reach,
 }
 
 impl Sharing {
@@ -3064,7 +3126,7 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, owned: false, listed: vec![] }], limits: None };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, microphone: false, chat_release: false, only_you: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         // the limits a person's client checks its files against, when the platform names them
         let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
@@ -3072,7 +3134,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, microphone: false, chat_release: false, only_you: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
             limits: None,
         };
         assert_eq!(
@@ -3101,6 +3163,15 @@ mod tests {
         for refused in [serde_json::json!({}), serde_json::json!({ "pinned": "yes" }), serde_json::json!({ "pinned": null })] {
             assert!(serde_json::from_value::<SetPinned>(refused.clone()).is_err(), "{refused}");
         }
+        // the microphone, as pinned: left out while not lent
+        let lent = ListedFragment { microphone: true, ..read.clone() };
+        assert_eq!(value(&lent), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "microphone": true }));
+        let chat = ListedFragment { chat_release: true, ..read.clone() };
+        assert_eq!(value(&chat), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "chatRelease": true }));
+        assert!(!serde_json::from_value::<ListedFragment>(value(&read)).unwrap().chat_release);
+        assert!(!serde_json::from_value::<ListedFragment>(value(&read)).unwrap().microphone);
+        assert_eq!(value(&SetMicrophone { microphone: true }), serde_json::json!({ "microphone": true }));
+        assert!(serde_json::from_value::<SetMicrophone>(serde_json::json!({ "microphone": "yes" })).is_err());
         assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
         assert_eq!(value(&Docked { name: "notes-k3x9".into(), dock: true }), serde_json::json!({ "name": "notes-k3x9", "dock": true }));
         for refused in [serde_json::json!({}), serde_json::json!({ "dock": "no" }), serde_json::json!({ "dock": null })] {

@@ -21,6 +21,7 @@ step Fragment 14 trigger_kinds e4accb2c78ba5f08
 step Fragment 15 askers 14b4892acdccbe6a
 step Fragment 16 carried_asks fb079586722eb2c1
 step Fragment 17 asks 7081acc901c95835
+step Fragment 18 owner_ask ce03b0eb0765b1cb
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -37,6 +38,7 @@ step Principal 1 baseline 28b4d4bf3f8cdb71
 step Principal 2 listed 09e5aab70c4f7f61
 step Principal 3 memberships_dock 607987fd7686be8b
 step Principal 4 memberships_pinned e55965f09c24b2e1
+step Principal 5 microphone ba1fffd2665f9d35
 step Ledger 1 baseline 6d5c6ebad64a53b2
 step Ledger 2 uses b9ed112a7c91d546
 step Ledger 3 spend_slots 50a6b5e96c1ded82
@@ -94,6 +96,7 @@ Fragment table file_commits: CREATE TABLE file_commits (key TEXT PRIMARY KEY, sh
 Fragment table index_outbox: CREATE TABLE index_outbox ( principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
+Fragment table lent_once: CREATE TABLE lent_once ( ask TEXT PRIMARY KEY, agent TEXT NOT NULL, asker TEXT NOT NULL, what TEXT NOT NULL, after INTEGER NOT NULL, request INTEGER)
 Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table making: CREATE TABLE making (key TEXT PRIMARY KEY, run INTEGER NOT NULL, attempt INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, lend INTEGER)
@@ -106,6 +109,7 @@ Fragment index meter_rows_batch: CREATE INDEX meter_rows_batch ON meter_rows (ba
 Fragment table newest: CREATE TABLE newest ( channel TEXT NOT NULL, principal TEXT NOT NULL, kind TEXT NOT NULL, seq INTEGER NOT NULL, PRIMARY KEY (channel, principal, kind))
 Fragment table op_breakers: CREATE TABLE op_breakers (op TEXT PRIMARY KEY, reset_at INTEGER NOT NULL)
 Fragment table own_commits: CREATE TABLE own_commits (sha TEXT PRIMARY KEY, depth INTEGER NOT NULL, at INTEGER NOT NULL)
+Fragment table owner_asks: CREATE TABLE owner_asks ( seq INTEGER PRIMARY KEY, agent TEXT NOT NULL, asker TEXT NOT NULL, asks TEXT NOT NULL, what TEXT NOT NULL, about TEXT NOT NULL, key TEXT, until INTEGER NOT NULL, answer TEXT, done INTEGER)
 Fragment table paid: CREATE TABLE paid ( key TEXT PRIMARY KEY, run INTEGER NOT NULL, result TEXT NOT NULL, usage TEXT, settled INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment index paid_run: CREATE INDEX paid_run ON paid (run)
 Fragment table paused_ops: CREATE TABLE paused_ops (op TEXT PRIMARY KEY, by TEXT NOT NULL, at INTEGER NOT NULL)
@@ -213,7 +217,8 @@ Principal table export_parts: CREATE TABLE export_parts (export TEXT NOT NULL, p
 Principal table export_tail: CREATE TABLE export_tail (export TEXT NOT NULL, n INTEGER NOT NULL, bytes BLOB NOT NULL, PRIMARY KEY (export, n))
 Principal table exports: CREATE TABLE exports ( id TEXT PRIMARY KEY, person TEXT NOT NULL, state TEXT NOT NULL, started_at INTEGER NOT NULL, ready_at INTEGER, expires_at INTEGER, size INTEGER, error TEXT, job TEXT, upload TEXT, requests INTEGER NOT NULL DEFAULT 0, downloads INTEGER NOT NULL DEFAULT 0, gone_at INTEGER, metered INTEGER NOT NULL DEFAULT 0)
 Principal table listed: CREATE TABLE listed (fragment TEXT PRIMARY KEY, records TEXT NOT NULL)
-Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT, dock INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0)
+Principal table memberships: CREATE TABLE memberships ( fragment TEXT PRIMARY KEY, role TEXT, incarnation INTEGER NOT NULL, version INTEGER NOT NULL, sharing TEXT, face TEXT, archived INTEGER NOT NULL DEFAULT 0, searched TEXT, dock INTEGER NOT NULL DEFAULT 1, pinned INTEGER NOT NULL DEFAULT 0, microphone INTEGER NOT NULL DEFAULT 0)
+Principal table person_own: CREATE TABLE person_own (name TEXT PRIMARY KEY, value INTEGER NOT NULL)
 Principal table search_entries: CREATE TABLE search_entries ( id INTEGER PRIMARY KEY, fragment TEXT NOT NULL, n INTEGER NOT NULL, channel TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, text TEXT NOT NULL, UNIQUE (fragment, n))
 Principal index search_entries_at: CREATE INDEX search_entries_at ON search_entries (at, id)
 Principal trigger search_entries_added: CREATE TRIGGER search_entries_added AFTER INSERT ON search_entries BEGIN INSERT INTO search_text (rowid, text) VALUES (new.id, new.text); END

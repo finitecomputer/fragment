@@ -633,6 +633,18 @@
             "default": "app",
             "description": "What it is, as its live `fragment.json` last said (an app until it\nhas), and its title, its face's (`PUT /api/f/{name}/face`)."
           },
+          "linkShut": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LinkShut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Why its link and public stay shut, if they do (`LinkShut`): the\nreason its visibility refuses them with, which its share sheet\nshows. Left out while they may open it."
+          },
           "name": {
             "type": "string"
           },
@@ -851,6 +863,22 @@
         "type": "object",
         "x-fragment-direction": "in"
       },
+      "LinkShut": {
+        "description": "Why a fragment's link and public stay shut (FIN-615 PR 18): the one\nreason, decided in its own cell (`FragmentCell::link_shut`), that its\nvisibility refuses them with, its status says and its share sheet shows.",
+        "oneOf": [
+          {
+            "const": "alone",
+            "description": "An agent's own page: its owner's alone (FIN-544).",
+            "type": "string"
+          },
+          {
+            "const": "reach",
+            "description": "It holds a key or a door, so it is shared by name only (FIN-352).",
+            "type": "string"
+          }
+        ],
+        "x-fragment-direction": "out"
+      },
       "ListWatchFrame": {
         "description": "A frame of `GET /api/fragments/watch`, the socket that follows a\nsigner's list. Frames name nothing: on `changed` the page reads its\nlist, and what it is told (`GET /api/notices`), again with its own\ncredential. The cell writes these as constant text\n(cell/src/principal.rs).\n\nOpen (`x-fragment-open`, docs/wire): a reader ignores a frame it does\nnot know (the shell's list, the iOS app).",
         "oneOf": [
@@ -921,6 +949,11 @@
             "description": "The signer archived it: their own view, not the fragment's (the\nshell's sidebar leaves it out; search still finds it).",
             "type": "boolean"
           },
+          "chatRelease": {
+            "default": false,
+            "description": "It runs the release's chat template, its page the platform's code,\nas its face says (its blessed release): `microphone` is then the\nsigner's one yes for every such chat. Left out while false.",
+            "type": "boolean"
+          },
           "dock": {
             "default": true,
             "description": "On the signer's dock: their own choice, not the fragment's (`PUT\n/api/fragments/{name}/dock`), true until they take it off (the\nshell's dock shows apps and brains, less these and the archived).\nLeft out while true, so a row from before the choice, or from an\nolder platform, reads as on it.",
@@ -939,8 +972,18 @@
             },
             "type": "array"
           },
+          "microphone": {
+            "default": false,
+            "description": "The signer lets its page use their microphone: their own yes, asked\nin the shell once (docs/api.md, \"One ask\"; `PUT\n/api/fragments/{name}/microphone`), one for every chat on the\nrelease's chat template. Left out while false.",
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
+          },
+          "onlyYou": {
+            "default": false,
+            "description": "Its signer's own and theirs alone (`Sharing::only_you`): the label\n\"Only you\", which a row they own without it reads as \"Shared\"\n(FIN-615 PR 18). Derived as the row is read, never kept; left out\nwhile false, and on a row they don't own.",
+            "type": "boolean"
           },
           "owned": {
             "default": false,
@@ -1891,6 +1934,23 @@
           "seq",
           "at",
           "snippet"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Microphone": {
+        "description": "Its answer: the fragment, and whether its page is lent the microphone now.",
+        "properties": {
+          "microphone": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "microphone"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -3074,6 +3134,19 @@
         },
         "required": [
           "dock"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "SetMicrophone": {
+        "description": "`PUT /api/fragments/{name}/microphone`: the signer's own yes (or its\ntaking back) to a fragment's page using their microphone; on a chat of\nthe release's chat template, their one yes for every such chat.",
+        "properties": {
+          "microphone": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "microphone"
         ],
         "type": "object",
         "x-fragment-direction": "in"
@@ -4963,6 +5036,121 @@
           }
         ],
         "summary": "Put a fragment on the signer's dock, or take it off.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/{name}/microphone": {
+      "put": {
+        "operationId": "fragments.microphone",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMicrophone"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Microphone"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Let a fragment's page use the signer's microphone, or take it back (on a release chat: every such chat).",
         "tags": [
           "fragments"
         ]

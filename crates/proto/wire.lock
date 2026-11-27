@@ -29,6 +29,7 @@ bound FragmentStatus.agentRole default null
 bound FragmentStatus.blobMinBytes default null
 bound FragmentStatus.blobMinBytes range u64
 bound FragmentStatus.kind default "app"
+bound FragmentStatus.linkShut default null
 bound FragmentStatus.page default null
 bound FragmentStatus.reach default false
 bound FragmentStatus.title default null
@@ -36,9 +37,12 @@ bound LeftBehind.bytes range u64
 bound ListedFragment.agentRole default null
 bound ListedFragment.agents default []
 bound ListedFragment.archived default false
+bound ListedFragment.chatRelease default false
 bound ListedFragment.dock default true
 bound ListedFragment.kind default "app"
 bound ListedFragment.listed default []
+bound ListedFragment.microphone default false
+bound ListedFragment.onlyYou default false
 bound ListedFragment.owned default false
 bound ListedFragment.picture default null
 bound ListedFragment.pinned default false
@@ -211,6 +215,7 @@ field FragmentStatus.code required CodeStatus
 field FragmentStatus.counts required Counts
 field FragmentStatus.inboxToken required string|null
 field FragmentStatus.kind required FragmentKind
+field FragmentStatus.linkShut optional LinkShut|null
 field FragmentStatus.name required string
 field FragmentStatus.npub required string
 field FragmentStatus.owner required string
@@ -243,10 +248,13 @@ field ListWatchFrame.invited.type required "invited"
 field ListedFragment.agentRole optional string|null
 field ListedFragment.agents optional array<string>
 field ListedFragment.archived optional boolean
+field ListedFragment.chatRelease optional boolean
 field ListedFragment.dock optional boolean
 field ListedFragment.kind required FragmentKind
 field ListedFragment.listed optional array<ListedRecord>
+field ListedFragment.microphone optional boolean
 field ListedFragment.name required string
+field ListedFragment.onlyYou optional boolean
 field ListedFragment.owned optional boolean
 field ListedFragment.picture optional string|null
 field ListedFragment.pinned optional boolean
@@ -371,6 +379,8 @@ field MessageHit.channel required string
 field MessageHit.fragment required string
 field MessageHit.seq required integer
 field MessageHit.snippet required string
+field Microphone.microphone required boolean
+field Microphone.name required string
 field MoveAt.state required MoveState
 field Notice.actions required array<NoticeAction>
 field Notice.detail optional string|null
@@ -481,6 +491,7 @@ field Seen.name required string
 field Seen.unread required integer
 field SetArchived.archived required boolean
 field SetDock.dock required boolean
+field SetMicrophone.microphone required boolean
 field SetPinned.pinned required boolean
 field Sharing.guests required integer
 field Sharing.invites optional integer|null
@@ -530,6 +541,7 @@ field channels.read.query.limit optional integer
 field fragments.archive.path.name required string
 field fragments.dock.path.name required string
 field fragments.list.query.for optional string
+field fragments.microphone.path.name required string
 field fragments.pin.path.name required string
 field fragments.seen.path.name required string
 field fragments.status.path.name required string
@@ -615,6 +627,13 @@ route fragments.list accepts session
 route fragments.list path fragments.list.path
 route fragments.list query fragments.list.query
 route fragments.list response FragmentList
+route fragments.microphone PUT /api/fragments/{name}/microphone
+route fragments.microphone accepts nip98
+route fragments.microphone accepts session
+route fragments.microphone path fragments.microphone.path
+route fragments.microphone query fragments.microphone.query
+route fragments.microphone request SetMicrophone
+route fragments.microphone response Microphone
 route fragments.pin PUT /api/fragments/{name}/pinned
 route fragments.pin accepts nip98
 route fragments.pin accepts session
@@ -824,6 +843,7 @@ type IdentityKind out enum
 type LeftBehind both object
 type Lend both object closed
 type LendSecret in object closed
+type LinkShut out enum
 type ListWatchFrame out union(type) open
 type ListWatchFrame.changed out object
 type ListWatchFrame.hello out object
@@ -882,6 +902,7 @@ type Mark out enum
 type Member out object
 type MemberList out object
 type MessageHit out object
+type Microphone out object
 type MoveAt out object
 type MoveState out enum open
 type Notice out object
@@ -925,6 +946,7 @@ type SecretRemoved out object
 type Seen out object
 type SetArchived in object
 type SetDock in object
+type SetMicrophone in object
 type SetPinned in object
 type Sharing out object
 type Sizes in object
@@ -955,6 +977,8 @@ type fragments.dock.path in object
 type fragments.dock.query in object
 type fragments.list.path in object
 type fragments.list.query in object
+type fragments.microphone.path in object
+type fragments.microphone.query in object
 type fragments.pin.path in object
 type fragments.pin.query in object
 type fragments.seen.path in object
@@ -1055,6 +1079,8 @@ value FragmentKind sessions
 value FragmentKind skills
 value IdentityKind agent
 value IdentityKind person
+value LinkShut alone
+value LinkShut reach
 value ListWatchFrame changed
 value ListWatchFrame hello
 value ListWatchFrame invited

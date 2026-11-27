@@ -39,6 +39,15 @@ A signer's list of the fragments they hold a role on, and their own view of each
 - Answer: [`FragmentList`](#fragmentlist)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
+#### `fragments.microphone`
+
+`PUT /api/fragments/{name}/microphone`: Let a fragment's page use the signer's microphone, or take it back (on a release chat: every such chat).
+
+- Credentials: NIP-98, the shell's session
+- Body: [`SetMicrophone`](#setmicrophone)
+- Answer: [`Microphone`](#microphone)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
 #### `fragments.pin`
 
 `PUT /api/fragments/{name}/pinned`: Pin or unpin a fragment in the signer's sidebar.
@@ -539,6 +548,7 @@ out. `GET /api/f/<name>/status` (viewer and up).
 | `counts` | [`Counts`](#counts) | required |  |
 | `inboxToken` | `string` or `null` | required | Editors and up see the inbox token. |
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
+| `linkShut` | [`LinkShut`](#linkshut) or `null` | optional | Why its link and public stay shut, if they do (`LinkShut`): the reason its visibility refuses them with, which its share sheet shows. Left out while they may open it. |
 | `name` | `string` | required |  |
 | `npub` | `string` | required |  |
 | `owner` | `string` | required |  |
@@ -621,6 +631,12 @@ in, closed. `PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under
 | --- | --- | --- | --- |
 | `key` | `string` | required | The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`). |
 
+### `LinkShut`
+
+out. Why a fragment's link and public stay shut (FIN-615 PR 18): the one reason, decided in its own cell (`FragmentCell::link_shut`), that its visibility refuses them with, its status says and its share sheet shows.
+
+Values: `alone`, `reach`.
+
 ### `ListWatchFrame`
 
 out, open. A frame of `GET /api/fragments/watch`, the socket that follows a signer's list. Frames name nothing: on `changed` the page reads its list, and what it is told (`GET /api/notices`), again with its own credential. The cell writes these as constant text (cell/src/principal.rs). Open (`x-fragment-open`, docs/wire): a reader ignores a frame it does not know (the shell's list, the iOS app).
@@ -640,10 +656,13 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 | `agentRole` | `string` or `null` | optional | An agent fragment's role, as its face says it (trimmed; none when it says nothing): the tag the shell shows beside its name. Never any other fragment's. |
 | `agents` | `array` of `string` | optional | Its agent members, the first added (a chat's lead) first, at most `limits::LISTED_AGENTS_MAX`, as the fragment last said. |
 | `archived` | `boolean` | optional | The signer archived it: their own view, not the fragment's (the shell's sidebar leaves it out; search still finds it). |
+| `chatRelease` | `boolean` | optional | It runs the release's chat template, its page the platform's code, as its face says (its blessed release): `microphone` is then the signer's one yes for every such chat. Left out while false. |
 | `dock` | `boolean` | optional | On the signer's dock: their own choice, not the fragment's (`PUT /api/fragments/{name}/dock`), true until they take it off (the shell's dock shows apps and brains, less these and the archived). Left out while true, so a row from before the choice, or from an older platform, reads as on it. |
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
+| `microphone` | `boolean` | optional | The signer lets its page use their microphone: their own yes, asked in the shell once (docs/api.md, "One ask"; `PUT /api/fragments/{name}/microphone`), one for every chat on the release's chat template. Left out while false. |
 | `name` | `string` | required |  |
+| `onlyYou` | `boolean` | optional | Its signer's own and theirs alone (`Sharing::only_you`): the label "Only you", which a row they own without it reads as "Shared" (FIN-615 PR 18). Derived as the row is read, never kept; left out while false, and on a row they don't own. |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
 | `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
 | `pinned` | `boolean` | optional | The signer pinned it: their own view, not the fragment's (`PUT /api/fragments/{name}/pinned`; the shell's sidebar shows it first in its section). Left out while false, so a row from an older platform reads as not pinned. |
@@ -844,6 +863,15 @@ out. One record whose text matched: where it is, when it was written, and a snip
 | `fragment` | `string` | required |  |
 | `seq` | `integer` | required | The record's place in its channel. |
 | `snippet` | `string` | required |  |
+
+### `Microphone`
+
+out. Its answer: the fragment, and whether its page is lent the microphone now.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `microphone` | `boolean` | required |  |
+| `name` | `string` | required |  |
 
 ### `MoveAt`
 
@@ -1247,6 +1275,14 @@ in. `PUT /api/fragments/{name}/dock`: the signer's own choice of whether their d
 | field | type | | |
 | --- | --- | --- | --- |
 | `dock` | `boolean` | required |  |
+
+### `SetMicrophone`
+
+in. `PUT /api/fragments/{name}/microphone`: the signer's own yes (or its taking back) to a fragment's page using their microphone; on a chat of the release's chat template, their one yes for every such chat.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `microphone` | `boolean` | required |  |
 
 ### `SetPinned`
 

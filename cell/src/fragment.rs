@@ -735,7 +735,9 @@ pub(crate) fn as_themselves(standing: Standing) -> bool {
 pub(crate) fn decide(visibility: Visibility, standing: Standing, action: Action) -> CellResult<Role> {
     match permit::decide(&permit::Facts { visibility, standing, action }) {
         Verdict::Allow(role) => Ok(role),
-        Verdict::Ask(ask) => match ask {},
+        // what is dangerous asks on a card first (owner_ask.rs `confirm_first`), and
+        // its route's own `require` refuses an agent still
+        Verdict::Ask(_) => Err(CellError::new(ErrorCode::Forbidden, "its owner confirms this, on a card")),
         Verdict::Refuse(refusal) => Err(CellError::new(if refusal.sign_in { ErrorCode::Unauthenticated } else { ErrorCode::Forbidden }, refusal.message())),
     }
 }
@@ -1166,6 +1168,9 @@ impl FragmentCell {
             DoorActor::PATH => reply::<DoorActor>(self.door_actor(decode(body)?)),
             FaceOf::PATH => reply::<FaceOf>(self.face_of()),
             calls::LendOf::PATH => reply::<calls::LendOf>(self.lend_here(&decode(body)?)),
+            calls::AskFor::PATH => reply::<calls::AskFor>(self.ask_for(decode(body)?).await),
+            calls::PostAsk::PATH => reply::<calls::PostAsk>(self.post_ask(decode(body)?).await),
+            calls::LendAnswer::PATH => reply::<calls::LendAnswer>(self.lend_answer(&decode(body)?).await),
             calls::TurnsIn::PATH => reply::<calls::TurnsIn>(self.turns_in(decode(body)?)),
             ReachOf::PATH => reply::<ReachOf>(self.reach_of()),
             AgentMade::PATH => reply::<AgentMade>(self.agent_with_person(decode(body)?).await),
@@ -1540,7 +1545,7 @@ impl FragmentCell {
                     }
                     laps.lap("manifest");
                     let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
-                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None, false))
                 }
                 None => None,
             };
@@ -1703,6 +1708,8 @@ impl FragmentCell {
     /// members' lists has been told, its owner's first: the alarm tells
     /// the rest and deletes the app's database and the blobs (ended.rs).
     async fn delete(&self, caller: &Caller) -> CellResult<Response> {
+        // an agent's, for its owner or its asker, asks them to confirm it
+        self.confirm_first(caller, permit::Danger::Delete, None).await?;
         // a life ends between the plane's steps, never inside one: a
         // refresh or install in flight (a seed's, publish.rs) finishes in
         // this life, which its end then clears, and never writes its pins,
@@ -1751,6 +1758,8 @@ impl FragmentCell {
             view_token: self.shares(caller).then_some(facts.view_token),
             // it stays its owner's and their agents' while it has reach (reach.rs)
             reach: self.reaches()?,
+            // why its link and public stay shut: what its share sheet offers
+            link_shut: self.link_shut()?,
             inbox_token: if role >= Role::Editor { Some(inbox_token.ok_or_else(|| missing(MetaKey::InboxToken))?) } else { None },
             urls: Urls { canonical: self.cfg.canonical(&caller.url, &facts.name), platform: self.cfg.platform() },
             blob_min_bytes: Some(fragment_core::blob::BLOB_MIN_BYTES as u64),
