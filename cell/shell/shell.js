@@ -326,25 +326,31 @@ function show(spec) {
   layout.show("right");
 }
 
-// A frame of `src` (the mint's, for fragment `name`; a port's ticket).
-// A fragment's page (`lends`: its chat's, its window's) is lent the
-// microphone only by its person's yes, which their row says (`microphone`:
-// asked once, `micAsk` below); any other frame (a files view's, a setup's,
-// a port's) is lent none, and asks for none.
+// A fragment's page's policy, as its row says now: the microphone lent by
+// its person's yes (`microphone`: asked once, `micAsk` below), or, a chat
+// of the release's (`chatRelease`), whose page is the platform's code, from
+// the first: that page asks their one yes for chats before it records, so
+// their Allow makes no page again (which would drop what they are writing).
+// No row (a visitor's), none. A bare `microphone` is the src's origin's,
+// the mint's on this page's; the page lands at the fragment's own, which
+// the browser would refuse without asking, so it names that origin (known
+// here, no request).
+function allowOf(name) {
+  const f = byName(name);
+  return f && (f.microphone || f.chatRelease) ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
+}
+// A frame of `src` (the mint's, for fragment `name`; a port's ticket). A
+// fragment's page (`lends`: its chat's, its window's) has `allowOf`'s
+// policy, read again at each navigation `go` makes (a policy holds from a
+// navigation on); any other frame (a files view's, a setup's, a port's) is
+// lent none, and asks for none.
 function frameOf(src, title, name = null, { lends = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.allow = "clipboard-write";
+  frame.allow = name && lends ? allowOf(name) : "clipboard-write";
   frame.dataset.src = src;
   if (name) frame.dataset.fragment = name;
   if (name && lends) frame.dataset.lends = "";
-  if (name && lends && byName(name)?.microphone === true) {
-    // A bare `microphone` is the src's origin's, the mint's on this page's;
-    // the page lands at the fragment's own, which the browser would refuse
-    // without asking. So it names that origin before the frame navigates
-    // (a policy is read as a navigation starts): known here, no request.
-    frame.allow = `clipboard-write; microphone ${originAt(name)}`;
-  }
   frame.src = src;
   frame.addEventListener("load", () => theme(frame));
   return frame;
@@ -355,6 +361,7 @@ const standins = standIns(el);
 // `replace`: in place of the page it shows, adding nothing to the tab's
 // history (a cross-origin frame's `location.replace` is one it may call).
 function go(frame, src, replace = false) {
+  if (frame.dataset.lends !== undefined) frame.allow = allowOf(frame.dataset.fragment);
   if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
   // a page of the middle column sent elsewhere: its stand-in again until it comes
@@ -615,16 +622,29 @@ $("ask-form").onsubmit = (e) => {
 };
 $("ask-cancel").onclick = () => askDialog.close();
 
+// `micAsk`'s press, one in the frame: this page's activation is live (a
+// press in a frame activates its ancestors too) and focus is in that frame,
+// where a press leaves it. A press or key of the shell's own could give both
+// (its Tab into the frame; a page that takes focus itself after a press
+// here), so none may be in the activation's life (5 s in Chrome and
+// Firefox, less in Safari): an ask that soon after one asks nothing.
+const ACTIVATION_MS = 5000;
+let shellPressed = -Infinity;
+for (const type of ["pointerdown", "keydown"]) addEventListener(type, () => { shellPressed = performance.now(); }, true);
+function pressedIn(frame) {
+  if (navigator.userActivation?.isActive !== true || document.activeElement !== frame) return "asked with no click";
+  if (performance.now() - shellPressed <= ACTIVATION_MS) return "asked too soon after a press in the shell";
+  return null;
+}
 // A fragment's page asks for its person's microphone (`{fragment:
 // KIND.micAsk, nonce}`; FIN-615 PR 11): once per app, in the one ask dialog
 // ("Let Recipes use your microphone?"; "…, an app shared with you, …" when
 // not theirs, its owner's email not theirs to see, decision 48; for a chat
 // of the release's chat template, one yes for every such chat), and only
-// behind a press in it: this page's activation is live (a press in a frame
-// activates its ancestors too) and focus is in that frame (where a press
-// leaves it; the person's press in the shell, opening it, leaves it here).
-// Allow is kept on their row (`PUT /api/fragments/{name}/microphone`) and
-// its frame made again, lent it; Not now keeps nothing. Answered
+// behind a press in it (`pressedIn`; a release chat's page, the platform's
+// code, asks only from its mic's press, as with alerts). Allow is kept on their row (`PUT
+// /api/fragments/{name}/microphone`), and a frame its policy did not lend
+// (an app's) is made again, lent it; Not now keeps nothing. Answered
 // `{fragment: KIND.micAnswer, nonce, ok, error?, reload?}` (`reload`: its
 // frame is being made again, lent it). A frame of a fragment not on their
 // list (no row to keep it on: a visitor's) is answered nothing.
@@ -632,8 +652,8 @@ addEventListener("message", async (event) => {
   const d = event.data;
   if (d?.fragment !== KIND.micAsk || typeof d.nonce !== "string" || d.nonce.length > 64) return;
   const frame = [...document.querySelectorAll("iframe[data-lends]")].find((f) => f.contentWindow === event.source);
-  // the click in it that sent it, read before any wait
-  const clicked = navigator.userActivation?.isActive === true && !!frame && document.activeElement === frame;
+  // the press in it that sent it, read before any wait
+  const unpressed = frame ? pressedIn(frame) : "asked with no click";
   const name = frame?.dataset.fragment;
   const row = name && byName(name);
   if (!row) return;
@@ -645,20 +665,18 @@ addEventListener("message", async (event) => {
   }
   if (event.origin !== origin || frame.contentWindow !== event.source) return;
   const answer = (ok, error, reload = false) => event.source.postMessage({ fragment: KIND.micAnswer, nonce: d.nonce, ok, ...(error ? { error } : {}), ...(reload ? { reload } : {}) }, origin);
-  // lent already: at once, its frame made again first if it was made before the yes (a chat's, from another chat)
-  if (row.microphone) {
-    const stale = !frame.allow.includes("microphone");
+  // lent: at once, its frame made again first if it was made before the yes (an app's, open in another window)
+  const lent = () => {
+    const stale = frame.allow !== allowOf(name);
     answer(true, null, stale);
     if (stale) relend(name);
-    return;
-  }
-  if (!clicked) return answer(false, "asked with no click");
-  let chats = false;
-  try {
-    chats = row.kind === "chat" && String((await api("GET", `/api/f/${seg(name)}/status`)).code?.id ?? "").startsWith("blessed:chat@");
-  } catch {}
+  };
+  if (row.microphone) return lent();
+  // a release chat's ask is its mic's press (its page the platform's code)
+  if (!row.chatRelease && unpressed) return answer(false, unpressed);
+  // the words and the yes kept, both from its row's one fact (`chatRelease`)
   const title = titleOf(name);
-  const asked = chats ? "Use your microphone in chats?" : own(row) ? `Let ${title} use your microphone?` : `Let ${title}, an app shared with you, use your microphone?`;
+  const asked = row.chatRelease ? "Use your microphone in chats?" : own(row) ? `Let ${title} use your microphone?` : `Let ${title}, an app shared with you, use your microphone?`;
   const said = await askPerson({ of: `mic:${name}`, title: asked, go: "Allow", cancel: "Not now" });
   if (said !== "yes") return answer(false, said);
   try {
@@ -667,20 +685,20 @@ addEventListener("message", async (event) => {
   } catch (e) {
     return answer(false, e.message);
   }
-  answer(true, null, true);
-  relend(name);
+  if (!byName(name)?.microphone) return answer(false, "not kept");
+  lent();
 });
-// Fragments' pages made again whose policy their rows no longer say (a
-// policy holds from a navigation on, so a yes taken back reaches an open
-// page only so): `only`'s alone, for its own Allow; every one, for a yes
-// taken back (a chat's, every chat's).
+// Fragments' pages made again whose policy their rows say otherwise now (a
+// policy holds from a navigation on): `only`'s, for its own yes; with none,
+// every page lent what its row no longer lends (a yes taken back, here or in
+// another tab, every chat's for a chat's; a chat no longer the release's),
+// as the list says each change (`load`). A page lent nothing is made again
+// only by its own ask (an app's, `micAsk`), never under the person's hand.
 function relend(only = null) {
   for (const frame of document.querySelectorAll("iframe[data-lends]")) {
     const name = frame.dataset.fragment;
-    if (only && name !== only) continue;
-    const allow = byName(name)?.microphone === true ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
-    if (frame.allow === allow) continue;
-    frame.allow = allow;
+    const now = allowOf(name);
+    if (frame.allow === now || (only ? name !== only : !frame.allow.includes("microphone"))) continue;
     go(frame, frame.dataset.src);
   }
 }
@@ -1375,13 +1393,12 @@ const iconHelpers = { api, reload: () => load() };
 function micItem(name) {
   const f = byName(name);
   if (!f?.microphone) return [];
-  return [{ icon: "mic", text: f.kind === "chat" ? "Turn off microphone (all chats)" : "Turn off microphone", onClick: () => setMicrophone(name, false) }];
+  return [{ icon: "mic", text: f.chatRelease ? "Turn off microphone (all chats)" : "Turn off microphone", onClick: () => setMicrophone(name, false) }];
 }
 async function setMicrophone(name, microphone) {
   try {
     await api("PUT", `/api/fragments/${seg(name)}/microphone`, { microphone });
     await load();
-    relend();
   } catch (e) {
     notice("The microphone was not turned off", e.message);
   }
@@ -2374,6 +2391,7 @@ async function load(changed = false) {
   const list = listRead.value, computers = computerRead.value;
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
+  if (list) relend();
   // what a message of theirs may carry (the launcher's files): the platform's
   if (list) state.limits = list.limits ?? null;
   // a chat being made, made, opens once the list has it (making.js `listed`)

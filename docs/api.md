@@ -1054,10 +1054,14 @@ frame-messages.js) from a press in it, and the shell asks its person once
 per fragment ("Let Recipes use your microphone?", saying "an app shared
 with you" when it is not theirs; "Use your microphone in chats?" for the
 release's chat, one yes for every such chat). **Allow** keeps the yes on
-their row (`PUT /api/fragments/{name}/microphone`) and makes the frame
-again, naming the fragment's origin in its policy; **Not now** keeps
-nothing. A frame names no microphone until then, and a visitor's (no row)
-never does; the fragment's ⋯ takes it back.
+their row (`PUT /api/fragments/{name}/microphone`); **Not now** keeps
+nothing. An app's frame names no microphone in its policy until then (so
+Allow makes it again, naming the app's origin), and a visitor's (no row)
+never does; a release chat's names it from the first, its page the
+platform's code, which records only on that yes (so Allow drops nothing
+being written). The fragment's ⋯ takes it back: an app's open pages, in
+every tab, are made again without it (the list's change); a chat's page
+asks again at its next memo.
 
 ### Listed records
 

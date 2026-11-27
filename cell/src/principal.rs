@@ -821,7 +821,7 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => None,
     };
     let face = r.face.as_deref().and_then(|f| crate::json_text::<Face>(f).ok());
-    let (kind, title, picture, agent_role, agents) = face.map_or((FragmentKind::App, None, None, None, Vec::new()), |f| (f.kind, f.title, f.picture, f.role, f.agents));
+    let (kind, title, picture, agent_role, agents, chat_release) = face.map_or((FragmentKind::App, None, None, None, Vec::new(), false), |f| (f.kind, f.title, f.picture, f.role, f.agents, f.chat_release));
     let preview = r.said.as_deref().map(search::preview).filter(|p| !p.is_empty()).map(str::to_string);
     let preview_at = preview.as_ref().and(r.said_at);
     let unread = u32::try_from(r.unread).ok().filter(|n| *n <= limits::LISTED_UNREAD_MAX);
@@ -832,5 +832,5 @@ fn listed(r: Listed) -> CellResult<ListedFragment> {
         None => vec![],
     };
     assert!(listed.len() <= limits::LISTED_POSTERS_MAX, "a row carries what it took, a bounded number");
-    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, microphone: r.microphone != 0, owned: false, listed })
+    Ok(ListedFragment { name: r.name, role: r.role, kind, title, picture, agent_role, agents, preview, preview_at, unread, sharing, archived: r.archived != 0, dock: r.dock != 0, pinned: r.pinned != 0, microphone: r.microphone != 0, chat_release, owned: false, listed })
 }

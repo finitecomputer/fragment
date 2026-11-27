@@ -1348,6 +1348,13 @@ pub struct ListedFragment {
     #[serde(default, skip_serializing_if = "is_default")]
     #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
     pub microphone: bool,
+    /// It runs the release's chat template, its page the platform's code,
+    /// as its face says (its blessed release): `microphone` is then the
+    /// signer's one yes for every such chat, which that page asks for
+    /// before it records. Left out while false.
+    #[serde(default, rename = "chatRelease", skip_serializing_if = "is_default")]
+    #[cfg_attr(feature = "schema", schemars(extend("default" = false)))]
+    pub chat_release: bool,
     /// An agent's list `for` someone: whether that someone owns it (beside
     /// the role the agent acts with there), as no name says any more.
     #[serde(default, skip_serializing_if = "is_default")]
@@ -3047,7 +3054,7 @@ mod tests {
         fn value(v: &impl Serialize) -> Value {
             serde_json::to_value(v).unwrap()
         }
-        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, microphone: false, owned: false, listed: vec![] }], limits: None };
+        let listed = FragmentList { fragments: vec![ListedFragment { name: "notes-k3x9".into(), role: Role::Owner, kind: FragmentKind::App, title: None, picture: None, agent_role: None, agents: vec![], preview: None, preview_at: None, unread: 0, sharing: None, archived: false, dock: true, pinned: false, microphone: false, chat_release: false, owned: false, listed: vec![] }], limits: None };
         assert_eq!(value(&listed), serde_json::json!({ "fragments": [{ "name": "notes-k3x9", "role": "owner", "kind": "app" }] }));
         // the limits a person's client checks its files against, when the platform names them
         let limited = FragmentList { fragments: vec![], limits: Some(UploadLimits { upload_max_bytes: limits::UPLOAD_MAX_BYTES_DEFAULT, files_per_message: limits::FILES_PER_MESSAGE }) };
@@ -3055,7 +3062,7 @@ mod tests {
         assert_eq!(serde_json::from_value::<FragmentList>(value(&limited)).unwrap(), limited);
         let sharing = Sharing { visibility: Visibility::Link, members: 3, guests: 1, invites: Some(2), reach: false };
         let listed = FragmentList {
-            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, microphone: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
+            fragments: vec![ListedFragment { name: "todo-k3x9".into(), role: Role::Owner, kind: FragmentKind::Chat, title: Some("Todo".into()), picture: None, agent_role: None, agents: vec!["npub1juniper".into()], preview: Some("hi".into()), preview_at: Some(1_760_000_000_000), unread: 3, sharing: Some(sharing), archived: true, dock: true, pinned: false, microphone: false, chat_release: false, owned: false, listed: vec![ListedRecord { channel: "work".into(), principal: "npub1juniper".into(), kind: "turn.asked".into(), fields: [("asks".to_string(), "npub1me".to_string())].into(), at: 1_760_000_000_001 }] }],
             limits: None,
         };
         assert_eq!(
@@ -3087,6 +3094,9 @@ mod tests {
         // the microphone, as pinned: left out while not lent
         let lent = ListedFragment { microphone: true, ..read.clone() };
         assert_eq!(value(&lent), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "microphone": true }));
+        let chat = ListedFragment { chat_release: true, ..read.clone() };
+        assert_eq!(value(&chat), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "chatRelease": true }));
+        assert!(!serde_json::from_value::<ListedFragment>(value(&read)).unwrap().chat_release);
         assert!(!serde_json::from_value::<ListedFragment>(value(&read)).unwrap().microphone);
         assert_eq!(value(&SetMicrophone { microphone: true }), serde_json::json!({ "microphone": true }));
         assert!(serde_json::from_value::<SetMicrophone>(serde_json::json!({ "microphone": "yes" })).is_err());

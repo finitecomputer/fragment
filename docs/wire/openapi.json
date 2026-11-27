@@ -886,6 +886,11 @@
             "description": "The signer archived it: their own view, not the fragment's (the\nshell's sidebar leaves it out; search still finds it).",
             "type": "boolean"
           },
+          "chatRelease": {
+            "default": false,
+            "description": "It runs the release's chat template, its page the platform's code,\nas its face says (its blessed release): `microphone` is then the\nsigner's one yes for every such chat, which that page asks for\nbefore it records. Left out while false.",
+            "type": "boolean"
+          },
           "dock": {
             "default": true,
             "description": "On the signer's dock: their own choice, not the fragment's (`PUT\n/api/fragments/{name}/dock`), true until they take it off (the\nshell's dock shows apps and brains, less these and the archived).\nLeft out while true, so a row from before the choice, or from an\nolder platform, reads as on it.",

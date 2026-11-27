@@ -36,6 +36,7 @@ bound LeftBehind.bytes range u64
 bound ListedFragment.agentRole default null
 bound ListedFragment.agents default []
 bound ListedFragment.archived default false
+bound ListedFragment.chatRelease default false
 bound ListedFragment.dock default true
 bound ListedFragment.kind default "app"
 bound ListedFragment.listed default []
@@ -239,6 +240,7 @@ field ListWatchFrame.invited.type required "invited"
 field ListedFragment.agentRole optional string|null
 field ListedFragment.agents optional array<string>
 field ListedFragment.archived optional boolean
+field ListedFragment.chatRelease optional boolean
 field ListedFragment.dock optional boolean
 field ListedFragment.kind required FragmentKind
 field ListedFragment.listed optional array<ListedRecord>
