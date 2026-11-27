@@ -1048,7 +1048,8 @@ unfinished design, not debt.
   4. Remove `/move`, the welcome's slot, the notices owner and the
      sign-in call.
   5. Remove `Source::Stage`, `fragment stage`, and the `finite-computer`
-     layout and profile.
+     layout and profile, once the general rules of its brains are taken
+     out of it (docs/migrations.md, "What the next migration keeps").
   6. Remove `finite-chat-archive/1` once phase 0 ends.
   7. Remove the vault's `nostr_nsec` purpose and what it holds, and the
      Vault's `receipts` table (a step that drops it) with `vault/handoff`.
@@ -1059,7 +1060,7 @@ unfinished design, not debt.
 
   What stays: `fragment home`, the `import-agent-home` skill and its
   `hermes` layout, must-answer notices, the comp's `until`, the vault,
-  and the wire's bytes answer.
+  the wire's bytes answer, and "What the next migration keeps".
 
 ## The registry is one Durable Object for the fleet
 

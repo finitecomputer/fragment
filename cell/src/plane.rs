@@ -512,6 +512,26 @@ impl FragmentCell {
         Ok(())
     }
 
+    /// The installed code's rows replaced (`store_installed`): an install
+    /// that changes a declared channel's read role, or drops a channel,
+    /// reopens every live socket (4001), each decided afresh as it
+    /// reconnects and resuming from its cursor (live.rs), so a page refused
+    /// a channel resubscribes as it may read it now. Any other install
+    /// leaves them be.
+    fn install_rows(&self, code: &Installed<'_>) -> CellResult<()> {
+        #[derive(Deserialize)]
+        struct Read {
+            channel: String,
+            read: String,
+        }
+        let before: Vec<Read> = self.typed("SELECT channel, read FROM code_channels", vec![])?;
+        store_installed(&self.sql(), code)?;
+        if before.iter().any(|r| code.channels.get(&r.channel).map(|d| d.read.as_str()) != Some(r.read.as_str())) {
+            self.reopen_live("what this fragment's channels let you read changed: reconnect");
+        }
+        Ok(())
+    }
+
     /// Installs the app from the live commit: `fragment.json` declares the
     /// operations and `app.mjs` is the code. A live commit without
     /// `app.mjs` has no app (its schedules go; pauses and breakers stay for
@@ -529,7 +549,7 @@ impl FragmentCell {
             self.exec("DELETE FROM code", vec![])?;
             // none installed, through the one path every install takes (so
             // what was kept of a kind goes too: `newest`)
-            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &BTreeMap::new(), triggers: &[] })?;
+            self.install_rows(&Installed { operations: &BTreeMap::new(), channels: &BTreeMap::new(), triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::MetaLive)?;
             self.del_meta(MetaKey::FilesLive)?;
@@ -712,7 +732,7 @@ impl FragmentCell {
         let Some(source) = source else {
             self.exec("DELETE FROM code", vec![])?;
             // no operations to run, so nothing for a trigger to start
-            store_installed(&self.sql(), &Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
+            self.install_rows(&Installed { operations: &BTreeMap::new(), channels: &manifest.channels, triggers: &[] })?;
             self.sync_schedules(&[])?;
             self.del_meta(MetaKey::CodeError)?;
             js::abort_app_facet(&self.raw, &self.app_facet()?, "live has no app.mjs")?;
@@ -737,7 +757,7 @@ impl FragmentCell {
             ],
         )?;
         let installed = Installed { operations: &manifest.operations, channels: &manifest.channels, triggers: &manifest.triggers };
-        store_installed(&self.sql(), &installed)?;
+        self.install_rows(&installed)?;
         self.sync_schedules(&manifest.triggers)?;
         self.forget_undeclared_pauses()?;
         self.del_meta(MetaKey::CodeError)?;
