@@ -313,12 +313,14 @@ export function createMovePage(root, h) {
 
   // a seat of theirs, as their ledger says (the comp's plan reaches it a
   // moment after the registry gives it, and the ledger is what refuses a
-  // guest's making), as the welcome waits (onboarding.js `seated`)
-  async function seated() {
+  // guest's making), as the welcome waits (onboarding.js `seated`); one
+  // that `creates` a new agent, as the ledger decides a create
+  // (`permit::guest`: a seat not canceled), and one into theirs alone, a plan
+  async function seated(creates) {
     const t0 = Date.now();
     for (;;) {
       const ledger = await api("GET", "/api/ledger");
-      if (ledger.plan !== "guest" && ledger.seat !== "canceled") return h.setGuest(false);
+      if (ledger.plan !== "guest" && (!creates || ledger.seat !== "canceled")) return h.setGuest(false);
       if (Date.now() - t0 > SEAT_WAIT_MS) throw new Error("Your seat isn't ready yet. Try again in a moment.");
       await new Promise((r) => timers.setTimeout(r, 1000));
     }
@@ -369,7 +371,7 @@ export function createMovePage(root, h) {
     // drew (another tab), or gone (withdrawn), is gone on with no further,
     // nothing made for it
     let now = (await api("POST", "/api/migrations/offers", {}))?.offers ?? [];
-    await seated();
+    await seated(picks.some(({ theirs }) => !theirs));
     for (const { o, name, theirs } of picks) {
       if (!ASKABLE.has(now.find((x) => x.old === o.old)?.state)) continue;
       if (theirs) {
