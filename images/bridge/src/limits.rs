@@ -370,6 +370,10 @@ pub const LOAD_NET_FLOOR_BYTES_PER_S: u64 = 50_000;
 /// jittered backoff between (ids make every retry the same record).
 pub const POST_TRIES_MAX: u32 = 10;
 
+/// Post ids one ask of a chat's `held` names, at most: the platform's
+/// `fragment_proto::limits::HELD_IDS_MAX` (xtask's guards hold it so).
+pub const HELD_IDS_MAX: usize = 256;
+
 /// A catch-up reads at most this many pages (1000 records each) before it
 /// goes live; `__live`'s own paging reads the rest.
 pub const CATCHUP_PAGES_MAX: u32 = 20;

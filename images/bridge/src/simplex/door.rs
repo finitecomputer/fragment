@@ -42,7 +42,8 @@ pub const KEY_FILE: &str = "door.key";
 pub struct Ticket {
     pub door: String,
     /// `link`, `unlink`, or `adopt` (its owner keeps their SimpleX chat
-    /// with their old agent: `stage`).
+    /// with their old agent: `stage`); the platform's own `handover` (its
+    /// link handed to its connector's door, D4) and `back` (the way back).
     pub act: String,
     pub agent: String,
     pub computer: String,
@@ -79,7 +80,7 @@ impl Ticket {
     /// line break, so its digest reads one way only.
     fn well_formed(&self) -> bool {
         let computer = self.computer.strip_prefix("computer:").is_some_and(|h| !h.is_empty() && h.len() <= 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)));
-        self.door == DOOR && matches!(self.act.as_str(), "link" | "unlink" | "adopt") && super::run::dir_name_ok(&self.agent) && computer && hex_of(&self.nonce, 32) && self.exp > 0 && hex_of(&self.sig, 128)
+        self.door == DOOR && matches!(self.act.as_str(), "link" | "unlink" | "adopt" | "handover" | "back") && super::run::dir_name_ok(&self.agent) && computer && hex_of(&self.nonce, 32) && self.exp > 0 && hex_of(&self.sig, 128)
     }
 
     /// What its signature signs (fragment_core::door::Ticket::digest).

@@ -244,7 +244,7 @@ impl FragmentCell {
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: generated {path}", run.op, run.id);
         let writes = [FileWrite { path: target, bytes: Some(content) }];
-        let tip = match self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.depth).await.map_err(retry)? {
+        let tip = match self.commit(&key, &writes, &Default::default(), &message, &run.principal, run.acting_for(), run.depth).await.map_err(retry)? {
             Wrote::Commit(tip) => tip,
             Wrote::Conflict(why) => return Err(permanent(why)),
         };

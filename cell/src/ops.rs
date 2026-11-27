@@ -249,19 +249,23 @@ impl FragmentCell {
         Ok(rows.first().map(|r| r["loader_id"].as_str().expect("code.loader_id is TEXT NOT NULL").to_string()))
     }
 
-    /// `POST /api/f/<name>/ops/<op>`: a signed caller.
-    pub(crate) async fn api_op(&self, caller: &Caller, op: &str, body: OpCall) -> CellResult<Response> {
+    /// `POST /api/f/<name>/ops/<op>`: a signed caller. `reads`: `POST
+    /// /api/f/<name>/reads/<op>`, what another app's `job.read` asks as its
+    /// owner (FIN-615, PR 16b): a query alone.
+    pub(crate) async fn api_op(&self, caller: &Caller, op: &str, body: OpCall, reads: bool) -> CellResult<Response> {
         let who = self.caller_id(caller)?.to_string();
         let facts = self.facts()?;
-        let result = self.call_op(caller, &facts, &who, false, op, body).await?;
+        let result = self.call_op(caller, &facts, &who, false, op, body, reads).await?;
         json_response(&result)
     }
 
     /// Checks and runs one call from outside. `principal` is who the ledger
     /// records (an identity, or an anonymous visitor's id); `link` says the
     /// caller holds the share link. The caller's standing is read once and
-    /// decided twice.
-    pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall) -> CellResult<Answered> {
+    /// decided twice. `reads`: a query alone, refused otherwise once the
+    /// caller may see the fragment (`api_op`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn call_op(&self, caller: &Caller, facts: &Facts, principal: &str, link: bool, op: &str, body: OpCall, reads: bool) -> CellResult<Answered> {
         // A browser's post (`fragment.post`) takes the call's door on the
         // site, `__op/channels/<channel>` with the body as the input, and so
         // its checks: JSON only, and a session or an anonymous principal.
@@ -276,6 +280,9 @@ impl FragmentCell {
         // anything about its operations.
         decide(facts.visibility, standing, Action::Read(Role::Public))?;
         let decl = self.declared(op)?;
+        if reads && decl.kind != OpKind::Query {
+            return Err(CellError::new(ErrorCode::Forbidden, format!("{op} is no query: an app reads another app's queries alone")));
+        }
         // a query reads (docs/MODEL.md), so an agent's owner may ask it; a
         // mutation or a job acts, which takes a membership of one's own
         let action = if decl.kind == OpKind::Query { Action::Read(decl.role) } else { Action::Act(decl.role) };
@@ -658,6 +665,16 @@ impl FragmentCell {
                 json!({ "ok": true })
             }
             Some("live-held") => json!({ "held": self.meta(MetaKey::TestLiveHeld)?.is_some() }),
+            Some("refuse-turns") => {
+                // while on, this agent fragment refuses its places' word
+                // on its turns, as one that does not answer (runs_on.rs `turns_in`)
+                if body["on"] == true {
+                    self.set_meta(MetaKey::TestRefuseTurns, "1")?;
+                } else {
+                    self.del_meta(MetaKey::TestRefuseTurns)?;
+                }
+                json!({ "ok": true })
+            }
             Some("hold-woke") => {
                 // while on, a wake with something due waits before it reads
                 // the ledger (jobs.rs `held_woke`), at most 20 s

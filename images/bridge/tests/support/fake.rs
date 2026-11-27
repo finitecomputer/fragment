@@ -160,6 +160,13 @@ pub struct World {
     pub refused_closures: u32,
     /// Fragments whose `GET …/channels` answers 500, every time.
     pub broken: Vec<String>,
+    /// The next this many asks of a channel's `held` answer 503.
+    pub fail_held: u32,
+    /// The next this many tries of relayed posts on this channel, a replay
+    /// or another body under one's id among them: appended once and
+    /// answered 503, as a platform that took a message and went down
+    /// before its poster heard, past its every try.
+    pub lose_relayed: Option<(String, u32)>,
     /// Each post to a `work` channel (a claim, among others) is answered
     /// this much later: a claim held in flight.
     pub work_post_delay_ms: u64,
@@ -396,9 +403,12 @@ impl Fake {
         let sig = agent_key(label).sign_raw(&t.digest(), &[0u8; 32]).expect("signed");
         t.sig = fragment_bridge::records::hex(&sig.to_bytes());
         self.with(|w| {
-            if act == "link" || act == "adopt" {
+            // a way back opens it again, as a link does
+            if act == "link" || act == "adopt" || act == "back" {
                 w.door_tickets.insert(agent, nonce);
-            } else {
+            } else if act != "handover" {
+                // a handover leaves it open: the platform closes it once the
+                // door holds the link
                 w.door_tickets.remove(&agent);
                 w.doors.remove(&agent);
             }
@@ -825,11 +835,6 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
         let mut w = world.lock().unwrap();
-        // who asked is an identity, or no one (cell runs_on.rs `turns`)
-        if method == Method::PUT && v["asker"].as_str().is_some_and(|a| !a.starts_with("npub1")) {
-            w.turns.push((agent, "INVALID".into(), v));
-            return refuse(StatusCode::BAD_REQUEST, "a turn is its id, the fragment it runs in, and who asked (an identity, or no one)");
-        }
         // as one bridge life of its computer's start: a new one of that
         // start or a later one takes the agent's turns (every other life's
         // forgotten), and a retired one's word is refused, changing nothing
@@ -974,6 +979,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
             w.fragments.get_mut(&fragment).unwrap().subscriptions.push(s.clone());
             answer(StatusCode::OK, s)
         }
+        (Method::POST, ["channels", _, "held"]) if w.fail_held > 0 => {
+            w.fail_held -= 1;
+            refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
+        }
+        // which of the ids asked it holds as posts (the platform answers of
+        // the asker's own alone; the fake's posts are its agents')
+        (Method::POST, ["channels", channel, "held"]) => {
+            let Some(c) = f.channels.get(*channel) else { return refuse(StatusCode::NOT_FOUND, "no such channel") };
+            let v: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+            let held: Vec<Value> = v["ids"].as_array().into_iter().flatten().filter(|id| id.as_str().is_some_and(|id| c.ids.contains_key(id))).cloned().collect();
+            answer(StatusCode::OK, json!({ "held": held }))
+        }
         (Method::GET, ["channels", _]) if w.fail_history_reads > 0 && query(&q, "limit").first().is_some_and(|l| *l == "100") => {
             w.fail_history_reads -= 1;
             refuse(StatusCode::SERVICE_UNAVAILABLE, "deploying")
@@ -1012,6 +1029,18 @@ async fn handle(mut req: Request<Incoming>, world: Arc<Mutex<World>>) -> Respons
                 if r["agent"] != agent.as_str() || !door::verify(&key, &digest, r["sig"].as_str().unwrap_or("")) {
                     return refuse(StatusCode::FORBIDDEN, "a relayed record is signed by its agent's door");
                 }
+            }
+            if body.get("relayed").is_some() && w.lose_relayed.as_ref().is_some_and(|(on, n)| *on == channel && *n > 0) {
+                let taken = c.ids.contains_key(&id);
+                if let Some((_, n)) = &mut w.lose_relayed {
+                    *n -= 1;
+                }
+                if !taken {
+                    let record = w.append(&fragment, &channel, &me, body.clone());
+                    let seq = record["seq"].as_u64().unwrap();
+                    w.fragments.get_mut(&fragment).unwrap().channels.get_mut(&channel).unwrap().ids.insert(id, (seq, body));
+                }
+                return refuse(StatusCode::SERVICE_UNAVAILABLE, "taken, and its answer lost, as asked");
             }
             if let Some((seq, old)) = c.ids.get(&id) {
                 if *old == body {

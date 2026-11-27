@@ -230,7 +230,7 @@ impl FragmentCell {
                     anon_principal(&fresh)
                 }
             };
-            let result = self.call_op(caller, &facts, &principal, link, op, body).await?;
+            let result = self.call_op(caller, &facts, &principal, link, op, body, false).await?;
             json_response(&result)?
         } else if path == "__search" {
             // its own index, asked from its page as the asker, who pays for

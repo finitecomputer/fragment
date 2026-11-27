@@ -730,6 +730,23 @@ pub fn turn_start_in(turn: &str, asker: &str, by_code: bool, agent: &str, cause:
     start
 }
 
+/// Whose ask a mandate's text says it is: its first field (`fm1.<asker>.…`).
+/// Read for what a page shows alone; the agent's fragment checks the text.
+pub fn mandate_asker(text: &str) -> Option<&str> {
+    text.strip_prefix("fm1.")?.split('.').next().filter(|a| is_identity(a))
+}
+
+/// A hand-off's start, naming whose ask the words that started it were on
+/// (`carried`: FIN-615, PR 16a), beside its asker, the agent that said them:
+/// a page says "Rowan is working for Skyler (via Juniper)". None, or no
+/// identity (no known turn's), names none.
+pub fn carrying(mut start: Value, ask: Option<&str>) -> Value {
+    if let Some(ask) = ask.filter(|a| is_identity(a)) {
+        start["carried"] = json!(ask);
+    }
+    start
+}
+
 /// What a step does, whatever its runtime calls the tool: a page shows each
 /// with its own icon and verb (docs/chat-records.md, `turn.step`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

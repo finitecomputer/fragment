@@ -980,25 +980,30 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     const src = bot ? `${page}${page.includes("?") ? "&" : "?"}vault=${encodeURIComponent(bot.name)}` : page;
     const frame = frameOf(framed(name, src), `${kind.title} setup`, name);
     const opened = openSetup({ pressed, src: framed(name, src), name, agent, frame, title: kind.title, tall: !!kind.tall, onClose: () => { offers.delete(frame); refreshConnectors(true); } });
-    // the offer its page's Use it asks the shell to move (`onVaultMove`)
-    if (opened && bot) offers.set(frame, { name, vault: bot.name, hosts: bot.hosts, key: kind.vault.key });
+    // the offer its page's Use it asks the shell to lend (`onVaultLend`)
+    if (opened && bot) offers.set(frame, { name, bot, key: kind.vault.key });
   }
   // Each setup frame's offer: the Vault bot Settings found for its agent
-  // and the connector it opened. A page may not move a Vault secret itself
-  // (`fromVault` on `__secrets`: the cell refuses it, members.rs
-  // `put_secret`), since a page runs its authors' code with its visitor's
-  // session; so its Use it asks here (`KIND.vaultMove`), and the
-  // shell moves only what it offered that frame, into that connector,
-  // toward the Vault's own hosts. The page names nothing it could change.
+  // and the connector it opened. A page may not write a Vault (its routes
+  // are its person's alone, docs/secrets.md), since a page runs its
+  // authors' code with its visitor's session; so its Use it asks here
+  // (`KIND.vaultLend`), and the shell lends only what it offered that
+  // frame, to that connector, under the name its code fills, and nothing
+  // else of the secret changes (`PUT /api/vault/{secret}/apps/{app}`; FIN-615,
+  // PR 12: a person's secret never moves). The connector's own token of
+  // that name goes, or it would fill first. The page names nothing it
+  // could change.
   const offers = new Map();
-  const onVaultMove = async (e) => {
-    if (e.data?.fragment !== KIND.vaultMove) return;
+  const onVaultLend = async (e) => {
+    if (e.data?.fragment !== KIND.vaultLend) return;
     const frame = [...offers.keys()].find((f) => f.contentWindow === e.source);
     const offer = frame && offers.get(frame);
     if (!offer || e.origin !== originAt(offer.name)) return;
-    const reply = { fragment: KIND.vaultMove, nonce: e.data.nonce, ok: false };
+    const reply = { fragment: KIND.vaultLend, nonce: e.data.nonce, ok: false };
+    const { bot, name, key } = offer;
     try {
-      await api("PUT", `/api/f/${seg(offer.name)}/secrets/${offer.key}`, { fromVault: offer.vault, hosts: offer.hosts });
+      await api("PUT", `/api/vault/${seg(bot.name)}/apps/${seg(name)}`, { key });
+      await api("DELETE", `/api/f/${seg(name)}/secrets/${key}`);
       reply.ok = true;
     } catch (err) {
       reply.status = err.status;
@@ -1006,7 +1011,7 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     }
     frame.contentWindow?.postMessage(reply, e.origin);
   };
-  addEventListener("message", onVaultMove);
+  addEventListener("message", onVaultLend);
   // Its binding, as `POST …/door` answers or, its answer lost, as its door
   // reads: the binding to `agent`; a refusal, or no binding, throws (the
   // connector deleted), and so do a read that fails and a binding to
@@ -1084,7 +1089,9 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
     tags.append(el("span", "role-tag connector-tag", "Experimental"), what);
     s.append(tags, el("p", "muted", doors ? kind.said : `Couldn't read your ${kind.title} chats.`));
     const rows = agentsNow().map((a) => {
-      const its = kind === SIMPLEX ? computerRow(a) : null;
+      // an agent whose SimpleX is a connector's (its computer's moved into
+      // one: docs/bridge.md, "SimpleX") has that connector's row
+      const its = kind === SIMPLEX && !boundOf(kind.door, a.fragment) ? computerRow(a) : null;
       if (its) return its;
       const connector = boundOf(kind.door, a.fragment);
       const busy = making.has(`${kind.door} ${a.fragment}`);

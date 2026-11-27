@@ -512,7 +512,10 @@ export class App extends DurableObject {
   secret `NAME`, filled in outside your code), `job.publish(channel,
   body)`, `job.sleep("2 hours")`, `job.files.read|list|stat|write|remove`
   (`write(path, content, {expect: sha})` compares and swaps),
-  `job.push(who, payload)`, `job.ai.text|decide|image|video(...)`. A step that
+  `job.push(who, payload)`, `job.ai.text|decide|image|video(...)`,
+  `job.read(fragment, query, input)` (another of your apps' query, read as
+  you when you started the run, only while this app is yours alone: no one
+  else in it, no link, and no one else ever wrote its code). A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
@@ -1214,6 +1217,15 @@ made public (403 `private_while_reaching`; a secret on one its link
 opens is 403 `unshare_first`). People you add by name, at any role, are
 fine, and they can use its keys.
 
+A key that is its owner's, not the app's (their API key, their bot's
+token), stays in their Vault: they lend it to the app themselves
+(`fragment vault set <secret> --app my-thing--k3x9=API_KEY --to
+api.example.com`; an agent can't), and `{{API_KEY}}` fills from there
+wherever the app holds no `API_KEY` of its own. Its own comes first.
+Anyone who can edit the app can make it use the key, toward its hosts
+alone; it is lent nothing while its link opens it. Until it is lent, the
+fetch fails saying the app needs it.
+
 ## Rules of the road
 
 1. **The event log is truth.** Read `fragment events` before and after
@@ -1294,8 +1306,8 @@ fragment invites                         # the invites waiting for your yes
 fragment invites accept|decline <name>   # an agent: its owner's, acting for them
 fragment sync <name> [--dir D] [--watch] [--mode M [--prune] | --live] [--apply-mass-delete]
 fragment verify <name> [--dir D]         fragment secret list|rm ...
-fragment secret set <name> <KEY> --to HOST [--to HOST] [--from-vault SECRET]   # the value from $KEY, else stdin; or moved from your Vault
-fragment vault set <secret> --agent A [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held
+fragment secret set <name> <KEY> --to HOST [--to HOST]   # the value from $KEY, else stdin
+fragment vault set <secret> --agent A|--app APP=KEY [--to HOST] [--header H [--format F] | --query Q | --basic user|password | --sign nip98] [--keep-value]   # a person's own (an agent 403): the value from a hidden prompt, else stdin; --keep-value keeps the one held; --app lends it to an app of yours as its {{KEY}}
 fragment vault list                      fragment vault rm <secret>
 fragment deploy <name> [--dir D] [--note N]
 fragment read <name> <path>              # one file at main, as a viewer may
@@ -1322,6 +1334,7 @@ fragment operator reach [--key-file F]      # FIN-352: fragments with a key or a
 fragment operator person <npub> [--key-file F]
 fragment operator pin <npub> <image> [--key-file F]
 fragment operator start-from <npub> <save> [--key-file F]   # asleep or won't wake: its next start restores that save; the newer are set aside
+fragment operator simplex-move <npub> <agent> [--dry-run | --yes | --back] [--key-file F]   # its SimpleX link from its computer into a connector of its person's own, its data carried: alone (or --dry-run) says what is next; --yes moves it, going on where it stopped; --back goes back
 fragment operator orgs [--after A] [--key-file F]
 fragment operator comp <email> [--kind seat|always-on] [--org O] [--key-file F]
 fragment operator uncomp <seat> [--key-file F]

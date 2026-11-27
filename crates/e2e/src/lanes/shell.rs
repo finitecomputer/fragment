@@ -9995,6 +9995,12 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
         heroes[0]["face"] == main_colour && heroes[1]["face"] == reader_colour && main_colour.is_string() && faceless == true,
         json!({ "heroes": heroes, "main": main_colour, "reader": reader_colour }),
     );
+    // its hello over, as the sidebar says it: its chat's row shows what it
+    // said, no longer Working. Until then its menu starts with "Working in
+    // Reader", and a turn's end reaches the list up to `LISTED_MIN_GAP_MS`
+    // after it ends (cell/src/listed.rs)
+    let row = format!("document.querySelector({})", js(&chat_row(reader_chat)));
+    let rested = b.until(page, &format!("!{row}?.querySelector('.agent-doing') && ({row}?.querySelector('.chat-preview')?.textContent ?? '').startsWith('echo: [your routine] ')"), agent_wait);
     // its hero's New chat: a new chat with it alone, never with the main agent
     b.click(page, &hero(reader))?;
     let menu = b.until(page, "!document.getElementById('menu').hidden && document.getElementById('menu').classList.contains('agent-menu')", wait);
@@ -10006,8 +10012,8 @@ fn agents_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, session: &s
     let agents: Vec<Value> = members.body["members"].as_array().into_iter().flatten().filter(|m| m["kind"] == "agent").map(|m| m["principal"].clone()).collect();
     s.ok(
         "the Reader's hero opens its menu (New chat, Rename, Pin to top, its profile, its screen), and its New chat makes a chat with it alone, labelled as its",
-        offered == ["New chat", "Rename…", "Pin to top", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
-        json!({ "offered": offered, "made": made, "agents": agents }),
+        rested && offered == ["New chat", "Rename…", "Pin to top", "Its profile", "Its screen"] && picked && opened && open_chat(b, page) == made && agents == vec![json!(ids[1])],
+        json!({ "rested": rested, "offered": offered, "made": made, "agents": agents }),
     );
     // let go, so the newest chats below are the ones they make
     let r = shell(api, session, "PUT", &format!("/api/fragments/{made}/archived"), Some(&json!({ "archived": true })), &[])?;

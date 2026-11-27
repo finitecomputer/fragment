@@ -65,6 +65,7 @@ mod shell;
 mod signin;
 mod simplex_settings;
 pub(crate) mod simplex_setup;
+mod simplex_move;
 mod site;
 mod slides;
 mod sync;
@@ -127,6 +128,8 @@ const LANES: &[Lane] = &[
     limits::capability_cost,
     // by name: its stack builds the door's image
     simplex_door::door,
+    // by name, the real platform alone (a Hermes image with this release's bridge)
+    simplex_move::simplex_move,
     limits::facet_restart,
     limits::lockdown,
     site::site,
@@ -232,7 +235,7 @@ pub const SHARDS: [&[&str]; 5] = [
         "home",
     ],
     &[
-        "facet-cap", "capability-cost", "simplex-door", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes",
+        "facet-cap", "capability-cost", "simplex-door", "simplex-move", "facet-restart", "app-lockdown", "site", "watch", "icons", "schemas", "channels", "live", "routes",
         "cli", "browser", "jobs", "triggers", "finite-private", "brain", "search", "frames", "isolation", "members", "effects", "door", "trials",
         "chat-history", "transcribe", "notes", "public", "files", "ops", "delegation", "secrets", "doc-for", "lockdown", "trial-seats",
     ],

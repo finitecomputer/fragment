@@ -356,7 +356,14 @@ a room of the agent's door, names it. `agent` is the agent's identity.
 bridge process that claims the turn. The record is the claim, "this life
 runs this turn" (docs/bridge.md, "State"). `"code": true` says app code
 wrote the message that started it ("Who wrote a record"): its asker is
-no one, whatever `asker` names. Older bridges write none.
+no one, whatever `asker` names. Older bridges write none. A hand-off's
+(another agent of the computer's words in the chat) names `carried`, the
+identity whose ask those words were on, as the mandate beside them says,
+else as the computer saw it (FIN-615, PR 16a): a page says "Rowan is
+working for Ben (via Juniper)", `asker` being Juniper. It names whose
+request started the chain, never whose authority the turn has: only its
+owner's own ask is carried with its proof; anyone else's goes on with the
+agent as itself, in that place alone. Older bridges write none.
 
 **`turn.step`**, part `<step>`, from 1: one tool call.
 

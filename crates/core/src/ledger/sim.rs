@@ -683,7 +683,7 @@ impl Sim {
         for spend in [Spend::AgentTurn, Spend::AiStep, Spend::Wake, Spend::Write, Spend::Create] {
             let gate = self.ledger.gate(spend, self.now);
             let expected = match (self.model.plan, standing, spend) {
-                (Plan::Guest, _, Spend::Create) => Err(Refused::GuestCreates),
+                (p, _, Spend::Create) if p == Plan::Guest || self.model.seat == SeatState::Canceled => Err(Refused::GuestCreates),
                 (Plan::Guest, _, _) => Err(Refused::GuestPayer),
                 (_, Standing::ReadOnly { why }, _) => Err(Refused::ReadOnly { why }),
                 (_, _, Spend::Write | Spend::Create) | (_, Standing::Ok, _) => Ok(()),

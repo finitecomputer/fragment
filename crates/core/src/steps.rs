@@ -70,6 +70,11 @@ pub enum Step {
     /// hold them (`{id, principal, data}`, one a socket that shares any).
     #[serde(rename = "presence")]
     Presence {},
+    /// `job.read(fragment, op, input)` (FIN-615, PR 16b): another
+    /// fragment's query, asked as this app's viewer, its owner, while the
+    /// app is theirs alone: its answer's `result`.
+    #[serde(rename = "read")]
+    Read { fragment: String, op: String, input: Value },
 }
 
 /// The identities one `job.people` step names: a page's `__people` limit.
@@ -251,6 +256,7 @@ impl Step {
             Step::Members {} => "members",
             Step::People { .. } => "people",
             Step::Presence {} => "presence",
+            Step::Read { .. } => "read",
         }
     }
 }

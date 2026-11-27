@@ -62,6 +62,13 @@ async function smallBody(request, max) {
 export async function fpacRoute(request, bucket, disk, rules, postHead, postUnusable) {
   const url = new URL(request.url);
   const route = `${request.method} ${url.pathname}`;
+  // a test fleet's outage of its storage (the lever `fpac-refuse-at-stop`,
+  // set in its props at a stop's signal): every call refused, as R2 down
+  // answers, until then; FPAC tries again (FIN-783)
+  if (disk.refuseUntil && Date.now() < disk.refuseUntil) {
+    await request.body?.cancel();
+    return text(503, "the disk's storage is unreachable (the test lever's outage)\n");
+  }
   if (route === "GET /open") {
     // what the platform gave the route at the start: no storage read
     return text(200, "", { "x-fpac-disk": disk.name, "x-fpac-epoch": String(disk.epoch), "x-fpac-volume-bytes": String(disk.volume), "x-fpac-head": disk.head || "none" });

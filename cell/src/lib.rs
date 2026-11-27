@@ -38,6 +38,7 @@ mod across;
 mod ai;
 mod address;
 mod alone;
+mod asks;
 mod assets;
 mod auth;
 mod billing;
@@ -91,6 +92,7 @@ mod runs_on;
 mod serve;
 mod share;
 mod shell;
+mod simplex_move;
 mod stripe;
 mod subscriptions;
 mod updating;
@@ -406,13 +408,13 @@ async fn signer_of(env: &Env, req: &Request, url: &Url, payload: Payload<'_>, ma
         if let Some(named) = &acting_for {
             permit::may_act_for(identity.kind, identity.owner.as_deref(), named).map_err(|r| refused(r.message()))?;
         }
-        return Ok(Signed { identity, key, acting_for, mandated: false });
+        return Ok(Signed { identity, key, acting_for, mandated: false, mandate: None });
     };
     let m = fragment_core::mandate::open(&keys::mandate_keys(env).await?, &text, js::now_ms()).map_err(|r| refused(r.message()))?;
     if identity.kind != IdentityKind::Agent || m.agent != identity.id {
         return Err(refused("a mandate is carried only by the agent it names"));
     }
-    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true })
+    Ok(Signed { identity, key, acting_for: Some(m.asker), mandated: true, mandate: Some(text) })
 }
 
 /// Who is asking a site request, unresolved: a signature names its key
@@ -977,13 +979,13 @@ const INBOX_HEADERS_MAX: usize = 100;
 
 /// A request for a fragment's supervisor: what the router decided, and
 /// where it goes inside.
-struct Forward {
-    routed: Routed,
+pub(crate) struct Forward {
+    pub(crate) routed: Routed,
     /// The inner path; the query string travels only in `routed.url`.
-    inner: String,
+    pub(crate) inner: String,
     /// Headers this route passes on purpose (the inbox's token, hop count,
     /// and the headers an inbox may read its secret from).
-    extra: Vec<(String, String)>,
+    pub(crate) extra: Vec<(String, String)>,
 }
 
 /// A blob upload declares its length, at most `most`: past that it is
@@ -1000,12 +1002,12 @@ fn blob_length(req: &Request, most: u64) -> CellResult<()> {
 }
 
 /// Bytes the router read, as a body to forward.
-fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
+pub(crate) fn bytes_body(body: Vec<u8>) -> Option<worker::wasm_bindgen::JsValue> {
     (!body.is_empty()).then(|| worker::js_sys::Uint8Array::from(body.as_slice()).into())
 }
 
 /// Hands a request to the fragment's supervisor.
-async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
+pub(crate) async fn forward(env: &Env, req: &Request, body: Option<worker::wasm_bindgen::JsValue>, f: Forward) -> CellResult<Response> {
     let headers = Headers::new();
     let cookies = fetched(req)?.site;
     for k in PASSED_HEADERS {
@@ -1147,6 +1149,11 @@ async fn site(mut req: Request, env: &Env, cfg: &Config, url: &Url, name: &str, 
         Some(sha) => Payload::Streamed { sha256_hex: sha },
         None => Payload::Read(&body),
     };
+    // a site takes no one's word but its signer's: a mandate here is
+    // refused, never dropped (`FOR_HONORED`)
+    if req.headers().get(fragment_core::mandate::HEADER)?.is_some() {
+        return Err(CellError::invalid(FOR_HONORED));
+    }
     let mut credential = site_credential(&req, url, payload, fetched)?;
     // a frame's page shows only in the page its session was made for (and
     // in its own frames there): that session is asked for here, for the
@@ -1537,7 +1544,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             // the inbox takes its token instead of a signature
             let mut extra = vec![];
             let principal = match inner.as_str() {
-                "/api/inbox" => {
+                "/api/inbox" | "/api/inbox/quiet" => {
                     for k in ["x-fragment-inbox-token", jobs::HOPS_HEADER] {
                         if let Some(v) = req.headers().get(k)? {
                             extra.push((k.to_string(), v));

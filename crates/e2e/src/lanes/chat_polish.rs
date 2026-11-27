@@ -427,7 +427,19 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     let up = super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent === 'Waiting for Bob…'");
     s.ok("a start that ends past ninety seconds waits plainly for its reply, not yet late", up, chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null));
     chrome.eval(&page, &format!("new Promise(resolve => {{ const w = window.__frame.contentWindow; w.Date.now = () => window.__bootNow() + 182000; w.postMessage({awake}, location.origin); w.requestAnimationFrame(() => w.requestAnimationFrame(() => resolve(true))); }})"))?;
-    s.ok("and ninety seconds after it is up, it says a reply has not started", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')"), "");
+    s.ok("and ninety seconds after it is up, it says it hasn't picked the message up", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes(\"hasn't picked this up yet\")"), "");
+    // the line as a person sees it, wide and narrow, light and dark (a
+    // directory of its own: a later check here empties `chat-polish`)
+    let picked = s.dir("not-picked-up");
+    for (width, height, mobile, size) in [(1280, 860, false, "1280"), (390, 844, true, "390")] {
+        chrome.viewport(&page, width, height, mobile)?;
+        for scheme in ["light", "dark"] {
+            chrome.color_scheme(&page, scheme)?;
+            chrome.screenshot(&page, &picked.join(format!("not-picked-up-{size}-{scheme}.png")))?;
+        }
+    }
+    chrome.color_scheme(&page, "light")?;
+    chrome.viewport(&page, 1280, 860, false)?;
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__bootNow; return true; })()")?;
     for (phase, expected) in [
         ("asleep", "Bob is getting ready…"),
@@ -443,7 +455,7 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
     chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({absent}, location.origin); return true; }})()"))?;
     s.ok("without a phase the page waits plainly, without claiming the agent is working", super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent === 'Waiting for Bob…'"), "");
     chrome.eval(&page, "(() => { const w = window.__frame.contentWindow; window.__now = w.Date.now; w.Date.now = () => window.__now() + 91000; w.postMessage({fragment:'agents',agents:[]}, location.origin); return true; })()")?;
-    let late = super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes('has not started a reply yet')");
+    let late = super::shows(chrome, &page, "window.__frame.contentDocument.querySelector('.working')?.textContent.includes(\"hasn't picked this up yet\")");
     // what the frame shows when it does not say so (one CI run failed with
     // nothing to read, 41271812848): its waiting lines, its composer, its
     // clock against the page's, and the person's last messages there
@@ -454,12 +466,41 @@ pub(super) fn check(s: &mut Suite, api: &Api, owner: &Keys, session: &str, chrom
             .eval(&page, "(() => { const w = window.__frame.contentWindow; const d = w.document; return { working: [...d.querySelectorAll('.working')].map((l) => l.textContent), placeholder: d.getElementById('text')?.placeholder ?? null, ahead: w.Date.now() - window.__now(), mine: [...d.querySelectorAll('.msg.user.mine')].slice(-2).map((m) => [m.dataset.seq ?? null, m.querySelector('.bubble')?.textContent ?? null, m.className]), url: w.location.href }; })()")
             .unwrap_or(Value::Null)
     };
-    s.ok("after ninety seconds without a turn the page says a reply has not started", late, shown);
+    s.ok("after ninety seconds without a turn the page says its agent hasn't picked the message up", late, shown);
     chrome.eval(&page, "(() => { window.__frame.contentWindow.Date.now = window.__now; return true; })()")?;
     let cause = super::super::jobs::records(api, owner, &name, "chat").into_iter().find(|r| r["body"]["text"] == "A slow first reply").unwrap_or_default();
     let started = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": "fixture-new", "body": { "kind": "turn.start", "turn": "fixture-new", "agent": agent, "asker": api.identity(owner)?, "cause": { "channel": "chat", "seq": cause["seq"] } } })))?;
     anyhow::ensure!(started.status == 200, "starting the fixture turn: {started}");
     s.ok("a turn.start replaces startup or delay status with the agent's working status", super::shows(chrome, &page, "window.__frame.contentDocument.querySelectorAll('.working').length === 1 && window.__frame.contentDocument.querySelector('.working').textContent.includes('is working')"), "");
+    // a hand-off's turn, as its bridge starts one (FIN-615, PR 16a): the
+    // agent that said the words its `asker`, whose ask they were on
+    // `carried`; its line names both
+    let (juniper, ben) = (super::super::delegation::agent_of(api, owner)?.1, api.identity(&api.person()?)?);
+    let both = json!({ "fragment": "agents", "agents": [{ "identity": agent, "name": label, "title": "Bob", "phase": "awake" }, { "identity": juniper, "name": "juniper", "title": "Juniper", "phase": "awake" }] });
+    chrome.eval(&page, &format!("(() => {{ window.__frame.contentWindow.postMessage({both}, location.origin); return true; }})()"))?;
+    for (id, body) in [
+        ("fixture-new-end", json!({ "kind": "turn.end", "turn": "fixture-new", "outcome": "idle" })),
+        ("fixture-carried", json!({ "kind": "turn.start", "turn": "fixture-carried", "agent": agent, "asker": juniper, "carried": ben, "cause": { "channel": "chat", "seq": cause["seq"] } })),
+    ] {
+        let r = api.signed(&hand, "POST", &format!("/api/f/{name}/channels/work"), Some(&json!({ "id": id, "body": body })))?;
+        anyhow::ensure!(r.status == 200, "posting {id}: {r}");
+    }
+    let carried_line = format!("Bob is working for npub…{} (via Juniper)", &ben[ben.len() - 6..]);
+    s.ok(
+        "a hand-off's working line names whose ask it carries on and the agent that said it: \"Bob is working for Ben (via Juniper)\"",
+        super::shows(chrome, &page, &format!("window.__frame.contentDocument.querySelector('.working')?.textContent === {}", super::js(&carried_line))),
+        chrome.eval(&page, "window.__frame.contentDocument.querySelector('.working')?.textContent ?? null").unwrap_or(Value::Null),
+    );
+    // a folder of their own: a later check makes `chat-polish` again
+    let carried_shots = s.dir("carried-line");
+    for (w, h, phone, scheme, file) in [(1280, 860, false, "light", "desktop.png"), (1280, 860, false, "dark", "desktop-dark.png"), (390, 844, true, "light", "phone.png"), (390, 844, true, "dark", "phone-dark.png")] {
+        super::fit(chrome, &page, w, h, phone)?;
+        chrome.color_scheme(&page, scheme)?;
+        chrome.screenshot(&page, &carried_shots.join(file))?;
+    }
+    println!("      (the carried line's screenshots in {})", carried_shots.display());
+    chrome.color_scheme(&page, "light")?;
+    super::fit(chrome, &page, 1280, 860, false)?;
     println!("      (polish screenshots in {})", shots.display());
     chrome.close(page)?;
     forged_turn(s, api, owner, chrome, &name, &hand, agent)
