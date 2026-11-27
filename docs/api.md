@@ -1031,7 +1031,8 @@ answer." Two calls ask:
   once: the same answer again (a retry) writes nothing more.
 
 The card goes to the chat the asker's newest turn runs in (a lend's: one
-of theirs that lends it not); where whom it asks is not in that chat, to
+of theirs that lends it not; a confirm's, only while their turns are open
+in that one chat, since it names what it is about, else 409); where whom it asks is not in that chat, to
 their own newest chat with the agent, so it never lands where its
 answerer can't see it; a lend's card there says it is about another chat
 (never naming it) and offers no Always here (400), which is answered where

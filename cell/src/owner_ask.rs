@@ -167,6 +167,13 @@ impl FragmentCell {
             }
         };
         let lent = Lent::of_what(&a.card.what);
+        // a confirm names what it is about, so it is asked only where the
+        // ask surely was: with the asker's turns open in more than one place,
+        // which one this call is of is not known (one gateway runs them all)
+        let places: std::collections::BTreeSet<&str> = rows.iter().filter(|r| npub::display(&r.asker) == asker).map(|r| r.place.as_str()).collect();
+        if lent.is_none() && places.len() > 1 {
+            return Err(CellError::new(ErrorCode::Conflict, "Asks are open in more than one chat, so this asks in none: ask again once the others end."));
+        }
         let mut card = a.card.clone();
         let mut at = None;
         for r in rows.iter().filter(|r| npub::display(&r.asker) == asker) {

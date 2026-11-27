@@ -85,7 +85,7 @@ const ASKER_CHECKS: &[&str] = &[
     "its owner switches spend off and accounts on in that chat: their next ask of the paid tool asks its owner, reaching no provider, and is given the account; switched back, it asks again, and its owner's No closes the card, lending nothing",
     "where its owner is not in the chat they ask in (the agent in their own chat without her), the card goes to its owner's own chat with the agent, naming theirs and offering no Always here (refused, 400), and her Allow once there lends it to their next ask in theirs",
     "in its owner's own chat (a chat as a person makes one), shared with them, their ask asks her on a card there, which they both read",
-    "its owner asks it in her own chat to delete her app, and they ask it to delete her board: each a confirm card for her where it was asked, the app and the board kept; her own delete, then Yes, closes the card",
+    "its owner asks it in her own chat to delete her app, and they ask it to delete her board: each a confirm card for her where it was asked, the app and the board kept; her own delete, then Yes, closes the card. While her turns are open in two chats, her ask asks in neither (409): a confirm names what it is about",
     "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
     "its computer's word on its turns is no longer taken (the place opens them): told on the old route that their turn ended, its call for its owner on their ask still goes as them",
     "nor that their turn is its owner's: its call for its owner on their ask still goes as them",
@@ -348,6 +348,16 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     s.owned(&r.body, w.owner);
     let deleting = |name: &str| format!("fetch http://api.fragment.internal/api/f/{name}?for={owner_id} with {} in x-fragment-agent deleting {{}}", w.agent);
     let confirms = |said: &str| said.starts_with("fetched 403") && said.contains("Asked your owner to confirm it, on a card in the chat") && !said.contains("@");
+    // her turns open in two chats (one waits in her own): which one a call
+    // is of is not known, so a confirm, which names what it is about, asks
+    // in neither
+    let held = api.signed(w.owner, "POST", &format!("/api/f/{hers}/channels/chat"), Some(&json!({ "id": "asker-held", "body": { "text": "steer-me" } })))?;
+    let held_turn = turn_of(w.agent, &hers, "chat", held.body["record"]["seq"].as_i64().unwrap_or(0));
+    let holding = s.eventually(wake, || work_of(&records(api, w.owner, &hers, "work"), &held_turn).iter().any(|r| r["body"]["kind"] == "turn.start"));
+    let in_two = asked_by(s, w.owner, "owner-delete-two", &deleting(&doomed))?;
+    let carded_in_two = !open_card(w.owner, chat, "delete").is_empty() || !open_card(w.owner, &hers, "delete").is_empty();
+    let stop = api.signed(w.owner, "POST", &format!("/api/f/{hers}/channels/chat"), Some(&json!({ "id": "asker-held-stop", "body": { "kind": "stop", "turn": held_turn } })))?;
+    let let_go = s.eventually(wake, || work_of(&records(api, w.owner, &hers, "work"), &held_turn).iter().any(|r| r["body"]["kind"] == "turn.end"));
     let owners = asked_in(s, &hers, w.owner, "owner-delete", &deleting(&doomed))?;
     let bens = asked_by_ben(s, 27, &deleting(&board))?;
     let deletes = [open_card(w.owner, &hers, "delete"), open_card(w.owner, chat, "delete")].concat();
@@ -360,7 +370,13 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let yes = answer(w.owner, &hers, &mine["seq"], "yes")?;
     s.ok(
         ASKER_CHECKS[11],
-        confirms(&owners)
+        holding
+            && in_two.starts_with("fetched 409")
+            && in_two.contains("more than one chat")
+            && !carded_in_two
+            && stop.status == 200
+            && let_go
+            && confirms(&owners)
             && confirms(&bens)
             && mine["body"]["asks"] == owner_id.as_str()
             && mine["body"]["asker"] == owner_id.as_str()
@@ -372,7 +388,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
             && gone.status == 200
             && yes.status == 200
             && closing(&hers, &mine["seq"]).is_some_and(|c| c["body"]["option"] == "yes"),
-        json!({ "owner": owners, "ben": bens, "cards": deletes, "kept": kept, "deleted": gone.status, "yes": yes.status }),
+        json!({ "held": holding, "in two": in_two, "carded in two": carded_in_two, "let go": let_go, "owner": owners, "ben": bens, "cards": deletes, "kept": kept, "deleted": gone.status, "yes": yes.status }),
     );
     let invites = format!("fetch http://api.fragment.internal/api/invites?for={owner_id} with {} in x-fragment-agent", w.agent);
     let owners = asked_by(s, w.owner, "owner3", &invites)?;
