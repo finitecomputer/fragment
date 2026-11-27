@@ -904,6 +904,11 @@
             },
             "type": "array"
           },
+          "microphone": {
+            "default": false,
+            "description": "The signer lets its page use their microphone: their own yes, asked\nin the shell once (docs/api.md, \"One ask\"; `PUT\n/api/fragments/{name}/microphone`), one for every chat on the\nrelease's chat template. Left out while false.",
+            "type": "boolean"
+          },
           "name": {
             "type": "string"
           },
@@ -1856,6 +1861,23 @@
           "seq",
           "at",
           "snippet"
+        ],
+        "type": "object",
+        "x-fragment-direction": "out"
+      },
+      "Microphone": {
+        "description": "Its answer: the fragment, and whether its page is lent the microphone now.",
+        "properties": {
+          "microphone": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "microphone"
         ],
         "type": "object",
         "x-fragment-direction": "out"
@@ -2990,6 +3012,19 @@
         },
         "required": [
           "dock"
+        ],
+        "type": "object",
+        "x-fragment-direction": "in"
+      },
+      "SetMicrophone": {
+        "description": "`PUT /api/fragments/{name}/microphone`: the signer's own yes (or its\ntaking back) to a fragment's page using their microphone; on a chat of\nthe release's chat template, their one yes for every such chat.",
+        "properties": {
+          "microphone": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "microphone"
         ],
         "type": "object",
         "x-fragment-direction": "in"
@@ -4729,6 +4764,121 @@
           }
         ],
         "summary": "Put a fragment on the signer's dock, or take it off.",
+        "tags": [
+          "fragments"
+        ]
+      }
+    },
+    "/api/fragments/{name}/microphone": {
+      "put": {
+        "operationId": "fragments.microphone",
+        "parameters": [
+          {
+            "description": "The fragment's name, in full.",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetMicrophone"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Microphone"
+                }
+              }
+            },
+            "description": "OK"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`invalid_request`",
+            "x-fragment-codes": [
+              "invalid_request"
+            ]
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`unauthenticated`",
+            "x-fragment-codes": [
+              "unauthenticated"
+            ]
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`not_found`",
+            "x-fragment-codes": [
+              "not_found"
+            ]
+          },
+          "500": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`schema_refused`",
+            "x-fragment-codes": [
+              "schema_refused"
+            ]
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`deploying`",
+            "x-fragment-codes": [
+              "deploying"
+            ]
+          }
+        },
+        "security": [
+          {
+            "nip98": []
+          },
+          {
+            "session": []
+          }
+        ],
+        "summary": "Let a fragment's page use the signer's microphone, or take it back (on a release chat: every such chat).",
         "tags": [
           "fragments"
         ]

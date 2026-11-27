@@ -225,7 +225,10 @@ impl FragmentCell {
     /// sent to every member's list (at most `MEMBERS_MAX`) and its owner's,
     /// as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title, role, picture);
+        // a chat of the release's chat template (its page the platform's
+        // code), whose microphone one yes of its person's lends (principal.rs)
+        let chat_release = self.meta(MetaKey::Blessed)?.is_some_and(|b| b.starts_with("chat@"));
+        let face = face(kind, title, role, picture, chat_release);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -1572,7 +1575,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 /// picture's address when it has one, and an agent's role. Its kind is a
 /// manifest's, which names only kinds this release knows: the fallback a
 /// newer platform's kind reads as is never stored as one.
-pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>, chat_release: bool) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike
     let mut face = json!({ "kind": kind, "title": fragment_core::face::title(title) });
@@ -1582,6 +1585,9 @@ pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, 
     }
     if let Some(p) = picture {
         face["picture"] = json!(p);
+    }
+    if chat_release && kind == FragmentKind::Chat {
+        face["chatRelease"] = json!(true);
     }
     face.to_string()
 }

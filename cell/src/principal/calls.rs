@@ -70,6 +70,9 @@ pub(crate) struct Face {
     /// Its agent members, the first added first (`limits::LISTED_AGENTS_MAX`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<String>,
+    /// It runs the release's chat template: its page is the platform's.
+    #[serde(default, rename = "chatRelease", skip_serializing_if = "std::ops::Not::not")]
+    pub chat_release: bool,
 }
 
 /// `GET /api/fragments`'s answer, whole: the router passes it on. An
@@ -101,6 +104,9 @@ pub(crate) enum Own {
     Archived,
     Dock,
     Pinned,
+    /// Their yes to its page's use of their microphone: a release chat's is
+    /// their one for every such chat (principal.rs `set_own`).
+    Microphone,
 }
 
 impl Call for SetOwn {

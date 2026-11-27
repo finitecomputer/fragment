@@ -1492,7 +1492,7 @@ impl FragmentCell {
                     }
                     laps.lap("manifest");
                     let (kind, title) = blessed.as_ref().map_or((fragment_proto::FragmentKind::App, None), |m| (m.kind(), m.title()));
-                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None))
+                    Some(crate::members::face(kind, body.title.as_deref().map(str::trim).or(title), None, None, false))
                 }
                 None => None,
             };

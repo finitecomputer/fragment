@@ -1275,6 +1275,7 @@ impl PrincipalCell {
                     archived: false,
                     dock: true,
                     pinned: false,
+                    microphone: false,
                     owned: false,
                     listed: vec![],
                 })

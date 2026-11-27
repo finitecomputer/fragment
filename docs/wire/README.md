@@ -39,6 +39,15 @@ A signer's list of the fragments they hold a role on, and their own view of each
 - Answer: [`FragmentList`](#fragmentlist)
 - Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`, `registry_unavailable`
 
+#### `fragments.microphone`
+
+`PUT /api/fragments/{name}/microphone`: Let a fragment's page use the signer's microphone, or take it back (on a release chat: every such chat).
+
+- Credentials: NIP-98, the shell's session
+- Body: [`SetMicrophone`](#setmicrophone)
+- Answer: [`Microphone`](#microphone)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 404 `not_found`; 500 `schema_refused`; 503 `deploying`
+
 #### `fragments.pin`
 
 `PUT /api/fragments/{name}/pinned`: Pin or unpin a fragment in the signer's sidebar.
@@ -608,6 +617,7 @@ out. A fragment the signer holds a role on: a row of `GET /api/fragments` (and o
 | `dock` | `boolean` | optional | On the signer's dock: their own choice, not the fragment's (`PUT /api/fragments/{name}/dock`), true until they take it off (the shell's dock shows apps and brains, less these and the archived). Left out while true, so a row from before the choice, or from an older platform, reads as on it. |
 | `kind` | [`FragmentKind`](#fragmentkind) | required | What it is, as its live `fragment.json` last said (an app until it has), and its title, its face's (`PUT /api/f/{name}/face`). |
 | `listed` | `array` of [`ListedRecord`](#listedrecord) | optional | What its members are doing, as its channels that declare `listed` last said (each member's newest such record, the newest first, at most `limits::LISTED_POSTERS_MAX`): only those of channels this row's role may read; none when there are none. |
+| `microphone` | `boolean` | optional | The signer lets its page use their microphone: their own yes, asked in the shell once (docs/api.md, "One ask"; `PUT /api/fragments/{name}/microphone`), one for every chat on the release's chat template. Left out while false. |
 | `name` | `string` | required |  |
 | `owned` | `boolean` | optional | An agent's list `for` someone: whether that someone owns it (beside the role the agent acts with there), as no name says any more. |
 | `picture` | `string` or `null` | optional | Its picture, as the address on the platform that serves it: an agent fragment's `avatar.png` at main (its agent's identity's `/api/identities/<npub>/picture?v=…`), any other's icon (`/api/f/<name>/icon?v=…`, docs/api.md, Icons). |
@@ -809,6 +819,15 @@ out. One record whose text matched: where it is, when it was written, and a snip
 | `fragment` | `string` | required |  |
 | `seq` | `integer` | required | The record's place in its channel. |
 | `snippet` | `string` | required |  |
+
+### `Microphone`
+
+out. Its answer: the fragment, and whether its page is lent the microphone now.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `microphone` | `boolean` | required |  |
+| `name` | `string` | required |  |
 
 ### `MoveAt`
 
@@ -1194,6 +1213,14 @@ in. `PUT /api/fragments/{name}/dock`: the signer's own choice of whether their d
 | field | type | | |
 | --- | --- | --- | --- |
 | `dock` | `boolean` | required |  |
+
+### `SetMicrophone`
+
+in. `PUT /api/fragments/{name}/microphone`: the signer's own yes (or its taking back) to a fragment's page using their microphone; on a chat of the release's chat template, their one yes for every such chat.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `microphone` | `boolean` | required |  |
 
 ### `SetPinned`
 
