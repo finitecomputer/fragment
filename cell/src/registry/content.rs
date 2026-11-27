@@ -716,11 +716,13 @@ impl RegistryCell {
 
     /// An operator sets an org's invoiced mark, or changes its prepaid
     /// seats, or clears it: once by its id, in its governance log and the
-    /// operators' log in one change. One that changes nothing writes
-    /// nothing. Clearing it keeps every seat, held or offered: it stops
-    /// new ones. An org a card pays for (a subscription that has not
-    /// ended) is not marked, so its payer keeps its billing.
-    fn mark_invoiced(&self, b: MarkInvoiced) -> CellResult<OrgView> {
+    /// operators' log in one change, so a replay answers the org as it is
+    /// and never undoes a later change. Setting it makes the org's paid
+    /// seats, held or offered (a subscription that ended), comps: its
+    /// seats are all comps while it is set. Clearing it keeps every seat:
+    /// it stops new ones. An org a card pays for (a subscription that has
+    /// not ended) is not marked, so its payer keeps its billing.
+    pub(super) fn mark_invoiced(&self, b: MarkInvoiced) -> CellResult<OrgView> {
         let request = client_request("invoiced", &b.set.id)?;
         let org = self.content_org(&b.org)?;
         let seats = match (b.set.invoiced, b.set.seats) {
@@ -730,52 +732,70 @@ impl RegistryCell {
             }
             (_, seats) => seats,
         };
-        if b.set.invoiced {
-            let sub = self.org_sub(&org.id)?.ok_or_else(|| not_found(format!("no org {}", org.id)))?;
-            let live = sub.subscription.is_some() && sub.status.as_deref().and_then(fragment_core::org::Status::parse).is_none_or(|s| !s.is_ended());
-            if live {
-                return Err(conflict(format!("{} pays by card: cancel its subscription first, then mark it invoiced", org.name)));
-            }
-        }
-        let (on, operator, id) = (b.set.invoiced, b.operator, org.id.clone());
-        let wrote = self.atomically(move |tx| {
+        let (on, operator, id, name) = (b.set.invoiced, b.operator, org.id.clone(), org.name.clone());
+        let comped = self.atomically(move |tx| {
             let (action, detail) = match on {
                 true => (INVOICED, json!({ "seats": seats })),
                 false => (INVOICED_CLEARED, json!({})),
             };
-            // a replay: the same change by the same operator
+            // a replay: the same change by the same operator, answered as the org is now
             if let Some(e) = tx.governed(&id, &request)? {
                 let same = e.action == action && e.actor == operator && crate::json_text::<Value>(&e.detail).ok().as_ref() == Some(&detail);
                 return match same {
-                    true => Ok(false),
+                    true => Ok(vec![]),
                     false => Err(CellError::new(ErrorCode::ConflictingBody, "this id was used for another change")),
                 };
             }
-            let now_is = tx.row::<MarkRow>(MARK_SQL, vec![id.as_str().into()])?.map_or(Ok(None), MarkRow::mark)?;
-            let unchanged = match (now_is, on) {
-                (None, false) => true,
-                (Some(m), true) => m.seats == seats,
-                _ => false,
-            };
-            if unchanged {
-                return Ok(false);
+            if on {
+                #[derive(Deserialize)]
+                struct Sub {
+                    subscription: Option<String>,
+                    status: Option<String>,
+                }
+                let sub = tx.row::<Sub>("SELECT subscription, status FROM orgs WHERE id = ?", vec![id.as_str().into()])?.ok_or_else(|| not_found(format!("no org {id}")))?;
+                let live = sub.subscription.is_some() && sub.status.as_deref().and_then(fragment_core::org::Status::parse).is_none_or(|s| !s.is_ended());
+                if live {
+                    return Err(conflict(format!("{name} pays by card: cancel its subscription first, then mark it invoiced")));
+                }
             }
             let now = js::now_ms();
             tx.govern(&id, Logged { request: &request, actor: &operator, action, subject: None, detail }, now)?;
+            #[derive(Deserialize)]
+            struct Held {
+                person: Option<String>,
+            }
+            // its paid seats (its subscription ended) are comps from now,
+            // their holders' plans pushed; bounded: an org's seats
+            let comped: Vec<Held> = match on {
+                true => tx.rows("UPDATE org_members SET comped = 1 WHERE org = ? AND seat IS NOT NULL AND comped = 0 RETURNING person", vec![id.as_str().into()])?,
+                false => vec![],
+            };
+            let people: Vec<String> = comped.iter().filter_map(|h| h.person.clone()).collect();
+            for p in &people {
+                tx.exec(
+                    "INSERT INTO plan_syncs (person, since, due, tries) VALUES (?, ?, ?, 0)
+                     ON CONFLICT (person) DO UPDATE SET since = excluded.since, due = excluded.due, tries = 0",
+                    vec![p.as_str().into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(now)],
+                )?;
+            }
             let said = match (on, seats) {
                 (true, Some(n)) => format!("{n} prepaid seats"),
                 (true, None) => "no seat cap".to_string(),
                 (false, _) => "cleared: its seats stay".to_string(),
+            };
+            let said = match comped.len() {
+                0 => said,
+                n => format!("{said}; {n} paid seats made comps"),
             };
             // the operators' log too, in the same change
             tx.exec(
                 "INSERT INTO admin_log (at, operator, action, target, detail) VALUES (?, ?, 'org-invoiced', ?, ?)",
                 vec![SqlStorageValue::Integer(now), operator.as_str().into(), id.as_str().into(), said.into()],
             )?;
-            Ok(true)
+            Ok(people)
         })?;
-        // a replay answers the org as it is now, whatever changed it since
-        assert!(!wrote || self.invoiced(&org.id)?.is_some() == on, "an org's invoiced mark is what its operator just set");
+        // their seats changed: what the registry tells them of it has
+        self.tell_after(comped);
         self.org_of(super::orgs::OrgOf { by: None, org: Some(org.id) })
     }
 
@@ -823,7 +843,6 @@ impl RegistryCell {
             StepDown::PATH => reply::<StepDown>(body(bytes).and_then(|b| self.step_down(b))),
             ContentOf::PATH => reply::<ContentOf>(body(bytes).and_then(|b| self.content_of(b))),
             NominatePayer::PATH => reply::<NominatePayer>(body(bytes).and_then(|b| self.nominate_payer(b))),
-            MarkInvoiced::PATH => reply::<MarkInvoiced>(body(bytes).and_then(|b| self.mark_invoiced(b))),
             _ => return None,
         })
     }

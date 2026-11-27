@@ -366,7 +366,8 @@ impl RegistryCell {
     fn remove_seat(&self, b: RemoveSeat) -> CellResult<OrgMember> {
         let (m, invoiced) = self.admins_seat(&b.by, &b.seat)?;
         let who = self.person_by(&b.by)?;
-        if self.payers_own(&m, &who.id)? {
+        // paid by invoice, no card pays for it: no one's seat is a payer's
+        if !invoiced && self.payers_own(&m, &who.id)? {
             return Err(CellError::new(ErrorCode::Forbidden, format!("{} pays for this org: their seat is theirs to give up", m.email)).because(Reason::PayerOnly));
         }
         // an org paid by invoice has no live subscription (content.rs

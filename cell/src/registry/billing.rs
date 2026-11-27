@@ -390,6 +390,12 @@ impl RegistryCell {
     pub(super) fn apply_subscription_copy(&self, org: &str, s: &SubscriptionCopy, at: Option<i64>) -> CellResult<bool> {
         let Some(row) = self.billing_row(org)? else { return Ok(false) };
         let status = Status::parse(&s.status).ok_or_else(|| CellError::invalid(format!("a subscription's status is Stripe's, not {:?}", s.status)))?;
+        // an org paid by invoice takes no card's subscription, not even one
+        // a Checkout opened before its mark made: that Checkout is a stray,
+        // canceled at once (`apply_checkout`); its own, ended, is still kept
+        if row.subscription.as_deref() != Some(s.id.as_str()) && self.invoiced(org)?.is_some() {
+            return Ok(false);
+        }
         match row.subscription.as_deref() {
             // an org with none takes only one that pays: a late event of one
             // canceled and forgotten (its payer went) never comes back

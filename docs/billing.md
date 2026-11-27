@@ -97,18 +97,22 @@ in the operators' log, as `payer-named` is (registry/content.rs
 - each seat its admins add, offered or given, is a comp, outside Stripe:
   free, its holder's plan pushed as any comp's. Its admins remove one,
   which ends the comp;
-- with prepaid seats named, its seats, held or offered, never pass them
-  (`prepaid_seats_taken`: "Your org's prepaid seats are all taken. Ask
-  Finite for more."). An operator's own comp is not held to them;
-- no card starts paying for it: a Checkout of its admins' is refused, as
-  any paying org's is;
-- Billing says "Paid by invoice" to its admins and seats' holders, and
-  shows no price, card or portal.
+- with prepaid seats named, its admins add none past them, held or
+  offered (`prepaid_seats_taken`: "Your org's prepaid seats are all taken.
+  Ask Finite for more."). An operator's own comp is not held to them, and
+  lowering them keeps the seats it has;
+- no card pays for it: a Checkout of its admins' is refused, as any paying
+  org's is, and one opened before the mark is a stray once paid (it seats
+  no one, and its subscription is canceled at once);
+- it has no payer, and Billing says "Paid by invoice" to its admins and
+  seats' holders, with no price, card, credit pack or portal.
 
 An org whose subscription has not ended is not marked (cancel it first),
-so a card never pays for an org its Billing says is invoiced. Clearing the
-mark keeps every seat, held or offered: it stops new ones, and the
-operator is told so. Staff invoice its seats by hand (the admin's org view
+so a card never pays for an org its Billing says is invoiced. Marking one
+whose subscription ended makes its paid seats, held or offered, comps.
+Clearing the mark keeps every seat, held or offered: it stops new ones,
+and the operator is told so. Each change is kept by its id, one that
+changed nothing too, so a retry never undoes a later one. Staff invoice its seats by hand (the admin's org view
 counts them); Stripe's invoiced subscriptions (FIN-824's option a) are not
 in v1. An org ever marked is never dropped (`has_content`), as one
 credited is.

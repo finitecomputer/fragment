@@ -491,21 +491,26 @@ impl RegistryCell {
                             (false, Some(Status::Trialing)) => self.trial_end_of(&o.id)?,
                             _ => None,
                         };
-                        let invoiced = self.invoiced(&o.id)?.is_some();
-                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0, trial_ends, invoiced })
+                        Some(SeatView { id: m.id.clone(), org: o.reference(), kind, comped: held.comped, good: held.good(), sleeps: held.sleeps, admin: m.admin != 0, trial_ends })
                     }
                     None => None,
                 };
                 (seat, Some(o.reference()), m.admin != 0)
             }
         };
+        // paid by invoice, no card pays for it: its old payer (a
+        // subscription that ended) opens nothing of its billing
+        let invoiced = match &m {
+            Some(m) => self.invoiced(&m.org)?.is_some(),
+            None => false,
+        };
         let pays = match &m {
-            Some(m) => self.payer_of(&m.org)?.as_deref() == Some(person),
+            Some(m) => !invoiced && self.payer_of(&m.org)?.as_deref() == Some(person),
             None => false,
         };
         // every offer to an email of theirs, an admin's place alone too:
         // nothing of one is theirs until they accept it
-        Ok(MySeat { seat, org: org_ref, admin, pays, offered: self.offers_to(person)? })
+        Ok(MySeat { seat, org: org_ref, admin, pays, offered: self.offers_to(person)?, invoiced })
     }
 
     fn sleeps(&self, b: Sleeps) -> CellResult<MySeat> {
@@ -546,8 +551,12 @@ impl RegistryCell {
             vec![org_row.id.as_str().into()],
         )?;
         let members = rows.into_iter().map(|r| r.m.wire(r.latest)).collect::<CellResult<Vec<_>>>()?;
-        let payer = self.payer_of(&org_row.id)?;
         let invoiced = self.invoiced(&org_row.id)?;
+        // paid by invoice, no card pays for it: no one is its payer
+        let payer = match invoiced {
+            Some(_) => None,
+            None => self.payer_of(&org_row.id)?,
+        };
         Ok(OrgView { id: org_row.id, name: org_row.name, created_at: org_row.created_at, members, payer, invoiced })
     }
 
@@ -665,6 +674,8 @@ impl RegistryCell {
             CompSeatCall::PATH => reply::<CompSeatCall>(self.armed(|| self.comp_seat(body(bytes)?)).await),
             CompKind::PATH => reply::<CompKind>(self.armed(|| self.comp_kind(body(bytes)?)).await),
             EndComp::PATH => reply::<EndComp>(self.armed(|| self.end_comp(body(bytes)?)).await),
+            // its paid seats made comps push their holders' plans (content.rs)
+            super::content::MarkInvoiced::PATH => reply::<super::content::MarkInvoiced>(self.armed(|| self.mark_invoiced(body(bytes)?)).await),
             Mine::PATH => reply::<Mine>(body(bytes).and_then(|b| self.mine(b))),
             Sleeps::PATH => reply::<Sleeps>(self.armed(|| self.sleeps(body(bytes)?)).await),
             OrgOf::PATH => reply::<OrgOf>(body(bytes).and_then(|b| self.org_of(b))),

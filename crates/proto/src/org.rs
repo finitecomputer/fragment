@@ -79,9 +79,6 @@ pub struct SeatView {
     /// While its org's subscription is a trial: when it ends (seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trial_ends: Option<i64>,
-    /// Its org pays Finite by invoice (an operator's mark, `Invoiced`).
-    #[serde(default)]
-    pub invoiced: bool,
 }
 
 /// An offer to a person: an org named an email of theirs for a seat, an
@@ -119,6 +116,10 @@ pub struct MySeat {
     #[serde(default)]
     pub pays: bool,
     pub offered: Vec<OfferedSeat>,
+    /// Their org pays Finite by invoice (an operator's mark, `Invoiced`):
+    /// its seats are comps, and no card pays for it.
+    #[serde(default)]
+    pub invoiced: bool,
 }
 
 /// `GET /api/seat`'s answer: `MySeat`, whether they are a guest
@@ -178,7 +179,8 @@ pub struct OrgView {
     pub created_at: i64,
     pub members: Vec<OrgMember>,
     /// Who pays: the person whose Checkout made its subscription (`None`:
-    /// comped only, or never paid). Only they step down as its admin.
+    /// comped only, never paid, or paid by invoice). Only they step down
+    /// as its admin.
     #[serde(default)]
     pub payer: Option<String>,
     /// It pays Finite by invoice (`None`: it does not).

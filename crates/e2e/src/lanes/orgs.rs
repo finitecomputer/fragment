@@ -350,7 +350,7 @@ fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
     let row = listed.body["orgs"].as_array().into_iter().flatten().find(|o| o["id"] == org.as_str()).cloned().unwrap_or(Value::Null);
     s.ok(
         "its admin's view of it, their own seat and the operators' list say it is paid by invoice",
-        view.body["invoiced"]["seats"] == 2 && mine.body["seat"]["invoiced"] == true && mine.body["seat"]["comped"] == true && row["invoiced"]["seats"] == 2,
+        view.body["invoiced"]["seats"] == 2 && mine.body["invoiced"] == true && mine.body["seat"]["comped"] == true && row["invoiced"]["seats"] == 2,
         json!([view.body, mine.body, row]),
     );
 
@@ -387,7 +387,7 @@ fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
             && accepted.body["seat"]["id"] == seat.as_str()
             && accepted.body["seat"]["comped"] == true
             && accepted.body["seat"]["good"] == true
-            && accepted.body["seat"]["invoiced"] == true
+            && accepted.body["invoiced"] == true
             && pushed,
         json!([accepted.body, ledger(api, &dana)]),
     );
@@ -428,22 +428,26 @@ fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
             && yes.status == 200
             && yes.body["seat"]["org"]["id"] == org.as_str()
             && yes.body["seat"]["comped"] == true
-            && yes.body["seat"]["invoiced"] == true,
+            && yes.body["invoiced"] == true,
         json!([theirs.body, into.body, before.body, yes.body]),
     );
 
-    // ---- its seats changed, then the mark cleared: its seats stay
-    let raised = mark(json!({ "id": fresh(), "invoiced": true }))?;
+    // ---- its seats changed, then the mark cleared: its seats stay. Each
+    // change is kept by its id, one that changed nothing too, so a late
+    // retry of one answers the org as it is and undoes nothing after it
+    let raise = fresh();
+    let raised = mark(json!({ "id": raise, "invoiced": true }))?;
     let uncapped = add(&email("inv-g"))?;
     let cleared = mark(json!({ "id": fresh(), "invoiced": false }))?;
     let twice = mark(json!({ "id": fresh(), "invoiced": false }))?;
+    let late = mark(json!({ "id": raise, "invoiced": true }))?;
     let kept = api.signed(&admin, "GET", "/api/org", None)?;
     let seats = kept.body["members"].as_array().map_or(0, |m| m.iter().filter(|m| m["seat"].is_string()).count());
     let refused = add(&email("inv-h"))?;
     let content = api.signed(&operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
     let clears = content.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == "invoiced-cleared").count();
     s.ok(
-        "its seats uncapped, its admin offers past two; cleared (once logged, again a no-op), its seats stay, held and offered, and its admin offers no more (400 org_not_paying)",
+        "its seats uncapped, its admin offers past two; cleared (and again, each kept by its id), its seats stay, held and offered, a late retry of the uncapping restores nothing, and its admin offers no more (400 org_not_paying)",
         raised.status == 200
             && raised.body["invoiced"].is_object()
             && raised.body["invoiced"]["seats"].is_null()
@@ -451,14 +455,16 @@ fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
             && cleared.status == 200
             && cleared.body["invoiced"].is_null()
             && twice.status == 200
-            && clears == 1
+            && late.status == 200
+            && late.body["invoiced"].is_null()
+            && clears == 2
             && seats == 3
             && refused.status == 400
             && refused.body["reason"] == "org_not_paying",
-        json!({ "raised": raised.body, "uncapped": uncapped.body, "cleared": cleared.body, "kept": kept.body, "refused": refused.body, "clears": clears }),
+        json!({ "raised": raised.body, "uncapped": uncapped.body, "cleared": cleared.body, "late": late.body, "kept": kept.body, "refused": refused.body, "clears": clears }),
     );
     let theirs_still = api.signed(&moved, "GET", "/api/seat", None)?;
-    s.ok("a seat held when it was cleared is a comp still, good", theirs_still.body["seat"]["good"] == true && theirs_still.body["seat"]["invoiced"] == false, &theirs_still);
+    s.ok("a seat held when it was cleared is a comp still, good", theirs_still.body["seat"]["good"] == true && theirs_still.body["seat"]["comped"] == true && theirs_still.body["invoiced"] == false, &theirs_still);
 
     // ---- invalid
     let stranger = api.person()?;

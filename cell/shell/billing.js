@@ -227,6 +227,11 @@ export function seatOffer(helpers, mine, trial, top) {
     seat.append(el("p", null, `You are in ${mine.org.name}: its admins give you a seat.`));
     return [seat];
   }
+  // paid by invoice, no card pays for it: its admin gives themselves one
+  if (mine.org && mine.invoiced) {
+    seat.append(el("p", null, `${mine.org.name} pays Finite by invoice: add a seat for yourself in Settings, under your org.`));
+    return [seat];
+  }
   const said = el("p", "form-error");
   said.setAttribute("role", "alert");
   said.hidden = true;
@@ -346,7 +351,7 @@ export async function billingSections(helpers, ledger, mine, back) {
   const alone = org?.members?.length === 1;
   const seat = mine.seat;
   if (seat) {
-    const kind = KIND[seat.kind] + (seat.invoiced ? `, ${BY_INVOICE.toLowerCase()}` : seat.comped ? " (given)" : seat.kind === offer?.kind ? `, ${price(offer.seatMicros)} a month` : "");
+    const kind = KIND[seat.kind] + (mine.invoiced ? `, ${BY_INVOICE.toLowerCase()}` : seat.comped ? " (given)" : seat.kind === offer?.kind ? `, ${price(offer.seatMicros)} a month` : "");
     billing.append(line("Seat", kind));
     // a seat's holder who is no admin leaves by their own yes, as they joined
     const leave = seat.admin
@@ -402,12 +407,15 @@ export async function billingSections(helpers, ledger, mine, back) {
       billing.append(label);
     }
   } else if (mine.guest) {
-    billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${seatGives(offer)}`));
+    // paid by invoice, no card buys theirs: its admin gives themselves one
+    const invoiced = mine.invoiced && mine.admin;
+    const gives = invoiced ? `Your org pays Finite by invoice: add a seat for yourself under its seats.` : seatGives(offer);
+    billing.append(el("p", "muted", `You are a guest: you see and edit what is shared with you. ${gives}`));
     // the seats and a trial code are the welcome's, as a new person's are;
     // or the account a seat of theirs waits under (who is signed in, said)
     const get = el("a", "quiet", "Get a seat");
     get.href = "/welcome";
-    const ways = actionLine("Seat", ...(offer ? [get] : []), h.switchForm("/settings"));
+    const ways = actionLine("Seat", ...(offer && !invoiced ? [get] : []), h.switchForm("/settings"));
     ways.classList.add("settings-stack");
     billing.append(h.noSeatSaid(), ways);
   } else {
@@ -431,8 +439,9 @@ export async function billingSections(helpers, ledger, mine, back) {
   // credit is a seat's (or a plan the deployment gives): a guest pays for
   // nothing, so has none to show
   if (ledger && !mine.guest) {
+    // credit by card is no part of an org paid by invoice: Finite credits it
     const topUp =
-      offer && seat?.good
+      offer && seat?.good && !mine.invoiced
         ? button(`Buy ${price(offer.packMicros)} of credit`, async () => location.assign((await h.api("POST", "/api/billing/packs", {})).url), (e) =>
             plainly(e, { no_seat: "Credit is for a seat's holder, and you don't hold one now. Open Settings again to see why." }, CHECKOUT_FAILED),
           )
@@ -474,7 +483,7 @@ export async function billingSections(helpers, ledger, mine, back) {
   const trial = !!seat?.trialEnds;
   if (!alone) return org ? [billing, orgSection(org, offer, mine.pays, trial)] : [billing];
   // an admin alone adds seats for others: where something is sold, or by invoice
-  const invoiced = !!org?.invoiced;
+  const invoiced = !!org?.invoiced || mine.invoiced;
   if (!offer && !invoiced) return [billing];
   const more = el("div", "settings-actions");
   const others = el("button", "quiet", "Add seats for others");
