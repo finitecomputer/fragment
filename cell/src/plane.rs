@@ -1155,6 +1155,9 @@ impl FragmentCell {
         self.same_life(life, "while its ledger was asked")?;
 
         let who = self.caller_id(caller)?;
+        if write {
+            self.stamp_others(caller)?;
+        }
         // its template still to land: its seed lands it first (`repo_ready`),
         // so the token's holder reads and pushes on top of it
         let repo = self.repo_ready().await?;

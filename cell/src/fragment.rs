@@ -554,6 +554,11 @@ pub(crate) enum MetaKey {
     /// When its last icon makings started (ms, a JSON array, oldest
     /// first): the hour's are counted (`fragment_core::icon::admit`).
     IconMakings,
+    /// Set once someone whose ask was not its owner's wrote its code, or
+    /// was given a token that writes it (`stamp_others`): its code is then
+    /// no longer its owner's alone, so it reads none of their other apps
+    /// (`job.read`, FIN-615 PR 16b), even once no one else is in it.
+    OthersWrote,
 }
 
 impl MetaKey {
@@ -640,6 +645,7 @@ impl MetaKey {
             MetaKey::TestConnectors => "test_connectors",
             MetaKey::Icon => "icon",
             MetaKey::IconMakings => "icon_makings",
+            MetaKey::OthersWrote => "others_wrote",
         }
     }
 
@@ -1060,6 +1066,23 @@ impl FragmentCell {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
+    /// Before `caller` writes its code (`POST /api/files`, a token that
+    /// writes its repo): unless their ask is its owner's (its owner, or
+    /// their own agent for them or as itself), its code is no longer its
+    /// owner's alone (`MetaKey::OthersWrote`, kept for good).
+    pub(crate) fn stamp_others(&self, caller: &Caller) -> CellResult<()> {
+        // one with no owner reads no one's apps (`job.read`)
+        let Some(owner) = self.meta(MetaKey::Owner)?.map(|o| npub::display(&o)) else { return Ok(()) };
+        let owners = caller.signed.as_ref().is_some_and(|s| match s.acting_for.as_deref() {
+            Some(asker) => npub::display(asker) == owner,
+            None => npub::display(&s.id) == owner || s.owner.as_deref().is_some_and(|o| npub::display(o) == owner),
+        });
+        if owners {
+            return Ok(());
+        }
+        self.set_meta(MetaKey::OthersWrote, "1")
+    }
+
     /// Its schema made current, else refused; and one from before
     /// `Sharing.reach` tells its owner's row once (reach.rs), which fails
     /// no request.
@@ -1330,12 +1353,12 @@ impl FragmentCell {
             (Method::Post, ["api", "ops", op]) => {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
-                self.api_op(&caller, &op, body).await
+                self.api_op(&caller, &op, body, false).await
             }
             (Method::Post, ["api", "reads", op]) => {
                 let body = body_json(&mut req).await?;
                 let op = op.to_string();
-                self.api_read(&caller, &op, body).await
+                self.api_op(&caller, &op, body, true).await
             }
             (Method::Put, ["api", "blobs", sha]) => {
                 let sha = sha.to_string();

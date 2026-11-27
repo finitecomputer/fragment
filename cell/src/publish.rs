@@ -339,6 +339,7 @@ impl FragmentCell {
         // let in to this life: one ended while its ledger was asked is not its
         self.same_life(life, "while its ledger was asked")?;
         let who = self.caller_id(caller)?.to_string();
+        self.stamp_others(caller)?;
         let files = body["files"].as_array().filter(|f| !f.is_empty()).ok_or_else(|| CellError::invalid("files: a list of {path, text | base64 | delete}"))?;
         let mut writes = Vec::with_capacity(files.len());
         for f in files {

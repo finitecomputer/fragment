@@ -1027,21 +1027,24 @@ impl FragmentCell {
     }
 
     /// `job.read(fragment, op, input)` (FIN-615, PR 16b): `fragment`'s query
-    /// `op`, asked as this app's viewer, and only where that is its owner
-    /// (whose call started the run, or their own agent's for them) while the
-    /// app is theirs alone (`Sharing::only_you`): no one else reads it or
-    /// changes its code, so nothing it reads goes past its owner (SHIP IT,
-    /// 2026-11-26; anyone else's view waits on the one ask, PR 10). The
-    /// fragment read decides what its owner may read there, and answers a
-    /// query alone (`api_read`). Its `result`; a refusal fails the step.
+    /// `op`, asked as this app's viewer, and only where that is its owner in
+    /// person (whose own call started the run: an agent's is capped where
+    /// it reads, so it reads as itself) while the app is theirs alone: no
+    /// one else in it (`Sharing::only_you`), and its code never written at
+    /// anyone else's ask (`MetaKey::OthersWrote`). So no one else's code
+    /// reads their things, and no one else sees what it read while it stays
+    /// so (SHIP IT, 2026-11-26; anyone else's view waits on the one ask, PR
+    /// 10). The fragment read decides what its owner may read there, and
+    /// answers a query alone (`api_op`'s `reads`). Its `result`; a refusal
+    /// fails the step.
     async fn step_read(&self, run: &RunRow, index: u32, fragment: &str, op: &str, input: Value) -> Result<Value, StepFail> {
         let retry = |e: CellError| StepFail::Retry(e.message);
         if !fragment_proto::valid_fragment_name(fragment) || !fragment_proto::valid_op_name(op) {
             return Err(permanent("job.read names a fragment (label--suffix) and one of its queries"));
         }
         let owner = self.must(MetaKey::Owner).map_err(retry)?;
-        let viewer = run.acting_for().unwrap_or(&run.principal);
-        if npub::display(viewer) != npub::display(&owner) || !self.sharing_counts().map_err(retry)?.only_you() {
+        let in_person = run.acting_for().is_none() && npub::display(&run.principal) == npub::display(&owner);
+        if !in_person || self.meta(MetaKey::OthersWrote).map_err(retry)?.is_some() || !self.sharing_counts().map_err(retry)?.only_you() {
             return Err(permanent("This app can read your other apps only while it's yours alone."));
         }
         let cfg = &self.cfg;

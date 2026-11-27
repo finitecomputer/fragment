@@ -514,7 +514,8 @@ export class App extends DurableObject {
   (`write(path, content, {expect: sha})` compares and swaps),
   `job.push(who, payload)`, `job.ai.text|decide|image|video(...)`,
   `job.read(fragment, query, input)` (another of your apps' query, read as
-  you, only while this app is yours alone: no one else in it, no link). A step that
+  you when you started the run, only while this app is yours alone: no one
+  else in it, no link, and no one else ever wrote its code). A step that
   may pass later (429, 5xx, timeout) is retried with backoff; one that
   cannot throws a `StepError` you may catch. A job that throws is
   **held** until someone replays it.
