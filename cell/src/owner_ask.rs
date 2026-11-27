@@ -71,14 +71,13 @@ fn no_chat(whom: &str) -> String {
     format!("This needs {whom} to confirm it in a chat: ask there.")
 }
 
-/// A turn of the agent's, as `ask_for` reads one.
+/// A turn of the agent's a place opened, as `ask_for` reads one.
 #[derive(Deserialize)]
 struct OpenTurn {
     turn: String,
     place: String,
     asker: String,
     mandate: Option<String>,
-    until: i64,
 }
 
 /// A card of the platform's here, as `ask_answered` reads it.
@@ -144,9 +143,11 @@ impl FragmentCell {
     pub(crate) async fn ask_for(&self, a: AskFor) -> CellResult<Option<String>> {
         self.created()?;
         let now = js::now_ms();
+        // the turns its places opened, open now (runs_on.rs `turns_in`): a
+        // place's word on whose ask each is, never its computer's
         let rows: Vec<OpenTurn> = self.typed(
-            "SELECT turn, place, asker, mandate, until FROM turns WHERE at >= ? ORDER BY at DESC LIMIT ?",
-            vec![SqlStorageValue::Integer(now - limits::TURN_HELD_MS), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
+            "SELECT turn, place, asker, mandate FROM turns WHERE life = ? AND until > ? ORDER BY at DESC LIMIT ?",
+            vec![crate::runs_on::PLACE_OPENED.into(), SqlStorageValue::Integer(now), SqlStorageValue::Integer(limits::TURNS_HELD_MAX)],
         )?;
         let agent = self.must(MetaKey::AgentIdentity)?;
         let asker = match &a.asker {
@@ -171,7 +172,7 @@ impl FragmentCell {
         for r in rows.iter().filter(|r| npub::display(&r.asker) == asker) {
             if let Some(lent) = lent {
                 // a lend is kept where the ask's mandate was made, and asked there
-                let Some(key) = r.mandate.as_deref().filter(|_| r.until >= now).and_then(mandate::place_of) else { continue };
+                let Some(key) = r.mandate.as_deref().filter(|m| mandate::until_of(m).is_some_and(|u| u >= now)).and_then(mandate::place_of) else { continue };
                 let here = crate::fragment::call(&self.env, &r.place, &LendOf { agent: agent.clone(), place: key.to_string(), asker: r.asker.clone(), request: None }).await;
                 if lent.in_lend(here.unwrap_or(Lend::NONE)) {
                     continue;

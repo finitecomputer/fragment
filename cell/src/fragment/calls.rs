@@ -225,6 +225,36 @@ impl Call for AgentMade {
     type Answer = ();
 }
 
+/// The turns place `place` (a fragment's name) holds open for agent
+/// `agent`, this agent fragment's (runs_on.rs `turns_in`): all of them,
+/// one for each asker whose ask of it there is open, as the place's own
+/// records say (asks.rs), its `version` of them. Whose ask a turn is is
+/// the place's to say, never the agent's computer's (FIN-720). An older
+/// version than the one held changes nothing.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct TurnsIn {
+    pub agent: String,
+    pub place: String,
+    pub version: i64,
+    pub turns: Vec<PlaceTurn>,
+}
+
+/// One asker's open ask of an agent in its place: the newest of its
+/// turns, the place's mandate for it (none for an agent's own words,
+/// which nothing proves), until when it holds.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PlaceTurn {
+    pub turn: String,
+    pub asker: String,
+    pub mandate: Option<String>,
+    pub until: i64,
+}
+
+impl Call for TurnsIn {
+    const PATH: &'static str = "/call/turns-in";
+    type Answer = ();
+}
+
 /// Agent `identity`, this agent fragment's, was added to `fragment`, its
 /// membership made at `at` (runs_on.rs `flush_joined`): when it runs on a
 /// computer, its `tasks` say so (once by the membership: a retry posts

@@ -2317,7 +2317,7 @@ export function mount(root) {
     const late = !t && !readying && state.pending && Date.now() - Math.max(state.pending.since, state.readyAt) >= PENDING_MS;
     const said = t ? `${name} is working${forWhom}`
       : phase === "wont_wake" ? `${name}'s computer could not start. Open the computer settings to restart it.`
-      : late ? `${name} has not started a reply yet.`
+      : late ? `${name} hasn't picked this up yet.`
       : readying || phase === "asleep" ? `${name} is getting ready…`
       : present ? `Waiting for ${name} to start a reply…` : `Waiting for ${name}…`;
     const key = `w:${t ? t.key : "pending"}`;

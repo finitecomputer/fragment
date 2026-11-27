@@ -126,7 +126,8 @@ pub const FRAGMENT: Class = Class {
         step!("ended_doors", "fragment/0013_ended_doors.sql"),
         step!("trigger_kinds", "fragment/0014_trigger_kinds.sql"),
         step!("askers", "fragment/0015_askers.sql"),
-        step!("owner_ask", "fragment/0016_owner_ask.sql"),
+        step!("asks", "fragment/0016_asks.sql"),
+        step!("owner_ask", "fragment/0017_owner_ask.sql"),
     ],
     variants: &[Variant {
         name: "members",

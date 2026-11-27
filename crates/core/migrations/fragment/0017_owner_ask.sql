@@ -1,4 +1,4 @@
--- Fragment, step 16: one ask (FIN-615; docs/api.md, "One ask"). The cards
+-- Fragment, step 17: one ask (FIN-615; docs/api.md, "One ask"). The cards
 -- the platform asked here (`owner_asks`): each its record on `work`, its agent,
 -- whose ask it is and whom it asks, what (`spend`, `accounts`, `delete`,
 -- `cap`), what about (a lend's place, a dangerous action's fragment and
