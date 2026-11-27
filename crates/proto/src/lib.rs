@@ -3087,7 +3087,7 @@ mod tests {
         // the microphone, as pinned: left out while not lent
         let lent = ListedFragment { microphone: true, ..read.clone() };
         assert_eq!(value(&lent), serde_json::json!({ "name": "notes-k3x9", "role": "viewer", "kind": "app", "microphone": true }));
-        assert_eq!(serde_json::from_value::<ListedFragment>(value(&read)).unwrap().microphone, false);
+        assert!(!serde_json::from_value::<ListedFragment>(value(&read)).unwrap().microphone);
         assert_eq!(value(&SetMicrophone { microphone: true }), serde_json::json!({ "microphone": true }));
         assert!(serde_json::from_value::<SetMicrophone>(serde_json::json!({ "microphone": "yes" })).is_err());
         assert_eq!(value(&SetDock { dock: false }), serde_json::json!({ "dock": false }));
