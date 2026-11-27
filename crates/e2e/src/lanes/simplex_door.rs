@@ -522,6 +522,28 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         json!({ "closed": closed, "turns": turns, "mirrorsOnWork": mirrored }),
     );
 
+    // what its door asks before a way back stops it (the review of
+    // 354324b90): its connector, quiet, says so; a reply its mirror holds
+    // (paused, so its run waits blocked) makes it busy, naming that run,
+    // until it has gone; a question unsigned is refused
+    let quiet = || lever(api, &door, "quiet", json!({})).map(|v| v["busy"].clone()).unwrap_or_else(|e| json!(e.to_string()));
+    let idle = s.eventually(a.wake, || quiet().is_null());
+    let pause = |on: bool| api.signed(owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "mirror", "paused": on })));
+    ensure!(pause(true)?.status == 200, "pausing its mirror");
+    deliver(api, &door, "sx-e2e-quiet", "are you quiet")?;
+    let blocked_run = || api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=mirror&status=blocked&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64());
+    let blocked = s.eventually(a.wake, || blocked_run().is_some());
+    let busy = quiet();
+    ensure!(pause(false)?.status == 200, "unpausing its mirror");
+    let replayed = api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": blocked_run().unwrap_or(0) })))?;
+    let again = s.eventually(a.wake, || quiet().is_null());
+    let unsigned = api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox/quiet", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), ..Call::default() })?;
+    s.ok(
+        "its connector tells its door whether anything is on its way: quiet, then busy while its agent's reply waits in a blocked mirror run (named), quiet once that run went; an unsigned question is refused",
+        idle && blocked && busy.as_str().is_some_and(|b| b.contains("has a mirror run blocked")) && replayed.status == 200 && again && unsigned.status == 403,
+        json!({ "busy": busy, "replayed": replayed.status, "unsigned": unsigned.status }),
+    );
+
     // a delivery without the inbox's secret, from anyone, starts nothing
     let url = format!("{}/api/f/{name}/inbox", api.base);
     let forged = api.call(Call { method: "POST", url, body: Some(json!({ "payload": { "id": "sx-forged", "kind": "text", "text": "forged", "at": "2026-11-21T00:00:00Z" } }).to_string().into_bytes()), content_type: Some("application/json"), extra: vec![("x-simplex-door-secret", "not-the-secret".into())], ..Call::default() })?;

@@ -213,6 +213,9 @@ mod tests {
         for name in ["TURN_IDLE_MS_MAX", "PROMPT_TTL_MS_DEFAULT"] {
             assert_eq!(constant(&shell, "const", name, " = "), constant(&bridge, "pub const", name, ": u64 = "), "the shell's {name} is the bridge's");
         }
+        // and the cell's, whose inbox says whether a member is at work in it
+        let jobs = std::fs::read_to_string(root.join("cell/src/jobs.rs")).expect("the cell's jobs read");
+        assert_eq!(constant(&jobs, "const", "TURN_IDLE_MS_MAX", ": i64 = "), constant(&bridge, "pub const", "TURN_IDLE_MS_MAX", ": u64 = "), "the cell's TURN_IDLE_MS_MAX is the bridge's");
         let settings = std::fs::read_to_string(root.join("cell/shell/agent-settings.js")).expect("the shell's agent settings read");
         let computer = std::fs::read_to_string(root.join("cell/src/computer.rs")).expect("the cell's computer reads");
         assert_eq!(constant(&settings, "const", "ROLE_MAX_CHARS", " = "), fragment_proto::limits::ROLE_MAX_CHARS as i64);

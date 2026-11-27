@@ -491,24 +491,34 @@ export class SimplexDoor extends DurableObject {
     // a start under way sees the stop before it launches, or launched
     if (this.#starting) await this.#starting.catch(() => {});
     const c = this.ctx.container;
-    if (c?.running) {
+    // its owner's messages its inbox has yet to take, or a file its runner
+    // gave that no delivery names yet (taken as it stopped: Codex's round on
+    // f434be3bb); and, its runner running, anything on its way through its
+    // connector: busy, its runner running on (again), which delivers it. Its
+    // check and its stop are one ask, as its computer's handover is: fenced,
+    // its runner keeps each new message (`#deliver`), so none comes to its
+    // connector between them (the review of 354324b90)
+    const busy = async () => {
+      await this.#drain();
+      if (ended()) return null;
+      const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
+      const given = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner = 'given'").one().n;
+      if (unsent > 0 || given > 0) return `${unsent} of its owner's messages, and ${given} of their files, still go to its connector: ask again in a moment`;
+      return c?.running ? await this.#quiet() : null;
+    };
+    for (const stopped of [false, true]) {
+      const why = await busy();
+      if (ended()) return gone();
+      if (why) {
+        if (fenced) await this.#resume();
+        return refusal(409, "busy", why);
+      }
+      if (stopped || !c?.running) break;
       await c.signal(15);
       const until = Date.now() + HANDBACK_MS;
       // bounded by HANDBACK_MS
       while (c.running && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
       if (c.running) await c.destroy();
-    }
-    if (ended()) return gone();
-    await this.#drain();
-    if (ended()) return gone();
-    // its owner's messages its inbox has yet to take, or a file its runner
-    // gave that no delivery names yet (taken as it stopped: Codex's round on
-    // f434be3bb): busy, its runner running again meanwhile, which delivers it
-    const unsent = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM deliveries WHERE sent = 0").one().n;
-    const given = this.ctx.storage.sql.exec("SELECT count(*) AS n FROM uses WHERE owner = 'given'").one().n;
-    if (unsent > 0 || given > 0) {
-      if (fenced) await this.#resume();
-      return refusal(409, "busy", `${unsent} of its owner's messages, and ${given} of their files, still go to its connector: ask again in a moment`);
     }
     // bounded: each pass marks one save unreadable, of at most the kept few
     for (;;) {
@@ -527,6 +537,22 @@ export class SimplexDoor extends DurableObject {
       }
       this.ctx.storage.sql.exec("UPDATE saves SET unreadable = 1 WHERE generation = ? AND seq = ?", r.save.generation, r.save.seq);
     }
+  }
+
+  // What is on its way through its connector, as its inbox answers it
+  // (`POST …/inbox/quiet`, signed as a delivery is: cell/src/jobs.rs
+  // `inbox_quiet`): why it is busy, or null once it is quiet. Unanswered,
+  // or answered otherwise, it is busy: its runner stops for nothing unsaid.
+  async #quiet() {
+    const inbox = this.ctx.storage.sql.exec("SELECT fragment, secret FROM inbox WHERE id = 1").toArray()[0];
+    if (!inbox) return null;
+    const body = JSON.stringify({ door: this.#door().door });
+    let said = { busy: "did not answer" };
+    try {
+      const r = await this.ctx.exports.default.fetch(`${inboxUrl(this.env.FRAGMENT_PLATFORM_URL, inbox.fragment)}/quiet`, { method: "POST", headers: { "content-type": "application/json", [INBOX_SIGNATURE_HEADER]: await inboxSignature(inbox.secret, body) }, body });
+      said = r.ok ? await r.json() : { busy: `answered ${r.status}` };
+    } catch {}
+    return said?.busy === null ? null : `its connector ${String(said?.busy).slice(0, 200)}: ask again in a moment`;
   }
 
   // A way back that handed nothing back lets go of the fence it set: a
@@ -1099,6 +1125,10 @@ export class SimplexDoor extends DurableObject {
   // again as its body is read (Codex's round on f434be3bb).
   #deliver(m) {
     if (this.#door()?.stopped === HANDED_BACK && !this.ctx.container?.running) return refusal(409, "handed_back", "this door handed its link back to its computer: its runner's words are taken no more");
+    // fenced for its way back, its runner running on: refused, its runner
+    // keeps it past its cursor, so its save carries it to its computer,
+    // whose core delivers it into its own chat
+    if (this.#door()?.stopped === HANDED_BACK) return refusal(503, "handing_back", "this door is handing its link back: its computer takes this message");
     if (!(typeof m.id === "string" && m.id.length > 0 && m.id.length <= 64 && typeof m.text === "string")) throw Object.assign(new Error("a delivery is {id, kind, text, at, file}"), { status: 400 });
     // its file, which its runner gave the door first, named by its SHA-256;
     // one named otherwise (a runner that carried no files, whose delivery
@@ -1152,6 +1182,13 @@ export class SimplexDoor extends DurableObject {
         return this.#ask(`/${a.op}`);
       case "reply":
         return await this.#reply({ key: a.key, text: a.text, files: a.files });
+      // a way back's fence alone, its runner running on (the move's lane
+      // sends a message into it: its computer takes that message)
+      case "fence":
+        this.#stop(HANDED_BACK);
+        return json({ fenced: true });
+      case "quiet":
+        return json({ busy: await this.#quiet() });
       // a save to begin from, as a computer's link handed over gives one
       // (`bytes`, base64, a door's packed save; `staged`, its owner's chat
       // with their old agent): its SHA-256

@@ -155,10 +155,16 @@ function door({ noDoors = false } = {}) {
   const c = noDoors ? null : container();
   const blobs = bucket();
   // the platform's front, as its inbox answers: `inbox.status`, each post kept
-  const inbox = { status: 200, posts: [] };
+  // `busy`, what it says to its door's question before it stops (`…/inbox/quiet`), each kept in `quiets`
+  const inbox = { status: 200, posts: [], busy: null, quiets: [] };
   // a post signed by the inbox's secret over its body (its inbox's `hmac`): `signedBy`, the secret it was signed with, when one of the tests' is
   const signedBy = (init) => ["s3cret-of-the-inbox", "an-0ther-secret"].find((k) => init.headers["x-simplex-door-signature"] === `sha256=${createHmac("sha256", k).update(init.body).digest("hex")}`) ?? null;
-  const front = { fetch: async (url, init) => (inbox.posts.push({ url, secret: signedBy(init), body: JSON.parse(init.body) }), new Response("{}", { status: inbox.status })) };
+  const front = {
+    fetch: async (url, init) => {
+      if (url.endsWith("/inbox/quiet")) return inbox.quiets.push({ secret: signedBy(init), body: JSON.parse(init.body) }), new Response(JSON.stringify({ busy: inbox.busy }), { status: 200 });
+      return inbox.posts.push({ url, secret: signedBy(init), body: JSON.parse(init.body) }), new Response("{}", { status: inbox.status });
+    },
+  };
   const ctx = { storage: st, container: c, exports: { DoorEgress: () => ({}), default: front }, blockConcurrencyWhile: (f) => f() };
   const o = new SimplexDoor(ctx, { BLOBS: blobs, FRAGMENT_DOOR_INTERNET: "off", FRAGMENT_PLATFORM_URL: PLATFORM });
   const call = (method, path, headers = {}, body) => o.fetch(new Request(`http://door${path}`, { method, headers: { "x-fragment-release": "dev", ...headers }, body, duplex: "half" }));
@@ -1361,6 +1367,40 @@ test("an ended door has no way back: refused (410), never a save of nothing that
   const o = d.again();
   const again = await o.fetch(new Request("http://door/door/handback", { method: "POST", headers: { "x-fragment-release": "dev" }, body: JSON.stringify({ door: DOOR }), duplex: "half" }));
   assert.equal(again.status, 204);
+});
+
+test("a way back stops its runner only once its connector says nothing is on its way, asked in the same ask: busy, its runner runs on, sends what was on its way, and takes messages again (the review of 354324b90)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  const life1 = life(await d.restore(d.row().started));
+  await d.save(life1, 1, "its save");
+  let signaled = 0;
+  d.c.signal = async () => void ((signaled += 1), (d.c.running = false));
+  d.inbox.busy = "has a mirror run queued";
+  const busy = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  const said = await busy.json();
+  assert.deepEqual([busy.status, said.error], [409, "busy"]);
+  assert.match(said.message, /its connector has a mirror run queued/, "it names what is on its way");
+  assert.deepEqual([signaled, d.row().stopped, d.c.running], [0, null, true], "never stopped: its runner sends that reply, its fence let go");
+  assert.deepEqual(d.inbox.quiets.map((q) => [q.secret, q.body.door]), [["s3cret-of-the-inbox", DOOR]], "asked of its connector, signed by its inbox's secret as a delivery is");
+  assert.equal((await d.deliver("m2")).status, 200, "its fence let go, it takes its owner's messages again");
+  d.inbox.busy = null;
+  const r = await d.call("POST", "/door/handback", {}, JSON.stringify({ door: DOOR }));
+  assert.deepEqual([r.status, await r.text(), signaled], [200, "its save", 1], "quiet: stopped, its save handed back");
+  assert.deepEqual(d.posted(), ["m2"], "what it took went to its connector before it stopped");
+});
+
+test("fenced for its way back, its runner running on, a message its runner offers is refused (503): its runner keeps it past its cursor, for its save to carry to its computer, never its connector (the review of 354324b90)", async () => {
+  const d = door();
+  await d.moved();
+  await d.connect();
+  life(await d.restore(d.row().started));
+  assert.equal((await d.lever("fence")).status, 200);
+  const r = await d.deliver("m3");
+  assert.deepEqual([r.status, (await r.json()).error], [503, "handing_back"]);
+  assert.equal(d.st.sql.exec("SELECT count(*) AS n FROM deliveries").one().n, 0, "the door took nothing");
+  assert.deepEqual(d.posted(), [], "nothing on to its connector");
 });
 
 test("the way back waits while its owner's messages still go to its connector, never a save past a message no one has", async () => {

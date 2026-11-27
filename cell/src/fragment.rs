@@ -1393,7 +1393,8 @@ impl FragmentCell {
             }
             (Method::Get, ["api", "subscriptions"]) => self.subscriptions(&caller),
             (Method::Delete, ["api", "subscriptions", id]) => self.unsubscribe(&caller, id),
-            (Method::Post, ["api", "inbox"]) => {
+            // a delivery, or (`quiet`) its door's question before it stops
+            (Method::Post, ["api", "inbox", quiet @ ..]) if quiet.is_empty() || quiet == ["quiet"] => {
                 // its code's inbox, else its inbox token
                 let given = match self.meta(MetaKey::InboxSecret)? {
                     Some(stored) => crate::jobs::Admits::Code {
@@ -1407,7 +1408,10 @@ impl FragmentCell {
                 };
                 let hops = req.headers().get(crate::jobs::HOPS_HEADER)?.and_then(|h| h.parse().ok()).unwrap_or(0);
                 let body = req.bytes().await?;
-                self.inbox(given, hops, &body).await
+                match quiet.is_empty() {
+                    true => self.inbox(given, hops, &body).await,
+                    false => self.inbox_quiet(given, &body).await,
+                }
             }
             _ => Err(CellError::new(ErrorCode::NotFound, format!("no route {} {path}", req.method().as_ref()))),
         }

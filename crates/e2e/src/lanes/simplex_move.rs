@@ -12,8 +12,8 @@
 //!   asks for it (FIN-775): never imported, and the move goes back at once,
 //!   its computer running its link again; its making stopped before its
 //!   record says made: its record names its connector, asked again it
-//!   refuses and makes nothing, `--back` deletes it, and a fresh move makes
-//!   exactly one; and its handover failing once its
+//!   refuses and makes nothing, `--back` archives it, and a fresh move
+//!   leaves exactly one live; and its handover failing once its
 //!   core may have stopped: the same way back; and moved, its computer
 //!   then not always on: the way back refuses, its door keeping the link,
 //!   until always on again (no model call before them);
@@ -24,11 +24,15 @@
 //!   yet up) arrives once, in the connector's chat; the phone's next
 //!   message lands there, once, nothing in the old one, and the agent's
 //!   answer reaches the phone through the door;
-//! - back: its computer runs the link again, the phone's next message
-//!   lands in its computer's chat, and the connector is unbound and
-//!   archived, its history kept.
+//! - its way back refused busy while its agent works in the connector's
+//!   chat, then while its reply waits to go, and that reply reaching the
+//!   phone once, through the door;
+//! - back: a message the door's runner held as it fenced lands in its
+//!   computer's chat, answered; its computer runs the link again, the
+//!   phone's next message lands in its computer's chat, and the connector
+//!   is unbound and archived, its history kept.
 //!
-//! Paid calls: the agent's answers (four turns, a few calls each).
+//! Paid calls: the agent's answers (six turns, a few calls each).
 
 use std::time::{Duration, Instant};
 
@@ -322,8 +326,57 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
         json!({ "door": in_door, "old": in_old, "answer": format!("{after:?}"), "held": if after.is_err() { held() } else { Value::Null } }),
     );
 
-    // back: its computer runs the link again, the connector gone
-    let back = mv("back")?;
+    // its way back waits while anything is on its way through its connector
+    // (the review of 354324b90): its agent at work there, then its reply
+    // held (its mirror paused, so its run waits blocked); each refused busy,
+    // naming it, its door running on; the reply reaches the phone once,
+    // through its door, once its run goes
+    let busy_back = |why: &str| mv("back").map(|r| (r.status == 409 && r.body["message"].as_str().is_some_and(|m| m.contains(why)), r.body));
+    let at_work = || records(api, &owner, &connector, "work").iter().rev().find(|r| r["body"]["kind"].as_str().is_some_and(|k| k.starts_with("turn."))).is_some_and(|r| matches!(r["body"]["kind"].as_str(), Some("turn.start" | "turn.step")));
+    let pause = |on: bool| api.signed(&owner, "POST", &format!("/api/f/{connector}/pause"), Some(&json!({ "op": "mirror", "paused": on })));
+    let blocked_run = || api.signed(&owner, "GET", &format!("/api/f/{connector}/runs?op=mirror&status=blocked&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64());
+    anyhow::ensure!(pause(true)?.status == 200, "pausing its connector's mirror");
+    phone.drain(Duration::from_secs(5))?;
+    phone.say(contact, "Run `sleep 20` in your terminal, then reply with just the word done.")?;
+    let working = s.eventually(SLOW, at_work);
+    let (refused_working, said_working) = busy_back("at work")?;
+    let blocked = s.eventually(SLOW, || blocked_run().is_some());
+    let (refused_reply, said_reply) = busy_back("mirror run blocked")?;
+    anyhow::ensure!(pause(false)?.status == 200, "unpausing its connector's mirror");
+    let replayed = api.signed(&owner, "POST", &format!("/api/f/{connector}/replay"), Some(&json!({ "run": blocked_run().unwrap_or(0) })))?;
+    let heard = phone.received(SLOW, |got| got.iter().any(|g| g.to_lowercase().contains("done"))).unwrap_or_default();
+    s.ok(
+        "its way back is refused busy while its agent is at work in its connector's chat, then while its reply waits to go (each named), its door running on; that reply reaches the phone once, through its door",
+        working && refused_working && blocked && refused_reply && replayed.status == 200 && heard.iter().filter(|g| g.to_lowercase().contains("done")).count() == 1,
+        json!({ "working": said_working, "reply": said_reply, "replayed": replayed.status, "heard": heard }),
+    );
+
+    // a message its door's runner holds as the door fences for its way back
+    // (refused, kept past its cursor) goes in its save to its computer, which
+    // delivers it into its own chat; its agent answers it there, once (the
+    // review of 354324b90: the door's stop delivers nothing new)
+    let door_lever = |op: &str| api.unsigned("POST", "/api/test/door", Some(&json!({ "door": door, "op": op })));
+    anyhow::ensure!(door_lever("fence")?.status == 200, "fencing its door");
+    phone.drain(Duration::from_secs(5))?;
+    phone.say(contact, "held at the door")?;
+    let held_back = s.eventually(SLOW, || door_lever("state").is_ok_and(|r| r.body["runner"]["waiting"].as_u64().unwrap_or(0) >= 1));
+    // back: its computer runs the link again, the connector gone; asked
+    // again while its agent's last turn still ends
+    let mut back = mv("back")?;
+    // bounded: SLOW
+    let t0 = Instant::now();
+    while back.status == 409 && back.body["message"].as_str().is_some_and(|m| m.contains("busy")) && t0.elapsed() < SLOW {
+        std::thread::sleep(Duration::from_secs(3));
+        back = mv("back")?;
+    }
+    let landed = s.eventually(SLOW, || relayed(api, &owner, &old).iter().any(|t| t == "held at the door"));
+    let answered_held = landed && phone.received(SLOW, |got| got.iter().any(|g| !g.trim().is_empty())).is_ok();
+    let (in_door, in_old) = (relayed(api, &owner, &connector), relayed(api, &owner, &old));
+    s.ok(
+        "a message its runner held as its door fenced for its way back goes in its save to its computer: it lands once in its computer's chat, never the connector's, and its agent's answer reaches the phone",
+        held_back && back.status == 200 && landed && answered_held && in_old.iter().filter(|t| *t == "held at the door").count() == 1 && !in_door.iter().any(|t| t == "held at the door"),
+        json!({ "held": held_back, "back": back.body, "old": in_old, "door": in_door }),
+    );
     let running = s.eventually(SLOW, || port("GET", &format!("/simplex/state?agent={agent}"), None).is_ok_and(|r| r.body["running"] == true && r.body["phase"] == "linked"));
     let unbound = api.signed(&owner, "GET", &format!("/api/f/{connector}/door"), None).map(|r| r.body["bound"].is_null()).unwrap_or(false);
     let kept = listed(api, &owner).iter().any(|f| f["name"] == connector.as_str() && f["archived"] == true) && relayed(api, &owner, &connector).iter().any(|t| t == "after the move");
@@ -331,7 +384,7 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let in_old = relayed(api, &owner, &old);
     s.ok(
         "back: its computer runs the link again, the phone's next message lands in its computer's chat, and the connector is unbound and archived, its history kept",
-        back.status == 200 && running && unbound && kept && again.is_ok() && in_old == ["before the move", "after the way back"],
+        back.status == 200 && running && unbound && kept && again.is_ok() && in_old == ["before the move", "held at the door", "after the way back"],
         json!({ "back": back.body, "old": in_old, "answer": format!("{again:?}") }),
     );
     let _ = lever_with(api, &id, json!({ "op": "always-on", "on": false }));
