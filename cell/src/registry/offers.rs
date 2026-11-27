@@ -329,9 +329,10 @@ impl RegistryCell {
             return self.my_seat(&who.id);
         }
         let offer = self.offer_for(&who.id, &b.offer)?;
-        // an admin's offer stands while its org pays (an operator's comp
-        // stands alone): one that lapsed buys again before anyone joins
-        if offer.comped == 0 && !self.org_pays(&offer.org)? {
+        // an admin's offer stands while its org pays, by card or by invoice
+        // (an operator's comp stands alone): one that lapsed buys again
+        // before anyone joins
+        if offer.comped == 0 && !self.pays_now(&offer.org)? {
             let o = self.stored_org(&offer.org)?;
             return Err(CellError::invalid(format!("{} pays for nothing now: its admins buy again before anyone takes its offers", o.name)).because(Reason::OrgNotPaying));
         }

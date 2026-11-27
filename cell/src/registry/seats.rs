@@ -182,10 +182,16 @@ impl RegistryCell {
     /// change, and it offers them. One that never paid, or lapsed, buys
     /// again first; a comped org's seats are its operators'.
     fn paying(&self, org: &str) -> CellResult<()> {
-        if !self.org_pays(org)? && self.invoiced(org)?.is_none() {
+        if !self.pays_now(org)? {
             return Err(CellError::invalid("your org pays for no seats now: buy one first (Checkout), then offer the rest").because(Reason::OrgNotPaying));
         }
         Ok(())
+    }
+
+    /// Whether `org` pays now, by card (`org_pays`) or by invoice: its
+    /// admins' offers are made and taken.
+    pub(super) fn pays_now(&self, org: &str) -> CellResult<bool> {
+        Ok(self.org_pays(org)? || self.invoiced(org)?.is_some())
     }
 
     /// Whether `org` takes a paid seat `how` (`fragment_core::org::seating`):

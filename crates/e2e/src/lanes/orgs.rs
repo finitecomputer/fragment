@@ -399,6 +399,15 @@ fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
         removed.status == 200 && removed.body["id"] == seat.as_str() && pushed && theirs.body["seat"].is_null() && theirs.body["org"].is_null(),
         json!([removed.body, theirs.body]),
     );
+    // an admin's place, offered and taken as a paying org's is
+    let second = api.person()?;
+    let place = api.signed(&admin, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&second) })))?;
+    let took = api.signed(&second, "POST", &format!("/api/seat/offers/{}/accept", place.body["admin"]["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    s.ok(
+        "its admin offers someone an admin's place, and they accept it: an admin of it, seatless",
+        place.status == 200 && took.status == 200 && took.body["admin"] == true && took.body["seat"].is_null() && took.body["org"]["id"] == org.as_str(),
+        json!([place.body, took.body]),
+    );
 
     // ---- FIN-562: someone the move placed in an org of one is offered a
     // comp in it, and moves by their own yes
