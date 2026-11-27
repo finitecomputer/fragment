@@ -334,7 +334,7 @@ impl FragmentCell {
         let expect = BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
         let key = format!("face:{by}:{}", js::random_hex::<16>());
         let write = crate::files::FileWrite { path, bytes: Some(renamed.clone().into_bytes()) };
-        match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, 0).await {
+        match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, None, 0).await {
             Ok(crate::files::Wrote::Commit(_)) => Ok(()),
             // not written: the attempts it may hold are the ones before
             Ok(crate::files::Wrote::Conflict(why)) => {
@@ -1424,37 +1424,14 @@ impl FragmentCell {
         if !fragment_proto::valid_secret_name(key) {
             return Err(CellError::invalid("a secret's name must match ^[A-Z][A-Z0-9_]{0,63}$"));
         }
-        let mut put: PutSecret = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("a secret is {{value, hosts}} or {{fromVault, hosts}}: {e}")))?;
+        // a person's secret stays in their Vault, which lends it (FIN-615,
+        // option B): no move brings one here, and a client from before the
+        // move went (`--from-vault`) is told what to do instead
+        let put: PutSecret = serde_json::from_slice(&body).map_err(|e| match e.to_string().contains("unknown field `fromVault`") {
+            true => CellError::invalid(MOVED_TO_LEND),
+            false => CellError::invalid(format!("a secret is {{value, hosts}}: {e}")),
+        })?;
         let hosts = secret_hosts(&put.hosts)?;
-        // a secret of the caller's own Vault, moved here (FIN-466): theirs
-        // alone to move, never an agent's. Its take claims it for this
-        // fragment's KEY (`fragment_core::vault::Claimed`), so what would
-        // refuse it here refuses it first
-        let moved = match put.from_vault.take() {
-            Some(_) if !put.value.is_empty() => return Err(CellError::invalid("a secret is its value or fromVault, not both")),
-            // Never from a page (`__secrets/KEY`, a site or frame session):
-            // a page runs its authors' code with its visitor's session, an
-            // agent of the visitor's own among them, so its call is no word
-            // of theirs. A move is asked from the platform's own pages (the
-            // shell's session: Settings moves the bot it offered a Telegram
-            // connector, connections.js) or their own key (the CLI's
-            // `--from-vault`). Refused before the Vault is asked, the same
-            // for every name, so a page learns nothing of what it holds.
-            Some(_) if caller.site => {
-                return Err(CellError::new(ErrorCode::Forbidden, "a secret of a vault moves only from Settings or its person's own key, never from a page"));
-            }
-            Some(name) => {
-                let person = caller.signed.as_ref().filter(|s| s.identity.kind == fragment_proto::IdentityKind::Person).map(|s| s.identity.id.clone());
-                let person = person.ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only a person moves a secret of their vault, from their own session or key"))?;
-                self.reach_while_private()?;
-                self.secret_room(key)?;
-                let to = format!("{}/{key}", self.name()?);
-                let crate::vault::Taken(value, revision) = crate::vault::take(&self.env, &person, &name, &to, &hosts).await?;
-                put.value = value;
-                Some((person, name, to, revision))
-            }
-            None => None,
-        };
         if put.value.is_empty() {
             return Err(CellError::invalid("a secret's value is empty"));
         }
@@ -1487,15 +1464,6 @@ impl FragmentCell {
         // its owner's row says it has reach (`Sharing::reach`)
         if !exists {
             self.sharing_changed()?;
-        }
-        // kept here: gone from the Vault, so it has one home. Should that
-        // fail, it stays there too, claimed for this KEY: the same move
-        // again finishes it (only the value taken: one its person set
-        // since stays theirs there)
-        if let Some((person, name, to, revision)) = moved {
-            if let Err(e) = crate::vault::moved(&self.env, &person, &name, &to, &revision).await {
-                console_error!("{}", json!({ "secret": key, "moved": name, "vault": "kept", "error": e.message }));
-            }
         }
         json_response(&json!({ "ok": true, "name": key, "hosts": hosts }))
     }
@@ -1548,6 +1516,10 @@ impl FragmentCell {
         Ok(names)
     }
 }
+
+/// Why a body naming `fromVault` is refused: the move is gone (FIN-615,
+/// PR 13), and a person's secret is lent from their Vault instead.
+const MOVED_TO_LEND: &str = "Vault secrets are lent now, not moved: `fragment vault set <secret> --app <app>=<KEY>`";
 
 /// The hosts a `PUT secrets` names, each as a URL names it, without
 /// repeats: at least one (a secret that may go nowhere is no use), and at

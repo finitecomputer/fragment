@@ -87,6 +87,25 @@ pub const FILE_SHA_HEADER: &str = "x-door-sha256";
 /// A door id's digits of its connector's life.
 pub const DOOR_LIFE_HEX: usize = 12;
 
+/// Whether a bridge's refusal of a SimpleX handover (`error`, a 4xx) lets
+/// go of its computer's moved mark: only the first ask's, and not one
+/// saying it is moved. A retried ticket's refusal proves nothing of the
+/// ask before it, which may have packed the link and stopped its core
+/// (Codex's round on 744c41078).
+pub fn handover_refusal_unmarks(error: &str, retried: bool) -> bool {
+    !retried && error != "moved"
+}
+
+/// Whether a fragment's answer (its HTTP `status`, typed `error` and
+/// `message`) says it was never made, or was deleted: that one typed
+/// `not_found` alone (`fragment_proto::NOT_CREATED`). Any other 404, a
+/// route's or an untyped one, is a fragment that is there and answered
+/// wrong: never read as one with nothing in it (a way back's count of its
+/// connector's unfinished intake runs, Rule C).
+pub fn never_made(status: u16, error: &str, message: &str) -> bool {
+    status == 404 && error == "not_found" && message == fragment_proto::NOT_CREATED
+}
+
 /// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
 /// digits of a digest of its life's own key (its npub, drawn new for each
 /// life), as its repo is named (`codestorage::repo_name`). A name made
@@ -132,6 +151,16 @@ pub fn door_route(raw: &str, blessed: Option<&str>) -> Result<Option<url::Url>, 
     Ok(Some(url))
 }
 
+/// The label of a connector made for an agent labelled `agent_label`, its
+/// door `door`, within `room` bytes (`fragment_proto::label_room`): the
+/// agent's label cut so it, `-<door>` and a taken label's `-<n>` fit, as
+/// Settings' `connectorLabel` cuts it (cell/shell/shell.js).
+pub fn connector_label(agent_label: &str, door: &str, room: usize) -> String {
+    let keep = room.saturating_sub(format!("-{door}-9999").len()).min(agent_label.len());
+    let cut = agent_label.get(..keep).unwrap_or(agent_label).trim_end_matches('-');
+    format!("{cut}-{door}")
+}
+
 /// A ticket holds this long after it is made: its owner's page hands it
 /// to the bridge at once.
 pub const TICKET_MS: i64 = 10 * 60_000;
@@ -148,6 +177,13 @@ pub enum Act {
     Link,
     Unlink,
     Adopt,
+    /// The operators' move of its computer's link into its connector's
+    /// door (docs/bridge.md, "SimpleX"): its computer's core stopped for
+    /// good, its databases that door's first save.
+    Handover,
+    /// That move's way back: its door's newest save placed on its computer,
+    /// whose door key is taken again.
+    Back,
 }
 
 impl Act {
@@ -156,13 +192,15 @@ impl Act {
             Act::Link => "link",
             Act::Unlink => "unlink",
             Act::Adopt => "adopt",
+            Act::Handover => "handover",
+            Act::Back => "back",
         }
     }
 
     /// Whether it opens the door (a key is redeemed with its ticket): a
-    /// link, or an adoption.
+    /// link, an adoption, or a move's way back.
     pub fn opens(self) -> bool {
-        matches!(self, Act::Link | Act::Adopt)
+        matches!(self, Act::Link | Act::Adopt | Act::Back)
     }
 }
 
@@ -313,6 +351,37 @@ mod tests {
         Ticket { door: SIMPLEX.into(), act: Act::Link, agent: "juniper--k3x9".into(), computer: "computer:00aa".into(), nonce: "0f".repeat(16), exp: 1_790_000_600_000, sig: String::new() }
     }
 
+    /// Goal: a handover's refusal lets go of the moved mark only when it
+    /// proves nothing changed. Valid: the first ask's busy. Invalid: one
+    /// saying moved; any refusal of a retried ticket, a damaged one's 403
+    /// included (Codex's round on 744c41078).
+    #[test]
+    fn a_handover_refusal_unmarks_only_a_first_ask() {
+        assert!(handover_refusal_unmarks("busy", false));
+        assert!(!handover_refusal_unmarks("moved", false));
+        assert!(!handover_refusal_unmarks("forbidden", true));
+        assert!(!handover_refusal_unmarks("busy", true));
+    }
+
+    /// Goal: a way back passes over a connector only when the platform
+    /// says it was never made, or was deleted. Valid: the typed
+    /// `not_found` with its own message. Invalid: a 404 untyped or typed
+    /// otherwise (a route's, an ended address's), the same message under
+    /// another status or code, and any other refusal.
+    #[test]
+    fn only_the_typed_answer_says_never_made() {
+        assert!(never_made(404, "not_found", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "", "Not Found"));
+        assert!(!never_made(404, "not_found", "no route GET /api/runs"));
+        assert!(!never_made(404, "not_found", "the app at this address has ended"));
+        assert!(!never_made(404, "not_found", "no such fragment here"));
+        assert!(!never_made(500, "not_found", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "forbidden", fragment_proto::NOT_CREATED));
+        assert!(!never_made(403, "forbidden", "only its owner, in person, binds a connector"));
+        assert!(!never_made(500, "host_failed", "a created fragment has no owner"));
+    }
+
     /// Goal: a SimpleX connector's jobs reach their own door alone, and no
     /// other fragment's fetch of the door's host leaves the platform.
     /// Valid: the connector's, to the door's host. Invalid: any other
@@ -402,7 +471,25 @@ mod tests {
         other.act = Act::Adopt;
         assert_eq!(hex::encode(other.digest()), ADOPT_DIGEST, "an adoption's, the bridge's too");
         assert!(!fragment_nip98::verify_digest(agent.pubkey_hex(), &other.digest(), &sig), "nor an adoption's");
-        assert!(Act::Link.opens() && Act::Adopt.opens() && !Act::Unlink.opens());
+        assert!(Act::Link.opens() && Act::Adopt.opens() && Act::Back.opens() && !Act::Unlink.opens() && !Act::Handover.opens());
+    }
+
+    /// Goal (the review of #1541): a connector's label for an agent of any
+    /// label fits the deployment's room, as Settings' does: short, whole;
+    /// at the limit, cut, never ending in a dash, room left for `-<n>`.
+    #[test]
+    fn a_connector_label_fits_its_room() {
+        let room = fragment_proto::label_room("--k3x9");
+        assert_eq!(connector_label("juniper", SIMPLEX, room), "juniper-simplex");
+        // its cut lands just past a dash
+        let keep = room - "-simplex-9999".len();
+        let long = "a".repeat(keep - 1) + "-" + &"b".repeat(room - keep);
+        assert_eq!(long.len(), room);
+        for agent in [long.as_str(), &"c".repeat(room)] {
+            let label = connector_label(agent, SIMPLEX, room);
+            assert!(label.len() + "-9999".len() <= room && fragment_proto::valid_label(&label), "{label}");
+        }
+        assert_eq!(connector_label(&long, SIMPLEX, room), format!("{}-simplex", "a".repeat(keep - 1)), "cut at a dash, the dash let go");
     }
 
     /// images/bridge/src/simplex/door.rs holds the same.

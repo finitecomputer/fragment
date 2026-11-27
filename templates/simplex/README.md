@@ -30,6 +30,13 @@ file it loads are the chat template's, linked, so no copy drifts).
   this chat's inbox with it (`fragment.json` `inbox`), as a webhook does,
   in order, one at a time; what the inbox did not take at once, the door's
   watch sends again every 30 s.
+- **A chat moved in** (the operators' move of a computer's SimpleX link,
+  docs/bridge.md "SimpleX"): its door begins from that link's databases,
+  the same contact in its owner's app, and its connect starts it. One that
+  was their chat with their old agent, staged on their computer and never
+  kept there, starts only at their word: `connect` is refused (`staged`)
+  until it says `keep`, true (that chat kept, its owner's app told it
+  moved) or false (a new chat instead); the setup page asks them.
 - **The SimpleX link:** `link` asks the door for a one-time invitation and
   keeps it, with its QR code as the door draws it, unless an unlink came
   after it (each numbered, `asking`, as the door is told), for its owner

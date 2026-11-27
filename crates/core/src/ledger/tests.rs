@@ -212,8 +212,9 @@ fn a_new_ledger_is_a_guest_who_pays_for_nothing() {
     assert_eq!((s.overdraft_micros, s.price_book, s.reserved_micros, s.available_micros), (OVERDRAFT_DEFAULT, 1, 0, OVERDRAFT_DEFAULT));
 }
 
-/// Goal: a guest makes no fragment (Paul, 2026-10-03), and a seat does,
-/// whatever its credit, until its fragments are read-only. Method: the
+/// Goal: a guest makes no fragment (Paul, 2026-10-03), nor does a canceled
+/// seat (decision 49), and a seat does, whatever its credit, until its
+/// fragments are read-only. Method: the
 /// question is a read, so it is asked twice (a replay answers the same and
 /// changes nothing), then again after an operator's plan change.
 #[test]
@@ -232,9 +233,10 @@ fn a_guest_makes_no_fragments_and_a_seat_does() {
     w.spend("b1", 50 * USD);
     assert_eq!((w.ledger.standing(T0), may(&w)), (Standing::AgentsStopped { why: Why::NoCredit }, Ok(())), "at zero too, as it writes");
     w.ok(seat("s1", SeatState::Canceled, 1));
-    assert_eq!(may(&w), Ok(()), "a canceled seat too, on what is left");
+    assert_eq!(may(&w), Err(Refused::GuestCreates), "a canceled seat (it ended, or its org stopped paying) makes none: a guest's (decision 49)");
+    assert_eq!(w.ledger.gate(Spend::Write, w.now), Ok(()), "what is theirs still takes writes, on what is left (decision 53)");
     w.spend("b2", 2 * USD);
-    assert_eq!(may(&w), Err(Refused::ReadOnly { why: Why::Overdrawn }), "past the overdraft its fragments are read-only, a new one too");
+    assert_eq!((may(&w), w.ledger.gate(Spend::Write, w.now)), (Err(Refused::GuestCreates), Err(Refused::ReadOnly { why: Why::Overdrawn })), "past the overdraft its fragments are read-only");
     w.ok(plan("plan:guest", Plan::Guest));
     assert_eq!(may(&w), Err(Refused::GuestCreates), "made a guest again: the plan first");
     w.ok(seat("s2", SeatState::Active, 2));

@@ -140,6 +140,15 @@ A fragment's channels: its records, read, posted and drafted.
 - Answer: [`Done`](#done)
 - Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 429 `rate_limited`; 500 `schema_refused`; 503 `deploying`
 
+#### `channels.held`
+
+`POST /api/f/{name}/channels/{channel}/held`: Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`PostsHeldAsk`](#postsheldask)
+- Answer: [`PostsHeld`](#postsheld)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 413 `too_large`; 500 `schema_refused`; 503 `deploying`
+
 #### `channels.newest`
 
 `GET /api/f/{name}/channels/{channel}/newest`: Each poster's newest record of each kind the channel keeps the newest of, the newest first.
@@ -336,6 +345,15 @@ The move of finite.computer's agents (docs/migrations.md): the mover's roster, m
 
 A person's secrets, which their agents use without holding: set and listed by the person alone, a value never answered.
 
+#### `vault.lend`
+
+`PUT /api/vault/{secret}/apps/{app}`: Lends a secret to an app of the signer's under the name its code fills, and changes nothing else of it: its value, hosts, place, agents and other apps stay as they are.
+
+- Credentials: NIP-98, the shell's session
+- Body: [`LendSecret`](#lendsecret)
+- Answer: [`Secret`](#secret)
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 404 `not_found`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
+
 #### `vault.list`
 
 `GET /api/vault`: The signer's secrets, by name, each with its hosts, place and agents: never a value.
@@ -366,6 +384,15 @@ A person's secrets, which their agents use without holding: set and listed by th
 Each says who writes it: the cell (out: a client reads it), a client
 (in: the cell reads it), or both. An open one's readers read past a
 value they do not know; a closed object refuses a field it does not know.
+
+### `AppUse`
+
+both, closed. An app of its person's that may use a secret, and the name its code fills it by: `{{KEY}}` in a job's fetch, which an app's own secret of that name fills first (docs/secrets.md, "A person's Vault").
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `app` | `string` | required | The app's fragment name. |
+| `key` | `string` | required | The secret's name in its code (`^[A-Z][A-Z0-9_]{0,63}$`). |
 
 ### `Archived`
 
@@ -594,6 +621,14 @@ both, closed. What an agent's owner lends it for someone else's ask in one place
 | --- | --- | --- | --- |
 | `accounts` | `boolean` | required | The owner's accounts and keys: their connections, their own keys, their Vault's secrets. |
 | `spend` | `boolean` | required | The owner's credit, for paid tools (an operator's keys). |
+
+### `LendSecret`
+
+in, closed. `PUT /api/vault/{secret}/apps/{app}`: the secret lent to `app` under `key`, the name its code fills, in place of any name it had for that app; nothing else of the secret changes, so a lend never puts back what its person changed meanwhile (FIN-615, PR 12).
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `key` | `string` | required | The secret's name in the app's code (`^[A-Z][A-Z0-9_]{0,63}$`). |
 
 ### `ListWatchFrame`
 
@@ -1033,6 +1068,22 @@ out. A post's answer: the record, and whether this id had posted it before.
 | `record` | [`ChannelRecord`](#channelrecord) | required |  |
 | `replayed` | `boolean` | required |  |
 
+### `PostsHeld`
+
+out. Its answer: those of them the channel holds as the asker's own posts, in the order asked. It never answers of another poster's.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `held` | `array` of `string` | required |  |
+
+### `PostsHeldAsk`
+
+in, closed. `POST /api/f/<name>/channels/<channel>/held`: the post ids (each one a `PostRecord::id`) the asker wonders whether it posted there, at most `limits::HELD_IDS_MAX`.
+
+| field | type | | |
+| --- | --- | --- | --- |
+| `ids` | `array` of `string` | required |  |
+
 ### `Present`
 
 out. One socket's presence (`data` is never `null` in a `hello`).
@@ -1058,7 +1109,8 @@ in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only 
 
 | field | type | | |
 | --- | --- | --- | --- |
-| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name (Paul, 2026-11-09: per agent). With `apps`, at least one between them. |
+| `apps` | `array` of [`AppUse`](#appuse) | optional | The apps that may use it, each under the name its code fills (FIN-615, PR 12: per app, as per agent). |
 | `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
 | `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
 | `value` | `string` or `null` | optional | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. None, the value it holds is kept: a secret it does not hold yet, or one that would go from signing to filling or back, is refused (400). |
@@ -1162,6 +1214,7 @@ out. A secret as its person reads it: everything but its value.
 | field | type | | |
 | --- | --- | --- | --- |
 | `agents` | `array` of `string` | required |  |
+| `apps` | `array` of [`AppUse`](#appuse) | optional |  |
 | `hosts` | `array` of `string` | required |  |
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |

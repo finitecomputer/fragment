@@ -274,6 +274,24 @@ pub(crate) fn internal_request(path: &str, body: &str) -> CellResult<Request> {
     Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
 }
 
+/// `internal_request`, its body a stream (or none) and its `headers` the
+/// caller's: a SimpleX door's import, a computer's handover answer passed
+/// on (simplex_move.rs), always through a stream of its own
+/// (`js::passed_on`, Cloudflare's reorder).
+pub(crate) fn internal_stream(path: &str, method: Method, headers: &[(&str, &str)], body: Option<worker::wasm_bindgen::JsValue>) -> CellResult<Request> {
+    let body = body.map(crate::js::passed_on);
+    let h = Headers::new();
+    for (k, v) in headers {
+        h.set(k, v)?;
+    }
+    if let Some((header, value)) = marker(path)? {
+        h.set(header, value)?;
+    }
+    let mut init = RequestInit::new();
+    init.with_method(method).with_headers(h).with_body(body);
+    Ok(Request::new_with_init(&format!("https://fragment.internal/{path}"), &init)?)
+}
+
 /// Stamps a call into a platform object with this release
 /// (`release::HEADER`), and when it was deployed (`release::DEPLOYED`),
 /// which no release reads now: an object of a release before this one read

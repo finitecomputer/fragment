@@ -151,6 +151,9 @@ pub mod limits {
     pub const TURN_HOLD_MS: i64 = 0;
     /// Records per page of a channel read.
     pub const CHANNEL_PAGE: usize = 1000;
+    /// Post ids one `channels.held` ask names, at most (the bridge's
+    /// copy, `HELD_IDS_MAX`, held to it by xtask's guards).
+    pub const HELD_IDS_MAX: usize = 256;
     /// A page of a channel on the live socket also ends at about this many
     /// bytes of record frames (a record is at most `RECORD_BODY_MAX_BYTES`).
     pub const CHANNEL_PAGE_MAX_BYTES: usize = 1024 * 1024;
@@ -633,6 +636,10 @@ pub fn valid_kind(kind: &str) -> bool {
 pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
   return typeof kind === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(kind);
 }"#;
+
+/// The message of the one `not_found` a fragment never made, or deleted,
+/// answers whatever it is asked (cell/src/fragment.rs `not_created`).
+pub const NOT_CREATED: &str = "no such fragment";
 
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
 ///
@@ -1537,6 +1544,15 @@ impl Sharing {
     pub fn beyond(&self) -> bool {
         self.visibility != Visibility::Members
     }
+
+    /// Whether it is its owner's alone ("Only you", FIN-615: the label PR
+    /// 18 shows): no link opens it and no one else is in it or invited, so
+    /// no one but its owner and their own agents reads it or changes its
+    /// code. What an app must be to read its owner's other apps as them
+    /// (PR 16b, `job.read`).
+    pub fn only_you(&self) -> bool {
+        !self.beyond() && !self.with_others()
+    }
 }
 
 /// `GET /api/access` (a person): who has access to each fragment they own
@@ -1972,16 +1988,10 @@ pub struct Rotated {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PutSecret {
-    /// The value; empty with `fromVault`.
-    #[serde(default)]
     pub value: String,
     /// At least one, at most `SECRET_HOSTS_MAX`, each as a URL names it
     /// (`fragment_core::secrets::secret_host`).
     pub hosts: Vec<String>,
-    /// In place of `value`: a secret of the caller's own Vault (FIN-466),
-    /// moved here: kept here, gone from the Vault. A person's alone.
-    #[serde(default, rename = "fromVault", skip_serializing_if = "Option::is_none")]
-    pub from_vault: Option<String>,
 }
 
 /// A secret as `GET /api/f/<name>/secrets` (editor) shows it: its name and
@@ -2326,6 +2336,24 @@ pub struct PutDraft {
     /// At most `limits::RECORD_BODY_MAX_BYTES`.
     #[cfg_attr(feature = "schema", schemars(extend("default" = null)))]
     pub text: Option<String>,
+}
+
+/// `POST /api/f/<name>/channels/<channel>/held`: the post ids (each one a
+/// `PostRecord::id`) the asker wonders whether it posted there, at most
+/// `limits::HELD_IDS_MAX`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PostsHeldAsk {
+    pub ids: Vec<String>,
+}
+
+/// Its answer: those of them the channel holds as the asker's own posts,
+/// in the order asked. It never answers of another poster's.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct PostsHeld {
+    pub held: Vec<String>,
 }
 
 /// A post's answer: the record, and whether this id had posted it before.
@@ -2741,6 +2769,20 @@ pub mod wipe;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: "Only you" (FIN-615, PR 16b's `job.read`, PR 18's label) is
+    /// members only with no one else in it or invited. Method: each way
+    /// past it, one at a time.
+    #[test]
+    fn only_you_is_members_only_with_no_one_else_in_or_invited() {
+        let alone = Sharing { visibility: Visibility::Members, members: 3, guests: 0, invites: Some(0), reach: false };
+        assert!(alone.only_you(), "its owner and their own agents alone");
+        assert!(!Sharing { guests: 1, ..alone }.only_you(), "someone else in it");
+        assert!(!Sharing { invites: Some(1), ..alone }.only_you(), "someone invited");
+        assert!(!Sharing { invites: None, ..alone }.only_you(), "a row from before invites were counted");
+        assert!(!Sharing { visibility: Visibility::Link, ..alone }.only_you(), "its link opens it");
+        assert!(!Sharing { visibility: Visibility::Public, ..alone }.only_you(), "public");
+    }
 
     /// Goal: a storage token says whether it writes, add-only. Method: a
     /// host before `?access=read` names no `write` (it minted writers'

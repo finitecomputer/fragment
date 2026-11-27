@@ -154,7 +154,7 @@ impl RegistryCell {
     /// The org `by` admins, and their row.
     fn admin_of(&self, by: &By) -> CellResult<(Identity, MemberRow)> {
         let who = self.person_by(by)?;
-        let m = self.member_of(&who.id)?.filter(|m| m.admin != 0).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins change its seats and admins").because(Reason::NotAdmin))?;
+        let m = self.member_of(&who.id)?.filter(|m| m.admins(None)).ok_or_else(|| CellError::new(ErrorCode::Forbidden, "only an org's admins change its seats and admins").because(Reason::NotAdmin))?;
         Ok((who, m))
     }
 

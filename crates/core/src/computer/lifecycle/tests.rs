@@ -1392,6 +1392,53 @@ fn a_disks_sleep_never_stops_with_writes_unshipped() {
     assert!(matches!(s.note, SaveNote::Says(_)), "it says so: {:?}", s.note);
 }
 
+/// Goal (FIN-783, Codex on #1567): a disk's stop is the platform's time,
+/// never its owner's. Its final flush may be kept for while its storage is
+/// unreachable, up to what its start told its guest: its owner is metered
+/// up to the stop's beginning and not for the stop, however long, nor
+/// after; so too a stop whose drain gave up past the unsaved bound.
+/// Method: a drained sleep's stop looked at each minute (its alarms) for
+/// 15 minutes, under `ALARM_LATE_MS`, then gone; the same after a drain
+/// that gave up; the meters of every step.
+#[test]
+fn a_disks_stop_kept_for_its_final_flush_is_never_its_owners_time() {
+    let meters = |acts: &[Action]| -> Vec<(i64, i64)> { acts.iter().filter_map(|a| if let Action::Meter { from_ms, to_ms } = a { Some((*from_ms, *to_ms)) } else { None }).collect() };
+    // its stop, its minute's looks, then its end: every meter of them
+    let through = |l: &mut Lifecycle, stop: i64, minutes: i64, end: Event| -> Vec<(i64, i64)> {
+        let mut all = vec![];
+        for m in 1..=minutes {
+            all.extend(meters(&l.apply(Event::Alarm, stop + m * 60_000).actions));
+        }
+        let gone = l.apply(end, stop + minutes * 60_000 + 1_000);
+        all.extend(meters(&gone.actions));
+        assert!(matches!(l.phase, Phase::Asleep { .. }), "{:?}", l.phase);
+        assert_eq!(l.unmetered, None, "gone, its window closed");
+        all
+    };
+    let mut l = Lifecycle::new();
+    l.set_disk();
+    let g = started(&mut l, T);
+    let (_, slept) = run_alarms(&mut l, T + 2 * IDLE_MS);
+    let stop = slept.expect("it sleeps once idle") + 500;
+    let s = l.apply(Event::Held { generation: g, held: true }, stop);
+    assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: true, .. })).count(), 1, "{s:?}");
+    const { assert!(15 * 60_000 < ALARM_LATE_MS, "looked at under the late rule's span") };
+    let mut all = meters(&s.actions);
+    all.extend(through(&mut l, stop, 15, Event::Asleep { generation: g }));
+    assert!(all.iter().all(|(_, to)| *to <= stop), "nothing metered past its stop's beginning: {all:?}");
+    // a stop after its drain gave up past the unsaved bound: free too
+    let mut late = Lifecycle::new();
+    late.set_disk();
+    let g = started(&mut late, T);
+    let (_, slept) = run_alarms(&mut late, T + 2 * IDLE_MS);
+    let stop = slept.expect("it sleeps") + 45_500;
+    let s = late.apply_with(Event::Held { generation: g, held: false }, stop, &Rules { unsaved_max_ms: 0 });
+    assert_eq!(s.actions.iter().filter(|a| matches!(a, Action::Stop { saved: false, .. })).count(), 1, "{s:?}");
+    let mut all = meters(&s.actions);
+    all.extend(through(&mut late, stop, 10, Event::AsleepUnshipped { generation: g }));
+    assert!(all.iter().all(|(_, to)| *to <= stop), "nothing metered past that stop's beginning either: {all:?}");
+}
+
 /// Goal (Codex on #1552): an export's ask that comes once the save it waits
 /// for already landed (its look raced that save) takes no second save.
 #[test]

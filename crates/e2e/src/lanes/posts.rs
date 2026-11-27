@@ -138,6 +138,33 @@ pub fn posts(s: &mut Suite, api: &Api) -> Result<()> {
         &r,
     );
 
+    // which of its asker's own posts a channel holds (`channels.held`, a
+    // SimpleX link's move asks it): n1 is the editor's and the owner's, n2
+    // the viewer's, `never` nobody's
+    let held = |keys: &Keys, channel: &str, ids: Value| api.signed(keys, "POST", &format!("/api/f/{name}/channels/{channel}/held"), Some(&json!({ "ids": ids })));
+    let (e, o, v) = (held(&editor, "notes", json!(["never", "n2", "n1"]))?, held(&owner, "notes", json!(["n2", "n1"]))?, held(&viewer, "notes", json!(["n1", "n2"]))?);
+    s.ok(
+        "a channel says which of its asker's own post ids it holds, in the order asked, and never of another poster's",
+        e.status == 200 && e.body["held"] == json!(["n1"]) && o.body["held"] == json!(["n1"]) && v.body["held"] == json!(["n2"]),
+        json!([e.body, o.body, v.body]),
+    );
+    let again = held(&editor, "notes", json!(["never", "n2", "n1"]))?;
+    let elsewhere = held(&editor, "chat", json!(["n1"]))?;
+    s.ok("asked again, the same answer; and of another channel, none held there", again.body == e.body && elsewhere.status == 200 && elsewhere.body["held"] == json!([]), json!([again.body, elsewhere.body]));
+    let most: Vec<String> = (0..limits::HELD_IDS_MAX).map(|i| format!("x{i}")).collect();
+    let (at, past) = (held(&editor, "notes", json!(most))?, held(&editor, "notes", json!([most.clone(), vec!["n1".to_string()]].concat()))?);
+    s.ok(
+        "`HELD_IDS_MAX` ids an ask are answered; one more is 413, answering nothing",
+        at.status == 200 && at.body["held"] == json!([]) && past.status == 413 && past.code() == Some(ErrorCode::TooLarge) && past.body.get("held").is_none(),
+        json!([at.status, past.body]),
+    );
+    let (bad, stranger_asks) = (held(&editor, "notes", json!(["n 1"]))?, held(&stranger, "notes", json!(["n1"]))?);
+    s.ok(
+        "an id no post could have is 400, and a stranger to a channel it can't read is refused",
+        bad.status == 400 && bad.code() == Some(ErrorCode::InvalidRequest) && stranger_asks.status == 403,
+        json!([bad.body, stranger_asks.body]),
+    );
+
     // the size: a string of n characters is n + 2 bytes of JSON
     let edge = limits::RECORD_BODY_MAX_BYTES - 2;
     let r = post(api, &editor, &name, "chat", "edge", json!("x".repeat(edge)))?;

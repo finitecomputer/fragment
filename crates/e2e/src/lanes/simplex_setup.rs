@@ -28,6 +28,13 @@
 //!   entry.mjs `DoorEgress`); Unlink ends it.
 //!
 //! Its connector is deleted at the end, its door with it (FIN-614 item 4).
+//!
+//! Then (locally) a connector whose door was given its owner's SimpleX chat
+//! with their old agent, staged (a computer's handed over by the
+//! operators' move, D4: the door's lever gives it as that import does):
+//! Settings' row is that connector's; its setup page asks first, "Keep my
+//! SimpleX chat" or "Start a new chat", connecting nothing by itself; a new
+//! chat lets that one go, and its door begins anew.
 
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
@@ -177,6 +184,55 @@ pub(super) fn from_settings(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<(
         deleted.status == 200 && ended && files.as_array().is_some_and(Vec::is_empty),
         json!({ "deleted": deleted.status, "ended": ended, "files": files }),
     );
+    if !real {
+        staged_offer(s, api, a, &mut b, &page, &shots)?;
+    }
+    Ok(())
+}
+
+/// A connector whose door holds its owner's staged SimpleX chat with their
+/// old agent (D4): its setup page asks them first, and their "Start a new
+/// chat" lets it go. (Keeping it, its door adopts it as it restores: the
+/// lab's real cores, images/bridge tests/door.rs.)
+fn staged_offer(s: &mut Suite, api: &Api, a: &Agent<'_>, b: &mut Browser, page: &Page, shots: &Path) -> Result<()> {
+    use base64::Engine as _;
+    let made = api.create_with(a.owner, json!({ "label": "juniper-simplex", "template": "simplex" }))?;
+    ensure!(made.status == 200, "a SimpleX connector: {made}");
+    s.owned(&made.body, a.owner);
+    let name = made.body["name"].as_str().unwrap_or_default().to_string();
+    let door = fragment_core::door::door_id(&name, made.body["npub"].as_str().unwrap_or_default()).with_context(|| format!("its door's id: {made}"))?;
+    let bound = api.signed(a.owner, "POST", &format!("/api/f/{name}/door"), Some(&json!({ "act": "link", "agent": a.agent })))?;
+    ensure!(bound.status == 200, "bound as the agent's door: {bound}");
+    let given = super::simplex_door::lever(api, &door, "import", json!({ "agent": "Juniper", "bytes": base64::engine::general_purpose::STANDARD.encode(b"their old chat"), "staged": true }))?;
+    // Settings read again: its row has Open, that connector's chat
+    b.eval(page, "(location.reload(), true)")?;
+    std::thread::sleep(Duration::from_secs(2));
+    let mut seen = Value::Null;
+    s.eventually(SLOW, || {
+        seen = b.eval(page, &row(a.agent)).unwrap_or(Value::Null);
+        seen["open"] == name.as_str()
+    });
+    b.eval(page, &format!("(document.querySelector('#settings-simplex [data-simplex-for={:?}]')?.click(), true)", a.agent))?;
+    let offer = until_said(s, b, SLOW, |x| x["buttons"] == json!(["Keep my SimpleX chat", "Start a new chat"]));
+    s.ok(
+        "its door given its owner's staged chat with their old agent (as the operators' move gives one), its setup page asks them first: keep it, or start a new chat, connecting nothing by itself",
+        given["imported"].is_string() && seen["connector"] == true && offer["line"] == "Your SimpleX chat came over from finite.computer." && state(api, a, &name)["why"]["code"] == "staged",
+        json!({ "given": given, "row": seen, "said": offer, "state": state(api, a, &name) }),
+    );
+    shoot_both(b, page, shots, "b1-staged-offer", None)?;
+    press(b, "Start a new chat");
+    let anew = s.eventually(SLOW, || state(api, a, &name)["connected"] == true);
+    let door_state = super::simplex_door::lever(api, &door, "state", json!({}))?;
+    s.ok(
+        "a new chat instead: that chat let go (no save of it kept), and its door begins anew",
+        anew && door_state["staged"] == false && door_state["saves"].as_array().is_some_and(|v| v.iter().all(|s| s["generation"] != 0)),
+        json!({ "state": state(api, a, &name), "door": door_state }),
+    );
+    shoot_both(b, page, shots, "b2-staged-new", None)?;
+    b.eval(page, "([...document.querySelectorAll('dialog.connector-setup .rename-actions button')].find((x) => x.textContent === 'Done')?.click(), true)")?;
+    let deleted = api.signed(a.owner, "DELETE", &format!("/api/f/{name}"), None)?;
+    let (ended, _) = super::simplex_door::ended(api, &door, SLOW)?;
+    s.ok("that connector deleted, its door ends with it", deleted.status == 200 && ended, json!({ "deleted": deleted.status }));
     Ok(())
 }
 
@@ -398,6 +454,20 @@ impl Phone {
         anyhow::bail!("no answer to `{cmd}` in 60 s")
     }
 
+    /// What it has said and not been read, read for `quiet` and let go: so
+    /// what it receives next is what came after.
+    pub(super) fn drain(&mut self, quiet: Duration) -> Result<()> {
+        let t0 = Instant::now();
+        // bounded by `quiet`
+        while t0.elapsed() < quiet {
+            if let Some(v) = self.read()? {
+                self.events.push(v["resp"].clone());
+            }
+        }
+        self.events.clear();
+        Ok(())
+    }
+
     /// The first thing it said that `pred` takes, within `within`.
     pub(super) fn wait(&mut self, within: Duration, pred: impl Fn(&Value) -> bool) -> Result<Value> {
         let t0 = Instant::now();
@@ -413,7 +483,7 @@ impl Phone {
         }
     }
 
-    fn say(&mut self, contact: i64, text: &str) -> Result<()> {
+    pub(super) fn say(&mut self, contact: i64, text: &str) -> Result<()> {
         let body = json!([{ "msgContent": { "type": "text", "text": text } }]);
         let r = self.cmd(&format!("/_send @{contact} json {body}"))?;
         ensure!(tag(&r) == "newChatItems", "the phone's send: {r}");
@@ -421,7 +491,7 @@ impl Phone {
     }
 
     /// What it received from its contacts, in order, once `done` takes it.
-    fn received(&mut self, within: Duration, done: impl Fn(&[String]) -> bool) -> Result<Vec<String>> {
+    pub(super) fn received(&mut self, within: Duration, done: impl Fn(&[String]) -> bool) -> Result<Vec<String>> {
         let mut got = vec![];
         let t0 = Instant::now();
         // bounded by `within`

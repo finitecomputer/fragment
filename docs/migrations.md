@@ -254,7 +254,7 @@ revoked.
   (`<old> <kind>`, its `receipts` table), in the turn that puts the
   secret. A hand-off whose receipt is there puts nothing: a retry, one
   cut short and sent again, or two at once never put back a secret its
-  person removed, moved into a connector or set since. The receipt
+  person removed or set since. The receipt
   outlives the secret; a wipe empties it.
 - **The entries** (`fragment_core::migrations::vault_secret`), each
   bound to the new agent's fragment, named `<kind>-<fragment>`, or, when
@@ -265,7 +265,7 @@ revoked.
 
   | Kind | Hosts | Place |
   |---|---|---|
-  | Telegram's bot token | `api.telegram.org` | the default (Settings moves it into the agent's Telegram connector, `fromVault`) |
+  | Telegram's bot token | `api.telegram.org` | the default (Settings lends it to the agent's Telegram connector, which fills its `TELEGRAM_BOT_TOKEN` from the Vault: docs/secrets.md) |
   | OpenRouter's key | `openrouter.ai` | `Authorization: Bearer` |
   | The Nostr key, as 64 hex | `finite.site` | `{"sign": "nip98"}`: the Vault signs the new agent's calls to finite.site's API and git remotes, so it brings the old agent's sites over itself; the key never leaves |
 

@@ -487,6 +487,12 @@ pub struct ComputerView {
     /// or its disk is told filling. Its owner makes room first.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub room_first: bool,
+    /// The guest's view only: its agents whose SimpleX link moved into a
+    /// door of their own (docs/bridge.md, "SimpleX"): its bridge starts
+    /// none of their cores again, whatever its own files say (a save from
+    /// before the move, restored, holds no mark of it).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub simplex_moved: Vec<String>,
 }
 
 /// What takes a computer's disk (docs/computers.md, "Room to

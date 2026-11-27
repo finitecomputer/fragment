@@ -91,6 +91,7 @@ pub async fn route(mut req: Request, env: &Env) -> CellResult<Response> {
         (Method::Get, ["people", person, "reach"]) => json_answer(&crate::reach::census(env, person).await?),
         (Method::Put, ["people", person, "computer", "image"]) => json_answer(&pin(env, &by, person, &bytes).await?),
         (Method::Post, ["people", person, "computer", "start-from"]) => json_answer(&start_from(env, &by, person, &bytes).await?),
+        (Method::Post, ["people", person, "simplex-move"]) => json_answer(&crate::simplex_move::simplex_move(env, cfg, url, &by, person, &bytes).await?),
         // the finite.computer move's moves, and staff's acts on one
         (m, ["migrations", rest @ ..]) => crate::migrations::admin(env, cfg, &by, m, rest, url, &bytes).await,
         (Method::Post, ["objects", class, "wake"]) => json_answer(&crate::routed::wake(env, class, body(&bytes)?).await?),
