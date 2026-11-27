@@ -577,7 +577,8 @@ nothing to tell says nothing").
 
 **The agent's hello.** Once the shell has made an agent and added it to
 its chat, it posts a routine for that chat as the agent's owner, with the
-id `hello`, asking the agent to say hello. So the agent speaks first.
+id `hello`, asking the agent to say hello. So the agent speaks first. A
+move's new agent's hello waits for its move's Yes (docs/migrations.md).
 
 **An ask's answer** ("An ask", above):
 
