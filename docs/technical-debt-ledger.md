@@ -705,9 +705,10 @@ unfinished design, not debt.
   door's runner shares the bridge's file rules (its bounds, notes and
   kinds, `simplex::run`) but keeps its own receiving and sending state
   (images/simplex-door/src/files.rs, main.rs), as its link is its own.
-- **Delete when:** existing links move to doors (D4), and the bridge's
-  SimpleX module, its door key and the signed-record route are deleted
-  (D5).
+- **Delete when:** existing links move to doors (D4: `fragment operator
+  simplex-move`, which moves each, its staged chats too), and the bridge's
+  SimpleX module, its door key, its handover and the signed-record route
+  are deleted (D5), 30 days after the last move.
 
 ## SimpleX retains the computer's root trust and rewindable state
 
@@ -725,6 +726,26 @@ unfinished design, not debt.
   browser test of linking. **Delete when:** core resource limits,
   searchable voice text without double transcription, and browser
   coverage of linking and attribution close those gaps.
+
+## An app reads another as its viewer only for its owner, alone
+
+- **Shortcut:** `job.read` (FIN-615, PR 16b) asks another fragment's query
+  as the app's viewer only when that is its owner in person and the app is
+  "Only you" (`Sharing::only_you`) with code only ever written at its
+  owner's ask (`others_wrote`); for anyone else, an agent's run, once
+  anyone else is in it, or once anyone else wrote its code, the step fails.
+  An app's code is its editors', so a viewer who isn't its owner, or code
+  someone else wrote, would read the viewer's things into what others hold
+  (SHIP IT, 2026-11-26). `others_wrote` stays set: no way back. An app
+  someone else wrote into before it was kept (this release) carries no
+  mark, nor does a mutation's write an agent made for someone else (its
+  pending row names no asker).
+- **Risk:** a shared dashboard can't show each viewer their own other
+  apps; an app anyone else once edited never reads again; an agent's run
+  reads nothing (its caps would have to travel to the app it reads).
+- **Delete when:** One Right Way's one ask (FIN-615, PR 10) lands: an app
+  reading a viewer's other app asks that viewer once (Allow once / Always /
+  No), and the read goes on with their word.
 
 ## An agent ends someone's ask by saying so
 
@@ -1391,11 +1412,11 @@ unfinished design, not debt.
 
 ## A Telegram setup in a tab of its own offers no Vault bot
 
-- **Shortcut:** a Vault secret moves into a fragment only on its person's
-  word: from the platform's own pages or their key, never a fragment's
-  page (docs/secrets.md). The Telegram connector's setup page asks
-  Settings, which framed it, to move the bot it offered (`vault-move`,
-  frame-messages.js). Where that frame cannot sign in (Safari's cookie
+- **Shortcut:** a Vault secret is lent to a fragment only on its
+  person's word: from the platform's own pages or their key, never a
+  fragment's page (docs/secrets.md). The Telegram connector's setup page
+  asks Settings, which framed it, to lend the bot it offered
+  (`vault-lend`, frame-messages.js). Where that frame cannot sign in (Safari's cookie
   rule), the page opens in a tab of its own, with no Settings to ask
   (`noopener`), so it does not offer the Vault's bot there and asks for
   a token instead (`templates/telegram/site/setup.js` `VAULT`).
@@ -1403,9 +1424,35 @@ unfinished design, not debt.
   moved from finite.computer, pastes its token (from @BotFather) instead
   of reusing the one in their Vault; the Vault keeps it until they remove
   it. Nothing is lost or exposed.
-- **Delete when:** Settings itself offers the move where no frame can ask
-  (a Use it of its own in the setup dialog's note, or a move token a tab
+- **Delete when:** Settings itself offers the lend where no frame can ask
+  (a Use it of its own in the setup dialog's note, or a lend token a tab
   carries), or every supported browser signs in the frame.
+
+## A Vault row keeps the move's claim column
+
+- **Shortcut:** the move of a secret out of a Vault (`fromVault`) is gone
+  (FIN-615, PR 13), but the Vault's `secrets.claim` column it used stays:
+  a locked schema step made it, and a row a move claimed before still
+  holds its claim. Nothing reads it now; a value set again still clears
+  it (`VaultCell::put`), so a release before PR 13, rolled back to, never
+  sees a claim on a value set since.
+- **Risk:** none: a column read by nothing. A rollback to a release
+  before PR 13 reads a claim left by a move cut short, as it did then.
+- **Delete when:** no release before PR 13 can be rolled back to (one
+  production release after it): a schema step that drops the column.
+
+## An app that needs its owner's key says so only in its run
+
+- **Shortcut:** an app whose `job.fetch` names `{{KEY}}` it holds none
+  of, and its owner's Vault lends it none, fails that step: "This app
+  needs KEY. Its owner can lend it from their Vault, or an editor can set
+  the app's own." (`cell/src/jobs.rs` `lent`; SHIP IT, 2026-11-26.) No
+  one is asked: its owner learns of it from a run, or from whoever reads
+  it.
+- **Risk:** an editor who isn't its owner sees the app fail and must tell
+  the owner themselves. Nothing is lent without the owner's word.
+- **Delete when:** One Right Way's one ask (FIN-615, PR 10) lands: the
+  failure becomes a card to the owner, Lend it or No.
 
 ## A team brain's catch-up keeps its base in a file
 

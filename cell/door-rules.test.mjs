@@ -73,6 +73,8 @@ const RELEASED = [
   "ALTER TABLE deliveries ADD COLUMN sent INTEGER NOT NULL DEFAULT 0",
   "CREATE TABLE files (sha TEXT PRIMARY KEY, bytes INTEGER NOT NULL, type TEXT NOT NULL, at INTEGER NOT NULL)",
   "CREATE TABLE uses (sha TEXT NOT NULL, owner TEXT NOT NULL, PRIMARY KEY (sha, owner))",
+  "CREATE TABLE imported (sha TEXT NOT NULL, at INTEGER NOT NULL, staged INTEGER NOT NULL DEFAULT 0)",
+  "ALTER TABLE saves ADD COLUMN sha TEXT",
 ];
 
 test("the schema's released steps are as released, and taken in order", () => {

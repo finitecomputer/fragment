@@ -61,7 +61,7 @@ use fragment_core::effects::{self, Effect};
 use fragment_core::mandate::{self, Mandate};
 use fragment_core::{door, npub};
 use fragment_proto::{
-    limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PutDraft, Role,
+    limits, valid_channel_name, valid_op_id, Author, ChannelDecl, ChannelNewest, ChannelPage, ChannelRecord, ErrorCode, IdentityKind, PostRecord, Posted, PostsHeld, PostsHeldAsk, PutDraft, Role,
     BUILTIN_CHANNELS, POST_KIND,
 };
 use futures_util::lock::{Mutex, OwnedMutexGuard};
@@ -942,6 +942,30 @@ impl FragmentCell {
         json_response(&Posted { record, replayed })
     }
 
+    /// `POST /api/f/<name>/channels/<channel>/held`, its reader's: which of
+    /// `ids` it holds as the asker's own posts (each by its post's key,
+    /// `post_key`), in the order asked, never another poster's. A SimpleX
+    /// link's move asks it, so its door never relays again a message its
+    /// computer's chat holds: the chat's own word, not the bridge's copy.
+    pub(crate) fn held_api(&self, caller: &Caller, channel: &str, ask: PostsHeldAsk) -> CellResult<Response> {
+        self.channel_reader(caller, channel)?;
+        if ask.ids.len() > limits::HELD_IDS_MAX {
+            return Err(CellError::new(ErrorCode::TooLarge, format!("an ask names {} post ids; the limit is {}", ask.ids.len(), limits::HELD_IDS_MAX)));
+        }
+        if let Some(id) = ask.ids.iter().find(|id| !valid_op_id(id)) {
+            return Err(CellError::invalid(format!("{id:?} is no post's id (^[A-Za-z0-9._:-]{{1,128}}$)")));
+        }
+        // each id keyed as a post of this caller's is (`post_key`)
+        let (who, other) = (self.caller_id(caller)?, caller.signed.as_ref().and_then(|s| s.other_asker()));
+        let mut held = vec![];
+        for id in ask.ids {
+            if !self.rows("SELECT 1 FROM records WHERE channel = ? AND op = ? LIMIT 1", vec![channel.into(), post_key(who, other, &id).into()])?.is_empty() {
+                held.push(id);
+            }
+        }
+        json_response(&PostsHeld { held })
+    }
+
     /// A page of records after `after`.
     pub(crate) fn read_channel(&self, channel: &str, after: i64, limit: usize) -> CellResult<Vec<ChannelRecord>> {
         let rows: Vec<RecordRow> = self.typed(
@@ -1255,7 +1279,7 @@ impl FragmentCell {
         }
         if !writes.is_empty() {
             let message = format!("{} {}", p.op, p.id());
-            match self.commit_files(&key, &writes, &BTreeMap::new(), &message, &p.principal, p.depth).await {
+            match self.commit_files(&key, &writes, &BTreeMap::new(), &message, &p.principal, None, p.depth).await {
                 Ok(crate::files::Wrote::Commit(_)) => {}
                 Ok(crate::files::Wrote::Conflict(why)) => unreachable!("a mutation's commit expects nothing, so nothing conflicts: {why}"),
                 Err(e) => return self.after_failure(p, e).await,

@@ -205,7 +205,8 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             /// and `row` are `legacy-grants`', `provider` is `legacy-own-key`'s
             /// and `legacy-sign-in`'s, `key` is `legacy-own-key`'s,
             /// `row` and `month` `legacy-uses`', `total`, `free` and `data` are `disk`'s,
-            /// `save` is `fail-restore`'s, `head` is `fpac-head`'s.
+            /// `save` is `fail-restore`'s, `path` is `damage`'s, `head` is
+            /// `fpac-head`'s.
             #[derive(Deserialize)]
             #[serde(deny_unknown_fields)]
             struct TestComputer {
@@ -241,6 +242,9 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 /// `fail-restore`'s: the number of the save whose restores fail.
                 #[serde(default)]
                 save: Option<u64>,
+                /// `damage`'s: its bridge's path whose next `times` answers come damaged.
+                #[serde(default)]
+                path: Option<String>,
                 /// `fpac-head`'s: a head its disk takes as its newest.
                 #[serde(default)]
                 head: Option<String>,
@@ -265,7 +269,7 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
                 let generation = t.generation.ok_or_else(|| CellError::invalid("exit names its generation"))?;
                 return json_answer(&crate::computer::ask(env, &t.computer, "computer/exited", &serde_json::json!({ "generation": generation })).await?);
             }
-            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save, "head": t.head, "epoch": t.epoch });
+            let asked = serde_json::json!({ "op": t.op, "times": t.times, "on": t.on, "ms": t.ms, "freeze": t.freeze, "agent": t.agent, "row": t.row, "provider": t.provider, "key": t.key, "month": t.month, "total": t.total, "free": t.free, "data": t.data, "save": t.save, "path": t.path, "head": t.head, "epoch": t.epoch });
             json_answer(&crate::computer::ask(env, &t.computer, "computer/test", &asked).await?)
         }
         // the registry is the whole deployment's: a preview's is everyone's
@@ -295,6 +299,30 @@ pub async fn route(mut req: Request, env: &Env, cfg: &Config, rest: &[&str]) -> 
             }
             let text = std::str::from_utf8(&body).map_err(|_| CellError::invalid("body: not UTF-8"))?;
             crate::routed::send(env, "SIMPLEX_DOOR", &asked.door, crate::routed::internal_request("door/lever", text)?).await
+        }
+        // the blob store's put (`js::blob_put`) of `text` named by `sha`,
+        // under a test key of its own, and whether anything was kept
+        // there: never, for bytes `sha` does not name, whatever comes of
+        // the step after (Codex's round on 6f714bbde)
+        (Method::Post, ["blob-put"]) if cfg.levers_scoped => Err(no_route("/api/test/blob-put")),
+        (Method::Post, ["blob-put"]) => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct TestBlobPut {
+                text: String,
+                sha: String,
+            }
+            let t: TestBlobPut = serde_json::from_slice(&body).map_err(|e| CellError::invalid(format!("body: {e}")))?;
+            if !fragment_core::blob::valid_sha(&t.sha) {
+                return Err(CellError::invalid("sha: a SHA-256 in hex"));
+            }
+            let key = format!("test/blob-put/{}", t.sha);
+            let source = worker::web_sys::Response::new_with_opt_buffer_source(Some(&js_sys::Uint8Array::from(t.text.as_bytes()))).map_err(|_| CellError::host("a body of bytes"))?;
+            let stream = source.body().ok_or_else(|| CellError::host("a body of bytes"))?;
+            let digest = crate::js::blob_put(env, &key, stream, t.text.len() as u64, &t.sha).await?;
+            let kept = crate::js::blob_head(env, &key).await?.is_some();
+            crate::js::blob_delete(env, crate::js::BLOBS, &[key]).await?;
+            json_answer(&serde_json::json!({ "digest": digest, "kept": kept }))
         }
         (Method::Post, ["migrations"]) if cfg.levers_scoped => Err(no_route("/api/test/migrations")),
         (Method::Post, ["migrations"]) => crate::migrations::lever(env, cfg, &body).await,

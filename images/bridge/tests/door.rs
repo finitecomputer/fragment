@@ -217,12 +217,22 @@ impl FakeDoor {
         let sized = header("content-length").is_some();
         let mark: Option<u64> = header("x-door-mark").and_then(|m| m.parse().ok());
         let content_type = header("content-type");
+        let named = header("x-door-sha256");
         let body = req.into_body().collect().await.unwrap().to_bytes();
+        // every body its runner sends names its SHA-256, as the cell's door asks
+        if !body.is_empty() {
+            assert_eq!(named.as_deref(), Some(sha256_hex(&body).as_str()), "{method} {path}: a runner's body names its SHA-256");
+        }
         self.with(|s| s.heads.push((method.clone(), path.clone(), sized, generation)));
+        // every answer named by its SHA-256, as the cell's door egress names
+        // each (a save or a file names its own)
         let answer = |status: u16, headers: &[(&str, String)], body: Bytes| {
             let mut r = Response::builder().status(status);
             for (k, v) in headers {
                 r = r.header(*k, v.as_str());
+            }
+            if !headers.iter().any(|(k, _)| *k == "x-door-sha256") {
+                r = r.header("x-door-sha256", sha256_hex(&body));
             }
             r.body(Full::new(body)).unwrap()
         };
@@ -239,7 +249,7 @@ impl FakeDoor {
                     None => answer(204, &[("x-door-life", life.to_string())], Bytes::new()),
                     Some(k) => {
                         let behind = if k.mark < s.marks { "1" } else { "0" };
-                        let headers = [("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into()), ("x-door-life", life.to_string()), ("x-door-save", format!("{}-{}", k.life, k.seq))];
+                        let headers = [("x-door-mark", s.marks.to_string()), ("x-door-behind", behind.into()), ("x-door-life", life.to_string()), ("x-door-save", format!("{}-{}", k.life, k.seq)), ("x-door-sha256", sha256_hex(&k.bytes))];
                         answer(200, &headers, k.bytes)
                     }
                 }
@@ -327,8 +337,10 @@ impl Start {
         if let Some(m) = mark {
             c.args(["-H", &format!("x-door-mark: {m}")]);
         }
+        // a body named by its SHA-256, as its door names every one
         if let Some(b) = body {
-            c.args(["-H", "content-type: application/json", "--data-binary", &b.to_string()]);
+            let text = b.to_string();
+            c.args(["-H", "content-type: application/json", "-H", &format!("x-door-sha256: {}", sha256_hex(text.as_bytes())), "--data-binary", &text]);
         }
         let out = c.arg(format!("{}{path}", self.api)).output().await.expect("curl runs");
         let text = String::from_utf8_lossy(&out.stdout).to_string();
@@ -435,6 +447,17 @@ fn received_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
     let c = rusqlite::Connection::open(&path).expect("the save's chat database");
     let mut q = c.prepare("SELECT item_text FROM chat_items WHERE item_sent = 0 ORDER BY chat_item_id").expect("its items");
     q.query_map([], |r| r.get::<_, String>(0)).expect("read").map(|t| t.expect("a text")).collect()
+}
+
+/// Its senders' ids of what the core's chat database in a save holds as
+/// received, as its handover reads them (`save::received_past`).
+fn sent_ids_in(packed: &[u8], scratch: &std::path::Path) -> Vec<String> {
+    let dir = scratch.join("save-sent");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("made");
+    std::fs::write(dir.join("sx_chat.db"), file_of(packed, "sx_chat.db")).expect("written");
+    let contact: i64 = rusqlite::Connection::open(dir.join("sx_chat.db")).expect("opened").query_row("SELECT max(contact_id) FROM chat_items WHERE item_sent = 0", [], |r| r.get(0)).expect("a contact");
+    fragment_bridge::simplex::save::received_past(&dir, contact, 0, 100).expect("read").into_iter().map(|(_, id, _)| id).collect()
 }
 
 fn build_image() {
@@ -866,4 +889,311 @@ async fn files_against_the_real_core() {
     assert_eq!(s["replies"], 0, "nothing waits");
     let left = docker(&["exec", &g1.ctr, "sh", "-c", "ls -A /data/door/out | wc -l"]).expect("its copies");
     assert_eq!(left.trim(), "0", "its copy let go once uploaded");
+}
+
+/// The platform's handover of juniper's link, as the cell's Computer
+/// object asks it (its screen port, a handover's ticket): its status, its
+/// door's first save and the SHA-256 its answer says.
+fn hand_over(c: &Computer, ticket: &Value, into: &std::path::Path) -> (u16, Vec<u8>, String) {
+    let url = format!("http://127.0.0.1:{}/simplex/handover?agent=juniper--k3x9", c.port);
+    let out = Command::new("curl").args(["-s", "-X", "POST", "-D", "-", "-o"]).arg(into).args(["-H", "content-type: application/json", "--data-binary", &ticket.to_string(), &url]).output().expect("curl runs");
+    let head = String::from_utf8_lossy(&out.stdout).to_string();
+    let status = head.lines().next().and_then(|l| l.split(' ').nth(1)).and_then(|c| c.parse().ok()).unwrap_or(0);
+    let sha = head.lines().find_map(|l| l.strip_prefix("x-door-sha256: ")).unwrap_or("").trim().to_string();
+    (status, std::fs::read(into).unwrap_or_default(), sha)
+}
+
+/// The way back, as the cell's Computer object asks it: its ticket, and its
+/// door's newest save (`behind` its door's newest effects or not).
+fn hand_back(c: &Computer, ticket: &Value, save: &std::path::Path, behind: bool) -> (u16, Value) {
+    let url = format!("http://127.0.0.1:{}/simplex/back?agent=juniper--k3x9", c.port);
+    // named by its SHA-256, as its door names it
+    let sha: String = sha2::Digest::finalize(sha2::Digest::chain_update(<sha2::Sha256 as sha2::Digest>::new(), std::fs::read(save).unwrap_or_default())).iter().map(|b| format!("{b:02x}")).collect();
+    let out = Command::new("curl")
+        .args(["-s", "-X", "POST", "-w", "\n%{http_code}", "-H", &format!("x-door-ticket: {ticket}"), "-H", &format!("x-door-behind: {}", u8::from(behind)), "-H", &format!("x-door-sha256: {sha}"), "--data-binary"])
+        .arg(format!("@{}", save.display()))
+        .arg(&url)
+        .output()
+        .expect("curl runs");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    let (body, code) = text.rsplit_once('\n').unwrap_or(("", "0"));
+    (code.trim().parse().unwrap_or(0), serde_json::from_str(body).unwrap_or(Value::Null))
+}
+
+fn relayed_on(fake: &support::fake::Fake, chat: &str) -> Vec<Value> {
+    fake.with(|w| w.records(chat, "chat").into_iter().filter(|r| r["body"]["relayed"]["via"] == "simplex").collect())
+}
+
+/// Goal (D4, Paul's FIN-731: the move carries the data): a computer's
+/// SimpleX link moves into a door with nothing for its owner to do, and
+/// back. Linked on a computer (the bridge's own core and chat), the
+/// owner's message answered; handed over by the platform's ticket: the
+/// computer's core stopped for good, its answer the door's first save,
+/// whose SHA-256 it says; a second handover's ticket refused. The door
+/// restores it: the same contact, linked, with no invitation; the owner's
+/// next message arrives there once, and nothing the computer's chat holds
+/// comes again, though the computer never heard one was taken; refused
+/// while that chat can't say what it holds, or while a message's file is
+/// on the computer alone, its core runs on. The door's
+/// reply reaches the owner's app once. The way back: the
+/// door's planned stop saves last, the computer places that save, takes its
+/// door key back, and its core runs again on it: the owner's next message
+/// is answered in the computer's chat. Method: the real bridge image (the
+/// lab's computer) and the door's real image, SimpleX's real core, a
+/// person's real client, fakes for the platform and the door's object.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker; run by hand"]
+async fn a_computers_link_moves_into_a_door_and_back() {
+    build_image();
+    build_bridge_image();
+    let mut lab = Lab::up_with("door-move", true);
+    let mut person = lab.start("person", false).await;
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+    });
+    let data = lab.dir.join("computer-data");
+    let c = Computer::start(&lab, &fake, &data);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    c.link(&fake);
+    let v = c.state_until(Duration::from_secs(60), "an invitation", |v| v["phase"] == "inviting").await;
+    person.cmd(&format!("/connect {}", v["link"].as_str().expect("its link"))).await;
+    c.state_until(Duration::from_secs(90), "linked", |v| v["phase"] == "linked").await;
+    let agent = person.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the agent, at the person's");
+    received(&mut person, Duration::from_secs(30), |got| got.iter().any(|t| t.contains("You're linked"))).await;
+    fake.until(30_000, "its SimpleX chat", |w| w.made.len() == 1).await;
+    let chat = fake.with(|w| w.made[0].clone());
+    say(&mut person, agent, "before the move").await;
+    received(&mut person, Duration::from_secs(60), |got| got.iter().any(|t| t == "echo: [paul] before the move")).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 1);
+
+    // a voice message whose every post is refused, its file received here:
+    // its move waits, refused as busy and saying why (a save carries no
+    // files), and its core, running again, carries it, its file with it
+    // (Codex's last round on #1541)
+    voice_file(&lab.db_dir("person").join("files").join("kept.m4a"), 2, false);
+    fake.with(|w| w.fail_channel = Some(("chat".into(), fragment_bridge::limits::POST_TRIES_MAX, false)));
+    let body = json!([{ "msgContent": { "type": "voice", "text": "", "duration": 2 }, "filePath": "/data/files/kept.m4a" }]);
+    let r = person.cmd(&format!("/_send @{agent} json {body}")).await;
+    assert_eq!(tag(&r), "newChatItems", "the person's voice message: {r}");
+    fake.until(300_000, "its every try refused", |w| w.fail_channel.as_ref().is_some_and(|(_, n, _)| *n == 0)).await;
+    fake.with(|w| w.fail_channel = None);
+    let waits = lab.dir.join("waits.sxd");
+    let t0 = Instant::now();
+    let said = loop {
+        let (code, body, _) = hand_over(&c, &fake.ticket("juniper", "handover"), &waits);
+        let said = String::from_utf8_lossy(&body).to_string();
+        if code == 409 && said.contains("on this computer alone") {
+            break said;
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "busy while its file is here alone: {code} {}", said.chars().take(200).collect::<String>());
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    let t0 = Instant::now();
+    while c.cores() != 1 {
+        assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again: {said}");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let t0 = Instant::now();
+    while relayed_on(&fake, &chat).len() != 2 {
+        assert!(t0.elapsed() < Duration::from_secs(120), "its core, running again, carries it: {:?}", relayed_on(&fake, &chat));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let carried = relayed_on(&fake, &chat)[1].clone();
+    assert!(carried["body"]["attachments"].as_array().is_some_and(|a| a.len() == 1), "its file with it: {carried}");
+
+    // a message its chat took whose every answer was lost: the bridge gives
+    // up on it, its cursor before it and no record of it kept; the chat's
+    // own word (`held`) keeps its door from delivering it again (Codex's
+    // rounds on #1541)
+    fake.with(|w| w.lose_relayed = Some(("chat".into(), fragment_bridge::limits::POST_TRIES_MAX)));
+    say(&mut person, agent, "taken, unheard").await;
+    fake.until(300_000, "its every try's answer lost", |w| w.lose_relayed.as_ref().is_some_and(|(_, n)| *n == 0)).await;
+    fake.with(|w| w.lose_relayed = None);
+    assert_eq!(relayed_on(&fake, &chat).len(), 3, "taken once");
+
+    // its chat unasked (its `held` answering 503): nothing handed over,
+    // and its core runs again, its link at one end (Codex's rounds on #1541)
+    fake.with(|w| w.fail_held = 1);
+    let unasked = lab.dir.join("unasked.sxd");
+    let t0 = Instant::now();
+    loop {
+        let (code, body, _) = hand_over(&c, &fake.ticket("juniper", "handover"), &unasked);
+        if code == 503 {
+            break;
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "refused while its chat answers nothing: {code} {}", String::from_utf8_lossy(&body));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let t0 = Instant::now();
+    while c.cores() != 1 {
+        assert!(t0.elapsed() < Duration::from_secs(30), "its core runs again");
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    // handed over: once its posts are acknowledged (busy until then)
+    fake.with(|w| w.computer["simplexMoved"] = json!(["juniper--k3x9"]));
+    let ticket = fake.ticket("juniper", "handover");
+    let first = lab.dir.join("handover.sxd");
+    let t0 = Instant::now();
+    let (bytes, sha) = loop {
+        let (code, bytes, sha) = hand_over(&c, &fake.ticket("juniper", "handover"), &first);
+        if code == 200 {
+            break (bytes, sha);
+        }
+        assert!(code == 409 && t0.elapsed() < Duration::from_secs(30), "handed over within 30 s: {code} {}", String::from_utf8_lossy(&bytes));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    };
+    assert_eq!(sha256_hex(&bytes), sha, "its answer names its save's SHA-256");
+    assert_eq!(kept_of(&bytes)["link"]["phase"], "linked");
+    // its chat database names each message's sender as its posts did: the
+    // post id a handover asks of (`save::received_past`) is the one posted
+    let ids = sent_ids_in(&bytes, &lab.dir);
+    let posted: Vec<String> = fake.with(|w| w.fragments[&chat].channels["chat"].ids.keys().cloned().collect());
+    assert!(!ids.is_empty() && ids.iter().all(|id| posted.contains(&fragment_bridge::records::relayed_id("juniper--k3x9", id))), "{ids:?} posted as {posted:?}");
+    let again = lab.dir.join("again.sxd");
+    let (code, _, _) = hand_over(&c, &ticket, &again);
+    assert_eq!(code, 409, "another handover's ticket, once moved");
+    let t0 = Instant::now();
+    while c.cores() != 0 {
+        assert!(t0.elapsed() < Duration::from_secs(10), "its core stopped");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    // the door restores it as its first save
+    let door = FakeDoor::start().await;
+    door.with(|s| {
+        s.keep = Some(lab.dir.clone());
+        s.saves.push(Kept { start: 0, life: 0, seq: 1, mark: 0, bytes: Bytes::from(bytes.clone()) });
+    });
+    let g1 = start(&lab, &door, 1);
+    let s = g1.until(Duration::from_secs(90), |s| s["ready"] == true && s["phase"] == "linked").await;
+    assert_eq!(s["name"], "person", "the same contact, with no invitation: {s}");
+    say(&mut person, agent, "after the move").await;
+    let t0 = Instant::now();
+    while door.texts() != ["after the move"] {
+        assert!(t0.elapsed() < Duration::from_secs(60), "the owner's next message at the door, and nothing again: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let mut got = vec![];
+    g1.reply(&door, "chat:1", "from the door").await;
+    person_got(&mut person, &mut got, &["from the door"]).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 3, "nothing more on the computer's chat");
+    assert_eq!(c.cores(), 0, "the computer's core never ran beside the door's");
+    assert_eq!(door.with(|s| s.delivered.iter().filter(|(_, t)| t == "after the move").count()), 1, "delivered once");
+
+    // the way back: the door's planned stop saves last; the computer places it
+    let saves = door.with(|s| s.saves.len());
+    g1.kill("TERM");
+    assert_eq!(g1.exited(), 0, "a planned stop");
+    let (newest, behind) = door.with(|s| (s.saves.last().expect("its last save").bytes.clone(), s.saves.last().expect("its last").mark < s.marks));
+    assert!(door.with(|s| s.saves.len()) > saves, "its last save taken");
+    let newest_at = lab.dir.join("newest.sxd");
+    std::fs::write(&newest_at, &newest).expect("written");
+    fake.with(|w| w.computer["simplexMoved"] = json!([]));
+    let (code, v) = hand_back(&c, &fake.ticket("juniper", "back"), &newest_at, behind);
+    assert_eq!(code, 200, "{v}");
+    assert!(fake.with(|w| w.doors.contains_key("juniper--k3x9")), "its door key taken back");
+    c.state_until(Duration::from_secs(90), "running again", |v| v["running"] == true && v["phase"] == "linked").await;
+    say(&mut person, agent, "after the way back").await;
+    received(&mut person, Duration::from_secs(90), |got| got.iter().any(|t| t == "echo: [paul] after the way back")).await;
+    assert_eq!(relayed_on(&fake, &chat).len(), 4, "on the computer's chat again, nothing twice");
+    println!("moved and back: the door's save {} bytes, behind {behind}", bytes.len());
+}
+
+/// Goal (D4, Paul's FIN-731 and his answer of 11-24: offered, never kept
+/// for them): an owner's SimpleX chat with their old finite.computer agent,
+/// staged on their computer by that move and never kept there, moves into a
+/// door as staged. Its handover is the computer's read of it (as its own
+/// adoption reads one, the old agent's core alone on it), its answer a save
+/// whose state holds that read and an unbound link; the computer offers it
+/// no more. Kept at its owner's word (its connector's connect `keep`), the
+/// door adopts it as it restores: their contact bound, no code to scan, and
+/// their app told it moved; what the phone sent while it moved arrives
+/// once, nothing from before it; and the door's reply reaches the phone.
+/// Method: the old core (v7.0.2) as finite.computer ran it, the lab's
+/// computer, the door's real image, fakes for the platform and the door's
+/// object.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs Docker and python3; run by hand"]
+async fn a_staged_chat_moves_into_a_door_and_is_kept() {
+    use fragment_bridge::simplex::stage;
+    build_image();
+    build_bridge_image();
+    let mut lab = Lab::up("door-staged");
+    let mut person = lab.start("phone", false).await;
+    let mut friend = lab.start("friend", false).await;
+    let mut old = lab.start_old("old").await;
+    let a = old.cmd("/address").await;
+    let address = a["connLinkContact"]["connShortLink"].as_str().or(a["connLinkContact"]["connFullLink"].as_str()).expect("its address").to_string();
+    assert_eq!(tag(&old.cmd("/auto_accept on").await), "userContactLinkUpdated");
+    let mut at = vec![];
+    for c in [&mut person, &mut friend] {
+        c.cmd(&format!("/c {address}")).await;
+        at.push(c.wait(Duration::from_secs(90), |e| tag(e) == "contactConnected").await["contact"]["contactId"].as_i64().expect("the old agent, at theirs"));
+    }
+    let at_person = at[0];
+    let owner = old.wait(Duration::from_secs(60), |e| tag(e) == "contactConnected" && e["contact"]["profile"]["displayName"] == "phone").await["contact"]["contactId"].as_i64().expect("the owner, at the old agent's");
+    say(&mut person, at_person, "before the move").await;
+    old.wait(Duration::from_secs(30), |e| tag(e) == "newChatItems" && e.to_string().contains("before the move")).await;
+    drop(old);
+    lab.stop("old");
+    let olddir = lab.db_dir("old");
+    say(&mut person, at_person, "while moving").await;
+    let owner_json = lab.dir.join("owner.json");
+    std::fs::write(&owner_json, format!("{{\"contact\":{owner}}}")).expect("written");
+    let zip = stage_zip(&lab.dir, &[(stage::CHAT, &olddir.join("identity_chat.db")), (stage::AGENT, &olddir.join("identity_agent.db")), (stage::OWNER, &owner_json)]);
+
+    // staged on its new agent's computer, as finite.computer's move left it
+    let fake = support::fake::Fake::start("0.0.0.0:0", &["juniper"]).await;
+    fake.chat_named("juniper-chat--h6j7", &["juniper"]);
+    fake.with(|w| {
+        w.computer["alwaysOn"] = json!(true);
+        w.computer["generation"] = json!(1);
+        w.stages.insert("old1.p1.1".into(), ("juniper--k3x9".into(), zip.clone()));
+    });
+    let data = lab.dir.join("computer-data");
+    let smp = format!("BRIDGE_SIMPLEX_SMP={}", lab.server);
+    let c = Computer::start_with(&lab, &fake, &data, &["-e", &smp]);
+    c.state_until(Duration::from_secs(60), "its state", |v| v["phase"] == "off").await;
+    move_routine(&fake, "juniper", "old1.p1.1");
+    c.state_until(Duration::from_secs(60), "staged", |v| v["staged"] == true).await;
+
+    // handed over as staged: its read in its save, its link unbound
+    fake.with(|w| w.computer["simplexMoved"] = json!(["juniper--k3x9"]));
+    let (code, bytes, sha) = hand_over(&c, &fake.ticket("juniper", "handover"), &lab.dir.join("staged.sxd"));
+    assert_eq!(code, 200, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(sha256_hex(&bytes), sha);
+    let kept = kept_of(&bytes);
+    assert_eq!((kept["link"]["phase"].as_str(), kept["adopt"]["owner"].as_i64()), (Some("off"), Some(owner)), "{kept}");
+    assert!(kept["adopt"]["leftovers"].as_array().is_some_and(|l| l.iter().any(|x| x["contact"].is_i64())), "the friend, to let go: {kept}");
+    c.state_until(Duration::from_secs(10), "offered here no more", |v| v["staged"] != true).await;
+    assert_eq!(c.cores(), 0);
+
+    // kept at its owner's word: the door adopts it as it restores
+    let door = FakeDoor::start().await;
+    door.with(|s| {
+        s.keep = Some(lab.dir.clone());
+        s.saves.push(Kept { start: 0, life: 0, seq: 1, mark: 0, bytes: Bytes::from(bytes.clone()) });
+    });
+    let g1 = start(&lab, &door, 1);
+    let s = g1.until(Duration::from_secs(120), |s| s["ready"] == true && s["phase"] == "linked").await;
+    assert_eq!(s["name"], "phone", "its owner's contact, with no code to scan: {s}");
+    phone_got(&mut person, "Hi, it's Juniper. I've moved to my new home: write to me here, as before.", Duration::from_secs(90)).await;
+    let t0 = Instant::now();
+    while !door.texts().contains(&"while moving".to_string()) {
+        assert!(t0.elapsed() < Duration::from_secs(60), "what the phone sent while it moved: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    say(&mut person, at_person, "after the move").await;
+    let t0 = Instant::now();
+    while door.texts() != ["while moving", "after the move"] {
+        assert!(t0.elapsed() < Duration::from_secs(60), "each once, nothing from before the move: {:?}", door.texts());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let mut got = vec![];
+    g1.reply(&door, "chat:1", "from the door").await;
+    person_got(&mut person, &mut got, &["from the door"]).await;
+    println!("a staged chat moved and kept: its save {} bytes", bytes.len());
 }

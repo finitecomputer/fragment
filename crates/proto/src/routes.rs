@@ -18,9 +18,10 @@ use serde_json::Value;
 use crate::live::{LiveIn, LiveOut};
 use crate::migrations::{HandedOff, Handoff, Mailbox, MoveAt, OfferYes, Offers, Report, Reported, Roster, RosterTaken, StageComplete, StageCompleted, StageCopied, StageDone, StageOpened, StagePart, StageParts};
 use crate::notice::NoticeList;
-use crate::vault::{PutSecret, Secret, SecretList, SecretRemoved};
+use crate::vault::{LendSecret, PutSecret, Secret, SecretList, SecretRemoved};
 use crate::{
-    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen, SetArchived,
+    Archived, ChannelNewest, ChannelPage, Docked, ErrorCode, FragmentList, FragmentStatus, Lend, MemberList, PostsHeld, PostsHeldAsk, Pinned, PostRecord, Posted, PutDraft, SearchAnswer, Seen,
+    SetArchived,
     SetDock, SetPinned,
 };
 use ErrorCode::{BudgetUsedUp, Conflict, ConflictingBody, Forbidden, InvalidRequest, NotFound, RateLimited, RegistryUnavailable, TooLarge, Unauthenticated};
@@ -194,6 +195,7 @@ const STAGE: Param = Param { name: "stage", at: ParamAt::Path, required: true, s
 const PART: Param = Param { name: "n", at: ParamAt::Path, required: true, schema: shape::<u32>, doc: "The part's number, 1 to `PARTS_MAX`." };
 const SECRET: Param = Param { name: "secret", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The secret's name: 1 to 32 of a-z, 0-9 and -." };
 const CHANNEL: Param = Param { name: "channel", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The channel's name." };
+const APP: Param = Param { name: "app", at: ParamAt::Path, required: true, schema: shape::<String>, doc: "The app's fragment name, in full." };
 
 pub const ROUTES: &[Route] = &[
     Route {
@@ -367,6 +369,17 @@ pub const ROUTES: &[Route] = &[
         request: Some(Body::Json(ty::<PostRecord>())),
         answer: Answer::Json(ty::<Posted>()),
         errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, ConflictingBody, TooLarge, BudgetUsedUp],
+    },
+    Route {
+        operation: "channels.held",
+        method: Method::Post,
+        path: "/api/f/{name}/channels/{channel}/held",
+        summary: "Which of the asker's own post ids the channel holds, at most `HELD_IDS_MAX` an ask; never another poster's.",
+        auth: SIGNED,
+        params: &[NAME, CHANNEL],
+        request: Some(Body::Json(ty::<PostsHeldAsk>())),
+        answer: Answer::Json(ty::<PostsHeld>()),
+        errors: &[Unauthenticated, InvalidRequest, Forbidden, NotFound, TooLarge],
     },
     Route {
         operation: "channels.draft",
@@ -607,6 +620,17 @@ pub const ROUTES: &[Route] = &[
         request: Some(Body::Json(ty::<PutSecret>())),
         answer: Answer::Json(ty::<Secret>()),
         errors: &[Unauthenticated, Forbidden, InvalidRequest],
+    },
+    Route {
+        operation: "vault.lend",
+        method: Method::Put,
+        path: "/api/vault/{secret}/apps/{app}",
+        summary: "Lends a secret to an app of the signer's under the name its code fills, and changes nothing else of it: its value, hosts, place, agents and other apps stay as they are.",
+        auth: SIGNED,
+        params: &[SECRET, APP],
+        request: Some(Body::Json(ty::<LendSecret>())),
+        answer: Answer::Json(ty::<Secret>()),
+        errors: &[Unauthenticated, Forbidden, InvalidRequest, NotFound, Conflict],
     },
     Route {
         operation: "vault.remove",

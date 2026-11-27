@@ -50,7 +50,7 @@ use crate::{Keys, Need, Suite};
 
 pub const NAME: &str = "simplex-door";
 
-fn lever(api: &Api, door: &str, op: &str, more: Value) -> Result<Value> {
+pub(super) fn lever(api: &Api, door: &str, op: &str, more: Value) -> Result<Value> {
     let mut body = json!({ "door": door, "op": op });
     body.as_object_mut().expect("an object").extend(more.as_object().cloned().unwrap_or_default());
     let r = api.unsigned("POST", "/api/test/door", Some(&body))?;
@@ -137,6 +137,30 @@ pub fn door(s: &mut Suite, api: &Api) -> Result<()> {
     lever(api, door, "kill", json!({}))?;
     let st = until(api, door, Duration::from_secs(120), |x| ready_from(2)(x) && newest(x).0 == generation(x))?;
     s.ok("a crash starts it again from its newest save, in step (no sync)", st["runner"]["forcedSyncs"] == 0, &st);
+
+    // a copy damaged on its way (FIN-775, Codex's round on #1541), one
+    // byte flipped: its restore's save on its way out to its runner, then
+    // a save on its way in. Neither is ever taken as a save that will not
+    // restore: the restore is asked for again, the save refused and saved
+    // again, every save readable and restored
+    let unread = |st: &Value| st["saves"].as_array().into_iter().flatten().filter(|x| x["unreadable"] != 0).count();
+    lever(api, door, "damage", json!({ "on": "restore", "n": 1 }))?;
+    lever(api, door, "kill", json!({}))?;
+    let before = generation(&st);
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(before + 1)(x) && newest(x).0 == generation(x))?;
+    // its start, then a life for the damaged restore and one for the restore asked again
+    s.ok("a restore's save damaged on its way to its runner is asked for again: never taken as one that will not restore", unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0 && generation(&st) >= before + 3, json!({ "before": before, "state": st }));
+    lever(api, door, "damage", json!({ "on": "save", "n": 1 }))?;
+    lever(api, door, "kill", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
+    lever(api, door, "kill", json!({}))?;
+    let st = until(api, door, Duration::from_secs(120), |x| ready_from(generation(&st) + 1)(x) && newest(x).0 == generation(x))?;
+    let used = lever(api, door, "damage", json!({ "on": "save", "n": 0 }))?;
+    s.ok(
+        "a save damaged on its way in is never kept: refused, saved again, and the newest restores",
+        unread(&st) == 0 && st["runner"]["forcedSyncs"] == 0 && used["damage"] == json!({ "restore": 0, "save": 0 }),
+        json!({ "state": st, "damage": used }),
+    );
     let crashed = generation(&st);
 
     // a save that will not restore: its runner says so and ends; it comes
@@ -430,12 +454,15 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let memo: Vec<u8> = (0..150_000u32).map(|n| (n % 253) as u8).collect();
     let sha = give(api, &door, &memo, "audio/mp4")?;
     let named = json!({ "sha256": sha, "name": "memo.m4a", "type": "audio/mp4", "size": memo.len() });
+    // its first copy to the connector damaged on its way (FIN-775): never
+    // kept, asked for again (Codex's round on 45fc87eee)
+    lever(api, &door, "damage", json!({ "on": "give", "n": 1 }))?;
     deliver_file(api, &door, "sx-e2e-voice", "voice", named)?;
     let intake = newest("intake");
     let voiced = chat().into_iter().find(|r| r["body"]["attachments"][0]["sha256"] == sha.as_str()).unwrap_or_default();
     let blob = api.signed(owner, "GET", &format!("/api/f/{name}/blobs/{sha}"), None)?;
     s.ok(
-        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole",
+        "its owner's voice message reaches their agent with its file, kept from the door as one of the connector's blobs, whole, its first copy damaged on its way and asked for again",
         intake["output"] == json!({ "relayed": true, "file": true })
             && voiced["body"]["attachments"] == json!([{ "sha256": sha, "size": memo.len(), "type": "audio/mp4", "name": "memo.m4a" }])
             && voiced["body"]["relayed"]["via"] == "simplex"
@@ -445,7 +472,9 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     );
 
     // its agent's reply's file (a drawing), uploaded there by its agent, a
-    // viewer: given to the door, which holds those very bytes
+    // viewer: given to the door, which holds those very bytes, its first
+    // copy damaged on its way, refused and given again (FIN-775)
+    lever(api, &door, "damage", json!({ "on": "file", "n": 1 }))?;
     deliver(api, &door, "sx-e2e-draw", "draw me something")?;
     let drew = s.eventually(a.wake, || super::computers::agent_replies(&chat(), a.identity).iter().any(|r| r["body"]["attachments"][0]["sha256"].is_string()));
     let drawn = super::computers::agent_replies(&chat(), a.identity).into_iter().find(|r| r["body"]["attachments"][0]["sha256"].is_string()).unwrap_or_default();
@@ -455,7 +484,7 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
     let held = s.eventually(a.wake, || look()["sha256"] == fsha.as_str());
     let mirror = newest("mirror");
     s.ok(
-        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes, and the door holds those very bytes",
+        "its agent's reply's file is uploaded to the connector's chat by its agent, given to the door as the reply goes (its first copy damaged on its way, given again), and the door holds those very bytes",
         drew && held && look()["size"] == file["size"] && mirror["output"] == json!({ "sent": 0, "why": "not linked" }) && !drawn["body"]["text"].as_str().unwrap_or("").contains("could not be attached"),
         json!({ "reply": drawn, "held": look(), "mirror": mirror }),
     );
@@ -491,6 +520,28 @@ pub(super) fn connector(s: &mut Suite, api: &Api, a: &Agent<'_>) -> Result<()> {
         "its owner's next message through the door answers it, once: the card closed with their words, its turn going on with them, no turn of its own; and no other work of its turns started the mirror",
         chose && closed.len() == 1 && closed[0]["body"]["outcome"] == "answered" && closed[0]["body"]["by"] == a.owner_id && closed[0]["body"]["text"] == "Mint" && !own_turn && turns >= 2 && mirrored.len() == 1,
         json!({ "closed": closed, "turns": turns, "mirrorsOnWork": mirrored }),
+    );
+
+    // what its door asks before a way back stops it (the review of
+    // 354324b90): its connector, quiet, says so; a reply its mirror holds
+    // (paused, so its run waits blocked) makes it busy, naming that run,
+    // until it has gone; a question unsigned is refused
+    let quiet = || lever(api, &door, "quiet", json!({})).map(|v| v["busy"].clone()).unwrap_or_else(|e| json!(e.to_string()));
+    let idle = s.eventually(a.wake, || quiet().is_null());
+    let pause = |on: bool| api.signed(owner, "POST", &format!("/api/f/{name}/pause"), Some(&json!({ "op": "mirror", "paused": on })));
+    ensure!(pause(true)?.status == 200, "pausing its mirror");
+    deliver(api, &door, "sx-e2e-quiet", "are you quiet")?;
+    let blocked_run = || api.signed(owner, "GET", &format!("/api/f/{name}/runs?op=mirror&status=blocked&limit=1"), None).ok().and_then(|r| r.body["runs"][0]["id"].as_i64());
+    let blocked = s.eventually(a.wake, || blocked_run().is_some());
+    let busy = quiet();
+    ensure!(pause(false)?.status == 200, "unpausing its mirror");
+    let replayed = api.signed(owner, "POST", &format!("/api/f/{name}/replay"), Some(&json!({ "run": blocked_run().unwrap_or(0) })))?;
+    let again = s.eventually(a.wake, || quiet().is_null());
+    let unsigned = api.call(Call { method: "POST", url: format!("{}/api/f/{name}/inbox/quiet", api.base), body: Some(b"{}".to_vec()), content_type: Some("application/json"), ..Call::default() })?;
+    s.ok(
+        "its connector tells its door whether anything is on its way: quiet, then busy while its agent's reply waits in a blocked mirror run (named), quiet once that run went; an unsigned question is refused",
+        idle && blocked && busy.as_str().is_some_and(|b| b.contains("has a mirror run blocked")) && replayed.status == 200 && again && unsigned.status == 403,
+        json!({ "busy": busy, "replayed": replayed.status, "unsigned": unsigned.status }),
     );
 
     // a delivery without the inbox's secret, from anyone, starts nothing

@@ -16,7 +16,15 @@
 //! - `POST /simplex/unlink?agent=…` with an unlink's ticket;
 //! - `POST /simplex/adopt?agent=…` with an adoption's ticket: its owner
 //!   keeps their SimpleX chat with their old agent (FIN-463, `stage`),
-//!   staged from its move, its contact the same in their app.
+//!   staged from its move, its contact the same in their app;
+//! - `POST /simplex/handover?agent=…` with a handover's ticket, the
+//!   platform's alone (D4): its link handed to its connector's door, the
+//!   answer that door's first save (`x-door-sha256`, `x-door-length`,
+//!   `x-simplex-chat`, and `x-simplex-staged` for its owner's staged chat
+//!   with their old agent, never kept here);
+//! - `POST /simplex/back?agent=…`, the way back, its ticket in
+//!   `x-door-ticket` and its door's newest save the body (`x-door-behind`),
+//!   named by its SHA-256 (`x-door-sha256`), checked before it is placed.
 //!
 //! The tickets come from the owner's Settings alone, signed by the
 //! platform (`door`): the agent's tools, which reach this port too, can
@@ -38,6 +46,19 @@ use crate::net::{self, Body};
 
 /// A ticket's body is at most this.
 const TICKET_MAX_BYTES: usize = 2_048;
+/// A handover's answer: its save's SHA-256 (hex), its length (the
+/// platform's own header for it: a stream's length may be dropped on its
+/// way), and its SimpleX chat. A way back's save carries its SHA-256 too,
+/// its door's, checked before it is placed.
+const SHA_HEADER: &str = "x-door-sha256";
+const LENGTH_HEADER: &str = "x-door-length";
+const CHAT_HEADER: &str = "x-simplex-chat";
+/// Its owner's staged chat with their old agent (`1`), never kept here.
+const STAGED_HEADER: &str = "x-simplex-staged";
+/// The way back's ticket (its body is its door's save), and whether that
+/// save is behind its door's newest effects (`1`).
+const TICKET_HEADER: &str = "x-door-ticket";
+const BEHIND_HEADER: &str = "x-door-behind";
 
 /// The screen's way to SimpleX: whether the image names a core, and the
 /// manager once the bridge has started it (past the restore gate).
@@ -78,7 +99,26 @@ pub fn qr_svg(text: &str) -> Option<String> {
     Some(code.render::<qrcode::render::svg::Color>().min_dimensions(240, 240).quiet_zone(true).build())
 }
 
+/// Each answer named by its SHA-256 (`x-door-sha256`), which the
+/// platform's Computer object checks before it uses it (FIN-775: Codex's
+/// round on f434be3bb): a refusal's code decides whether a way back is
+/// asked again, or a mark let go. A save's names its own already.
 pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body> {
+    named(answered(req, simplex).await).await
+}
+
+async fn named(r: Response<Body>) -> Response<Body> {
+    if r.headers().contains_key(SHA_HEADER) {
+        return r;
+    }
+    let (mut parts, body) = r.into_parts();
+    let Ok(body) = body.collect().await;
+    let bytes = body.to_bytes();
+    parts.headers.insert(SHA_HEADER, hyper::header::HeaderValue::from_str(&super::run::sha256_hex(&bytes)).expect("hex is a header's value"));
+    Response::from_parts(parts, Body::new(bytes))
+}
+
+async fn answered(req: Request<Incoming>, simplex: &Simplex) -> Response<Body> {
     if req.method() == Method::GET && req.uri().path() == "/simplex/" {
         return net::respond(StatusCode::OK, "text/html; charset=utf-8", PAGE);
     }
@@ -101,10 +141,48 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
         };
     }
     let path = req.uri().path().to_string();
+    if req.method() == Method::POST && path == "/simplex/handover" {
+        return match ticket_of(req).await {
+            Err(why) => refused(Refused { status: 403, why, code: None }),
+            Ok(t) => match h.handover(&agent, t).await {
+                Ok(p) => {
+                    let mut r = Response::builder().status(StatusCode::OK).header("content-type", "application/octet-stream").header(SHA_HEADER, &p.sha256).header(LENGTH_HEADER, p.bytes.len());
+                    if let Some(chat) = &p.chat {
+                        r = r.header(CHAT_HEADER, chat);
+                    }
+                    if p.staged {
+                        r = r.header(STAGED_HEADER, "1");
+                    }
+                    r.body(Body::new(p.bytes.into())).expect("a well-formed answer")
+                }
+                Err(r) => refused(r),
+            },
+        };
+    }
+    if req.method() == Method::POST && path == "/simplex/back" {
+        let ticket = req.headers().get(TICKET_HEADER).and_then(|v| serde_json::from_slice::<Ticket>(v.as_bytes()).ok());
+        let behind = req.headers().get(BEHIND_HEADER).is_some_and(|v| v == "1");
+        let Some(t) = ticket else { return refused(Refused { status: 403, why: "the way back carries its ticket".into(), code: None }) };
+        let sha = req.headers().get(SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let packed = match Limited::new(req.into_body(), super::run::BACK_MAX_BYTES).collect().await {
+            Ok(b) => b.to_bytes().to_vec(),
+            Err(_) => return refused(Refused { status: 413, why: "the way back's save is past a save's bound".into(), code: Some("too_large") }),
+        };
+        // the save its door handed back, as its door hashed it: a copy
+        // damaged on its way (seen once on Cloudflare), or one that names
+        // no SHA-256, takes nothing here, its ticket not taken
+        if let Some(refusal) = super::run::damaged(&packed, sha.as_deref()) {
+            return refused(refusal);
+        }
+        return match h.back(&agent, t, packed, behind).await {
+            Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
+            Err(r) => refused(r),
+        };
+    }
     let answer = match (req.method().clone(), path.as_str()) {
-        (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer") }),
+        (Method::GET, "/simplex/state") => h.view(&agent, session.as_deref()).await.ok_or_else(|| Refused { status: 404, why: format!("no agent {agent} runs on this computer"), code: None }),
         (Method::POST, "/simplex/link" | "/simplex/unlink" | "/simplex/adopt") => match ticket_of(req).await {
-            Err(why) => Err(Refused { status: 403, why }),
+            Err(why) => Err(Refused { status: 403, why, code: None }),
             Ok(t) if path == "/simplex/link" => h.link(&agent, t).await,
             Ok(t) if path == "/simplex/adopt" => h.adopt(&agent, t).await,
             Ok(t) => h.unlink(&agent, t).await,
@@ -113,19 +191,22 @@ pub async fn handle(req: Request<Incoming>, simplex: &Simplex) -> Response<Body>
     };
     match answer {
         Ok(v) => net::json_answer(StatusCode::OK, &serde_json::to_value(v).expect("a view serializes")),
-        Err(r) => {
-            let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            let code = match r.status {
-                403 => "forbidden",
-                404 => "not_found",
-                409 => "conflict",
-                422 => "invalid",
-                503 => "starting",
-                _ => "failed",
-            };
-            net::refusal(status, code, &r.why)
-        }
+        Err(r) => refused(r),
     }
+}
+
+/// A refusal as the platform reads one: its code, else its status's.
+fn refused(r: Refused) -> Response<Body> {
+    let status = StatusCode::from_u16(r.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let code = r.code.unwrap_or(match r.status {
+        403 => "forbidden",
+        404 => "not_found",
+        409 => "conflict",
+        422 => "invalid",
+        503 => "starting",
+        _ => "failed",
+    });
+    net::refusal(status, code, &r.why)
 }
 
 /// A link's or an unlink's ticket: the request's body, as the owner's
@@ -139,6 +220,19 @@ async fn ticket_of(req: Request<Incoming>) -> Result<Ticket, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Goal: every answer names its SHA-256 as its bridge made it, a
+    /// refusal's too (its code decides a way back's next ask), and a
+    /// save's its own (Codex's round on f434be3bb).
+    #[tokio::test]
+    async fn every_answer_names_its_sha256() {
+        let refused = named(net::refusal(StatusCode::UNPROCESSABLE_ENTITY, "damaged", "its door's save came damaged on its way")).await;
+        let sha = refused.headers().get(SHA_HEADER).and_then(|v| v.to_str().ok()).map(str::to_string);
+        let body = refused.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(sha.as_deref(), Some(super::super::run::sha256_hex(&body).as_str()));
+        let save = Response::builder().header(SHA_HEADER, "ab".repeat(32)).body(Body::new(bytes::Bytes::from_static(b"a save"))).unwrap();
+        assert_eq!(named(save).await.headers().get(SHA_HEADER).unwrap(), &"ab".repeat(32), "a save's own, kept");
+    }
 
     /// Goal: only `/simplex…` is SimpleX's, and it names one agent, once.
     #[test]
