@@ -82,16 +82,6 @@ pub fn data(name: &str) -> Vec<&'static File> {
     template(name).map(|t| t.files.iter().filter(|f| is_data(f.path)).collect()).unwrap_or_default()
 }
 
-/// The connection a skill is for, as its frontmatter names it (`metadata:
-/// fragment: connection: <provider>`): the catalog row an agent must hold
-/// to use it (FIN-509). None for a skill of no connection.
-pub fn skill_connection(skill_md: &str) -> Option<&str> {
-    let front = skill_md.strip_prefix("---\n")?.split_once("\n---")?.0;
-    let mut metadata = front.lines().skip_while(|l| l.trim_end() != "metadata:").skip(1).take_while(|l| l.starts_with(' '));
-    metadata.by_ref().find(|l| l.trim_end() == "  fragment:")?;
-    metadata.take_while(|l| l.starts_with("    ")).find_map(|l| l.trim().strip_prefix("connection:")).map(str::trim).filter(|c| !c.is_empty())
-}
-
 /// One data file of a blessed template, when `path` is one.
 pub fn data_file(name: &str, path: &str) -> Option<&'static File> {
     template(name)?.file(path).filter(|f| is_data(f.path))
@@ -203,6 +193,13 @@ pub fn code(name: &str, read: Vec<(&'static File, Vec<u8>)>) -> Result<Code, Cod
     let source = source.ok_or(CodeFault::LibWithoutApp)?;
     Ok(Code { id: format!("blessed:{name}@{release}"), source, modules })
 }
+
+/// The connection a skill names in its frontmatter: the image's own reader
+/// (it shows a connection's skill to an agent that holds the connection),
+/// so these tests and the image never read a skill two ways.
+#[cfg(test)]
+#[path = "../../../images/hermes/boot/src/skill_connection.rs"]
+mod skill_connection;
 
 #[cfg(test)]
 mod tests {
@@ -394,8 +391,9 @@ mod tests {
         let total: u64 = files.iter().map(|f| f.size).sum();
         assert!(files.len() <= DATA_FILES_MAX && total <= DATA_MAX_BYTES, "{} files, {total} bytes", files.len());
         let mut names = std::collections::BTreeSet::new();
-        // each connection's skill: its folder, and the connection it names
-        let mut connections: Vec<(String, String)> = vec![];
+        // each connection's skill: its folder, the connection it names,
+        // and whether it calls it with `fragment connection call`
+        let mut connections: Vec<(String, String, bool)> = vec![];
         for f in files.iter().copied() {
             assert!(f.path.starts_with("skills/"), "the managed set is under skills/: {}", f.path);
             assert!(f.size <= DATA_FILE_MAX_BYTES, "{} is {} bytes", f.path, f.size);
@@ -419,9 +417,9 @@ mod tests {
                 assert_eq!(name, parts[parts.len() - 2], "{}: a skill's name is its directory's", f.path);
                 assert!(front.lines().any(|l| l.starts_with("description:")), "{} says what it is for", f.path);
                 assert!(names.insert(name.to_string()), "{name} twice");
-                if let Some(connection) = skill_connection(text) {
-                    assert!(text.contains(&format!("fragment connection call {connection}")), "{}: a connection's skill calls it with `fragment connection call {connection}`", f.path);
-                    connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection.to_string()));
+                if let Some(connection) = skill_connection::of(text) {
+                    let calls = text.contains(&format!("fragment connection call {connection}"));
+                    connections.push((f.path.trim_end_matches("SKILL.md").to_string(), connection, calls));
                 }
             }
         }
@@ -435,16 +433,16 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
-        // a connection's skill is its docs and its quirks, and no code: the
-        // one caller is `fragment connection call` (FIN-509)
-        assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");
-        for (dir, connection) in &connections {
+        // a connection's skill is its docs and its quirks, and no code; and
+        // the connection's one caller is `fragment connection call`, which a
+        // skill of it says (another of its skills may be a guide to its
+        // provider's own CLI, as Google's Docs and Slides guides are)
+        // (FIN-509)
+        assert!(connections.iter().any(|(_, c, _)| c == "google"), "Google's skill names its connection");
+        for (dir, connection, _) in &connections {
             let code: Vec<&str> = files.iter().map(|f| f.path).filter(|p| p.starts_with(dir.as_str()) && (p.contains("/scripts/") || [".py", ".sh", ".js"].iter().any(|e| p.ends_with(e)))).collect();
             assert!(code.is_empty(), "{connection}'s skill carries code of its own: {code:?}");
-        }
-        assert_eq!(skill_connection("---\nname: a\nmetadata:\n  hermes:\n    tags: [A]\n  fragment:\n    connection: linear\n---\n"), Some("linear"));
-        for none in ["---\nname: a\n---\n", "---\nname: a\nmetadata:\n  hermes:\n    connection: x\n---\n", "---\nname: a\nconnection: x\n---\n", "no frontmatter"] {
-            assert_eq!(skill_connection(none), None, "{none:?}");
+            assert!(connections.iter().any(|(_, c, calls)| c == connection && *calls), "no skill of {connection} calls it with `fragment connection call {connection}`");
         }
         assert!(data_file("skills", "fragment.json").is_none() && data_file("skills", "skills/nope/SKILL.md").is_none());
     }

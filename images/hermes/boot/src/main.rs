@@ -25,6 +25,7 @@ mod held;
 mod hermes;
 mod python;
 mod skills;
+mod skill_connection;
 mod skill_references;
 mod sync;
 
@@ -928,8 +929,19 @@ async fn write_config(api: &Api, a: &Agent, dir: &Path, ids: Option<(u32, u32)>,
     let (main, deep_unused) = main.with_deep(a, answer.as_ref().ok().and_then(|b| hermes::OwnModel::deep_of(b)));
     let reasoning = main.reasoning(hermes::Reasoning::of(answer.as_ref().ok().map(|b| b.as_ref())), route);
     let home = fragment_bridge::api::Home::of(answer.as_ref().ok().map(|b| b.as_ref()));
-    let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE));
-    if std::fs::read_to_string(&config).ok().as_deref() != Some(text.as_str()) {
+    // a connection's skill is shown to an agent that holds the connection
+    // (read again each time its config is, so it follows a connect, a
+    // disconnect and a new skill within that cadence)
+    // (read and written under `skills::VISIBLE`: an install hiding a skill
+    // it brings is never undone by a config read from the set before it)
+    let _visible = skills::VISIBLE.lock().unwrap_or_else(|e| e.into_inner());
+    let withheld = skills::withheld(&skills::managed_dir(), &skills::load_manifest(Path::new(skills::MANIFEST)), &skills::connected(&a.credentials), &dir.join("skills"));
+    let text = hermes::profile_config(a, name, role, home, team, &main, reasoning, route, credential_env, &dir.join(hermes::CREDENTIALS_FILE), &withheld);
+    let before = std::fs::read_to_string(&config).ok();
+    if before.as_deref() != Some(text.as_str()) {
+        if skills::hidden_of(before.as_deref().unwrap_or_default()) != skills::hidden_of(&text) {
+            HIDDEN_CHANGED.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
         write_whole(&config, &text, ids);
         if let (Some(own), Some(why)) = (&own, &unused) {
             ev!("profile.model_unused", { "agent": a.fragment, "provider": own.provider, "id": own.id, "why": why, "model": main.name() });
@@ -1258,17 +1270,22 @@ type SkillsFound = std::sync::Arc<std::sync::Mutex<Option<bool>>>;
 /// One install of the managed skills, in the background (skills.rs), as the
 /// computer's first agent of its owner: none while it has no such agent,
 /// or while the platform holds the computer (`quiet`).
-fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, quiet: &std::sync::Arc<Quiet>) -> Option<tokio::task::JoinHandle<()>> {
+fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, quiet: &std::sync::Arc<Quiet>, ids: Option<(u32, u32)>) -> Option<tokio::task::JoinHandle<()>> {
     if quiet.paused() {
         return None;
     }
     let reader = skills::reader(agents, owner)?.clone();
+    // each profile, with the connections its agent holds now: a connection
+    // skill the install brings is hidden from each that lacks it before
+    // its file is written (its config again on the models' cadence)
+    let profiles: Vec<(PathBuf, std::collections::BTreeSet<String>)> = agents.iter().map(|a| (hermes::profile_dir(&home(), &a.fragment), skills::connected(&a.credentials))).collect();
     let (api, owner, found, held) = (api.clone(), owner.to_string(), found.clone(), quiet.clone());
     let busy = Busy::new(quiet);
     Some(tokio::spawn(async move {
         let _busy = busy;
         let t = Instant::now();
-        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN)).await;
+        let hide = |brought: &[(String, String)]| profiles.iter().for_each(|(dir, held)| hide_brought(dir, held, brought, ids));
+        let done = skills::install(&api, &reader, &owner, &skills::managed_dir(), Path::new(skills::MANIFEST), Path::new(skills::OPTIONAL_CHOSEN), &hide).await;
         *found.lock().expect("the skills' state is never poisoned") = done.as_ref().ok().map(|d| d.fragment.is_some());
         match done {
             Ok(d) => {
@@ -1280,27 +1297,59 @@ fn spawn_skills(api: &Api, agents: &[Agent], owner: &str, found: &SkillsFound, q
                 // request after their copy, with its stamp kept, would be
                 // lost at the restore; the stamp left, the next round or
                 // the boot asks.
-                if held.paused() {
-                    ev!("prompts.refresh_deferred", { "why": "skills", "because": "held" });
-                } else {
-                    // a hold begun while it ran (one slower than the hold's
-                    // wait for rounds under way, a database long locked)
-                    // may have copied its databases before the request: its
-                    // stamp is left then, and the next round asks again
-                    let since = held.holds();
-                    let overlapped = move || held.paused() || held.holds() != since;
-                    let refreshing = tokio::task::spawn_blocking(move || refresh_stored_prompts(&home(), "skills", &overlapped));
-                    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
-                        Ok(Ok(())) => {}
-                        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": "skills", "error": e.to_string() }),
-                        Err(_) => ev!("prompts.refresh_failed", { "why": "skills", "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
-                    }
-                }
+                ask_refresh("skills", held).await;
             }
             Err(e) => ev!("skills.failed", { "error": e.to_string(), "ms": t.elapsed().as_millis() as u64 }),
         }
     }))
 }
+
+/// A profile's config (`dir`'s) hiding each connection skill an install
+/// brings whose connection its agent does not hold (`held`), before the
+/// skill's file is written (`skills::install`): a turn in between lists
+/// none it may not use. Its own skill of the name is left (`hidden_for`);
+/// a profile with no config yet is written with them by `write_config`.
+fn hide_brought(dir: &Path, held: &std::collections::BTreeSet<String>, brought: &[(String, String)], ids: Option<(u32, u32)>) {
+    let config = dir.join("config.yaml");
+    let Ok(text) = std::fs::read_to_string(&config) else { return };
+    let names = skills::hidden_for(brought, held, &dir.join("skills"));
+    if let Some(next) = skills::with_hidden(&text, &names) {
+        write_whole(&config, &next, ids);
+        ev!("profile.skills_hidden", { "profile": dir.file_name().map(|n| n.to_string_lossy().into_owned()), "skills": names });
+    }
+}
+
+/// The open chats asked to rebuild their stored prompts on their next turn
+/// (`refresh_stored_prompts`, nothing asked when its inputs are the same),
+/// `why` saying what changed: an install of the managed skills, or an
+/// agent's hidden connection skills (`write_config`). Never under a hold:
+/// its databases are being copied, and a request after their copy, with
+/// its stamp kept, would be lost at the restore; the stamp left, the next
+/// one asks. Whether it ran (not deferred by a hold).
+async fn ask_refresh(why: &'static str, held: std::sync::Arc<Quiet>) -> bool {
+    if held.paused() {
+        ev!("prompts.refresh_deferred", { "why": why, "because": "held" });
+        return false;
+    }
+    // a hold begun while it ran (one slower than the hold's wait for rounds
+    // under way, a database long locked) may have copied its databases
+    // before the request: its stamp is left then, and the next one asks again
+    let since = held.holds();
+    let overlapped = move || held.paused() || held.holds() != since;
+    let refreshing = tokio::task::spawn_blocking(move || refresh_stored_prompts(&home(), why, &overlapped));
+    match tokio::time::timeout(Duration::from_millis(END_PREVIOUS_LIFE_MS_MAX), refreshing).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => ev!("prompts.refresh_failed", { "why": why, "error": e.to_string() }),
+        Err(_) => ev!("prompts.refresh_failed", { "why": why, "error": "still running", "ms": END_PREVIOUS_LIFE_MS_MAX }),
+    }
+    true
+}
+
+/// Set when a profile's config is written with other hidden connection
+/// skills than it had (a connect, a disconnect, a managed set installed
+/// after the boot wrote it): the models round then asks the open chats to
+/// rebuild their prompts, whose skills list Hermes builds without them.
+static HIDDEN_CHANGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The gateway: the preloaded one is told to go; without one, it is
 /// started now.
@@ -1415,6 +1464,10 @@ fn refresh_stored_prompts(home: &Path, why: &str, overlapped: &dyn Fn() -> bool)
     if cut {
         ev!("prompts.inputs_cut", { "why": why, "skill_files": indexed.len(), "per_dir_max": skills::FILES_MAX });
     }
+    // and each profile's hidden connection skills, which Hermes leaves out
+    // of that profile's skills list (`skills::withheld`)
+    let mut indexed = indexed;
+    indexed.extend(skills::hidden_lists(&home.join("profiles")));
     let inputs = hermes::prompt_inputs(&hermes::relay_hint(), &indexed);
     if !hermes::inputs_changed(read_stamp(&stamp).as_deref(), &inputs) {
         return;
@@ -1719,7 +1772,7 @@ async fn boot_main() {
     let skills_every = env("HERMES_BOOT_SKILLS_MS").and_then(|v| v.parse::<u64>().ok()).map_or(SKILLS_EVERY_MS, |v| v.max(1_000));
     let owner = computer.owner.clone();
     let skills_found = SkillsFound::default();
-    let mut skills_task = spawn_skills(&api, &hermes_agents, &owner, &skills_found, &quiet);
+    let mut skills_task = spawn_skills(&api, &hermes_agents, &owner, &skills_found, &quiet, ids);
     let mut last_skills = Instant::now();
     // idle desktops: looked at on their cadence, never while held
     let mut last_idle_look = Instant::now();
@@ -1759,7 +1812,7 @@ async fn boot_main() {
             }
         };
         if skills_due {
-            skills_task = spawn_skills(&api, &agents::hermes(&agents), &owner, &skills_found, &quiet);
+            skills_task = spawn_skills(&api, &agents::hermes(&agents), &owner, &skills_found, &quiet, ids);
             last_skills = Instant::now();
         }
         // a desktop no one uses is stopped (desktop.rs); not while held, so
@@ -1852,6 +1905,12 @@ async fn boot_main() {
                     let dir = hermes::profile_dir(&home, &a.fragment);
                     write_config(&api, a, &dir, ids, &route, &credential_env, high_on, face, &team).await;
                     write_identity(a, &dir, ids, face);
+                }
+                // an agent's hidden connection skills changed: its open
+                // chats list the new set at their next turn (deferred by a
+                // hold, it is asked at the next round)
+                if HIDDEN_CHANGED.swap(false, std::sync::atomic::Ordering::SeqCst) && !ask_refresh("connections", quiet.clone()).await {
+                    HIDDEN_CHANGED.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
             }
             if last_sync.elapsed() > Duration::from_millis(sync_every) {
