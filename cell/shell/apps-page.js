@@ -427,14 +427,15 @@ export function createAppsPage(page, h, shelf = "apps") {
   const sharingOf = () => JSON.stringify(h.state.fragments.filter((f) => onShelf(f) && owns(f)).map((f) => [f.name, f.sharing ?? null]));
 
   // who may open one of the person's own, at a glance: "Only you" or
-  // "Shared" (the list's word, `sharedWord`; the access view's, read
-  // later), then what shares it: its link, its people, its invites
+  // "Shared" (the list's word, `sharedWord`, current as the list is: the
+  // access view, read after, can lag it), then what shares it: its link,
+  // its people (the access view's), its invites
   function whoLine(f) {
     const line = h.el("span", "app-row-access");
     const row = access?.fragments?.find((r) => r.name === f.name);
-    const visibility = row?.sharing?.visibility ?? f.sharing?.visibility;
+    const visibility = f.sharing?.visibility ?? row?.sharing?.visibility;
     const [glyph, general] = GENERAL[visibility] ?? GENERAL.members;
-    const word = row?.sharing ? (row.onlyYou ? "Only you" : "Shared") : h.sharedWord(f);
+    const word = h.sharedWord(f);
     line.append(h.icon(glyph), word ?? general);
     if (word !== "Shared") return line;
     if (visibility === "link" || visibility === "public") line.append(` · ${general}`);

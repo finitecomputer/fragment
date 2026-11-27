@@ -1338,6 +1338,7 @@ function openApp(name, path = "/") {
   if (shown && path !== "/") go(shown, framed(name, path));
   const frame = named(frameOf(framed(name, path), titleOf(name), name, { lends: true }), name, (t) => t, "aria-label");
   const status = el("span", "pane-sharing");
+  status.dataset.fragment = name;
   if (f) status.append(...badges(f));
   show({
     key: `app:${name}`, title: titleOf(name), subtitle: !f || own(f) ? undefined : f.role, icon: iconOf(name), body: frame, status,
@@ -2395,6 +2396,11 @@ async function load(changed = false) {
   const before = new Map(state.fragments.map((f) => [f.name, JSON.stringify(f)]));
   if (list) state.fragments = list.fragments ?? [];
   if (list) relend();
+  // each open window's word, as its row says now (a share made since)
+  if (list) for (const s of document.querySelectorAll(".pane-sharing[data-fragment]")) {
+    const f = byName(s.dataset.fragment);
+    s.replaceChildren(...(f ? badges(f) : []));
+  }
   // what a message of theirs may carry (the launcher's files): the platform's
   if (list) state.limits = list.limits ?? null;
   // a chat being made, made, opens once the list has it (making.js `listed`)

@@ -1,6 +1,6 @@
 //! "Only you" or "Shared" (FIN-615 PR 18): each of a person's fragments
 //! says which, derived as their list is read (`Sharing::only_you`, the
-//! list's and the access view's `onlyYou`), never kept; and its link and
+//! list's `onlyYou`), never kept; and its link and
 //! public stay shut for one reason the fragment gives (its status's
 //! `linkShut`, reach.rs `link_shut`), which its visibility refuses with and
 //! its share sheet shows.
@@ -16,14 +16,15 @@ use crate::api::Api;
 use crate::Suite;
 
 /// Valid: the owner's app no one else may open reads "Only you" on their
-/// list and access view, and one shared by name or by link reads nothing
-/// there (so "Shared"), nor does a member's row of someone else's; one
+/// list, and one shared by name or by link reads nothing there (so
+/// "Shared"), nor does a member's row of someone else's; one
 /// holding a key says why its link stays shut (`linkShut: reach`), and its
 /// link is refused for that reason, while one without says nothing. In the
 /// shell, the Apps page's row leads with "Only you" or "Shared" (then "Anyone
 /// with the link" for a linked one), and each window's header says the same
-/// word, with the globe only on the linked one. Shot at a desktop's width
-/// and a phone's, light and dark.
+/// word, with the globe only on the linked one; its link opened while both
+/// are up, each says Shared at once (the list's change). Shot at a
+/// desktop's width and a phone's, light and dark.
 pub(super) fn only_you_label(s: &mut Suite, api: &Api) -> Result<()> {
     let wait = Duration::from_secs(20);
     let (owner, owner_session) = person(api)?;
@@ -48,7 +49,7 @@ pub(super) fn only_you_label(s: &mut Suite, api: &Api) -> Result<()> {
     let r = api.signed(&owner, "PUT", &format!("/api/f/{keyed}/secrets/API_KEY"), Some(&key))?;
     anyhow::ensure!(r.status == 200, "a key on {keyed}: {r}");
 
-    // the list's word, and the access view's, as each is read
+    // the list's word, as it is read
     let rows = |session: &str, path: &str, key: &str| -> Vec<Value> {
         shell(api, session, "GET", path, None, &[]).ok().and_then(|r| r.body[key].as_array().cloned()).unwrap_or_default()
     };
@@ -58,15 +59,12 @@ pub(super) fn only_you_label(s: &mut Suite, api: &Api) -> Result<()> {
         word(&list, &alone) == json!(true) && word(&list, &keyed) == json!(true) && word(&list, &named).is_null() && word(&list, &linked).is_null()
     });
     let list = rows(&owner_session, "/api/fragments", "fragments");
-    let access = rows(&owner_session, "/api/access", "fragments");
     let theirs = rows(&member_session, "/api/fragments", "fragments");
     let said = |rows: &[Value]| json!({ "alone": word(rows, &alone), "keyed": word(rows, &keyed), "named": word(rows, &named), "linked": word(rows, &linked) });
     s.ok(
-        "the owner's list and access view say Only you (`onlyYou`) of theirs no one else may open, a key or not, and nothing of one shared by name or by link; a member's row of someone else's says nothing",
-        settled
-            && said(&access) == json!({ "alone": true, "keyed": true, "named": null, "linked": null })
-            && word(&theirs, &named).is_null(),
-        json!({ "list": said(&list), "access": said(&access), "member's": word(&theirs, &named) }),
+        "the owner's list says Only you (`onlyYou`) of theirs no one else may open, a key or not, and nothing of one shared by name or by link; a member's row of someone else's says nothing",
+        settled && word(&theirs, &named).is_null(),
+        json!({ "list": said(&list), "member's": word(&theirs, &named) }),
     );
 
     // one reason its link stays shut, which its visibility refuses with
@@ -126,6 +124,16 @@ pub(super) fn only_you_label(s: &mut Suite, api: &Api) -> Result<()> {
         }
     }
     chrome.color_scheme(&page, "light")?;
+    chrome.viewport(&page, 1280, 860, false)?;
+    // its link opened while its window and its row are up: both say so at once
+    let r = api.signed(&owner, "PUT", &format!("/api/f/{alone}/visibility"), Some(&json!({ "visibility": "link" })))?;
+    let now = chrome.until(&page, &format!("JSON.stringify({}) === JSON.stringify(['Shared', true]) && {}.startsWith('Shared · Anyone with the link')", head(&alone), line(&alone)), wait);
+    let seen = chrome.eval(&page, &format!("[{}, {}]", head(&alone), line(&alone)))?;
+    s.ok(
+        "its link opened while its window and its Apps row are up, each says Shared at once (the globe too): neither keeps an old word",
+        r.status == 200 && now,
+        json!({ "opened": r.status, "seen": seen }),
+    );
     chrome.close(page)?;
     Ok(())
 }

@@ -1608,10 +1608,6 @@ pub struct AccessRow {
     /// The invites waiting, when it was asked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub invites: Vec<Invite>,
-    /// Its owner's alone (`Sharing::only_you`): the label "Only you", else
-    /// "Shared" (FIN-615 PR 18), derived as the row is read.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub only_you: bool,
 }
 
 fn is_zero_u64(n: &u64) -> bool {

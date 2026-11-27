@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use fragment_core::{form, npub};
 use fragment_proto::{
     limits, Access, AccessMember, AccessRow, CreateInvite, ErrorCode, FragmentKind, IdentityKind, Invite, InviteAccepted, InviteList, Lend, LinkShut, ListedFragment, Member, MemberList, Role, SetRole,
-    SetVisibility, Shared, Sharing, Visibility,
+    SetVisibility, Shared, Visibility,
 };
 use futures_util::future::{join, join_all};
 use serde::de::{DeserializeOwned, IgnoredAny};
@@ -1130,8 +1130,7 @@ pub(crate) async fn access(env: &Env, url: &Url, who: &Signed) -> CellResult<Acc
             // a guest's agent named nowhere, its members read or not (decision 64)
             let others = f.sharing.as_ref().is_none_or(|s| s.with_others());
             let agents = fragment_core::permit::access_agents(f.agents, unnamed.get(&f.name).map(Vec::as_slice), others);
-            let only_you = f.sharing.as_ref().is_some_and(Sharing::only_you);
-            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites, only_you }
+            AccessRow { name: f.name, kind: f.kind, title: f.title, sharing: f.sharing, agents, members, more, invites }
         })
         .collect();
     Ok(Access { fragments })
