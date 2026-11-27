@@ -403,11 +403,11 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
             }
             let value = answer.value.as_deref().map(str::trim).filter(|v| !v.is_empty()).ok_or_else(|| VaultError::Ask("paste the secret first".into()))?;
             let hosts = ask_hosts(ask, None);
-            Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()] })
+            Ok(PutSecret { value: Some(value.to_string()), hosts, place: Place::default(), agents: vec![agent.to_string()], held: None })
         }
         Some(h) => {
             if !answer.allow {
-                return Err(VaultError::Ask(format!("you already keep {}: allow it to keep its saved value, or replace it with `fragment vault set {}`", ask.name, ask.name)));
+                return Err(VaultError::Ask(format!("you already keep {}: allow it to keep its saved value, or replace it in Settings → Secrets", ask.name)));
             }
             if answer.value.is_some() {
                 return Err(VaultError::Ask("Allow keeps the saved secret: it takes no value".into()));
@@ -420,7 +420,7 @@ pub fn answered(ask: &AskSecret, agent: &str, held: Option<&Secret>, answer: &An
             if agents.len() > AGENTS_MAX {
                 return Err(VaultError::Agents(format!("at most {AGENTS_MAX}, not {}", agents.len())));
             }
-            Ok(PutSecret { value: None, hosts, place: h.place.clone(), agents })
+            Ok(PutSecret { value: None, hosts, place: h.place.clone(), agents, held: None })
         }
     }
 }
@@ -468,7 +468,7 @@ pub fn ask_notice(
                 false => format!("You already keep {} for {}.", ask.name, secret.hosts.join(", ")),
             };
             if hosts.len() > HOSTS_MAX || secret.agents.len() + usize::from(shares) > AGENTS_MAX {
-                let detail = format!("{kept} Allowing this would pass its limit of {HOSTS_MAX} hosts and {AGENTS_MAX} agents: decline it, or change {} with `fragment vault set`.", ask.name);
+                let detail = format!("{kept} Allowing this would pass its limit of {HOSTS_MAX} hosts and {AGENTS_MAX} agents: decline it, or change {} in Settings → Secrets.", ask.name);
                 (title, detail, None, vec![decline])
             } else {
                 let mut grants = Vec::new();
@@ -553,7 +553,7 @@ mod tests {
     }
 
     fn put(value: &str, hosts: &[&str], place: Place, agents: &[&str]) -> PutSecret {
-        PutSecret { value: Some(value.into()), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect() }
+        PutSecret { value: Some(value.into()), hosts: hosts.iter().map(|h| h.to_string()).collect(), place, agents: agents.iter().map(|a| a.to_string()).collect(), held: None }
     }
 
     const AGENT: &str = "ada--k3x9";
@@ -860,6 +860,7 @@ mod tests {
             place,
             agents: agents.iter().map(|a| a.to_string()).collect(),
             set_at: 1,
+            revision: None,
         }
     }
 
@@ -882,7 +883,7 @@ mod tests {
     fn an_answer_makes_a_new_secret_or_allows_an_existing_one_without_overwriting() {
         let new_ans = AnswerAsk { held: "none".into(), value: Some(" ghp_abc \n".into()), allow: false };
         let new = answered(&ask("github", "push", &["uploads.github.com", "api.github.com"]), AGENT, None, &new_ans).expect("answered");
-        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()] }, "trimmed as a paste ends");
+        assert_eq!(new, PutSecret { value: Some("ghp_abc".into()), hosts: vec!["api.github.com".into(), "uploads.github.com".into()], place: Place::default(), agents: vec![AGENT.into()], held: None }, "trimmed as a paste ends");
         assert!(check("github", &new, None, &catalog()).is_ok());
 
         for blank in [None, Some(String::new()), Some("  \n".into())] {
@@ -904,6 +905,7 @@ mod tests {
             hosts: vec!["api.github.com".into(), "uploads.github.com".into()],
             place: custom_place.clone(),
             agents: vec![AGENT.into(), "bea--k3x9".into()],
+            held: None,
         });
         assert!(check("github", &shared, Some(&existing.place), &catalog()).is_ok());
 

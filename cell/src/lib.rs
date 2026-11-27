@@ -1500,7 +1500,7 @@ async fn platform_answer(mut req: Request, env: &Env, ctx: &Context, cfg: &'stat
             match area {
                 "connections" => connections::route(&req, env, &url, &who, method, &rest, &body).await,
                 "computers" => computer::route(env, &who.identity.id, who.identity.kind, method, &rest, &body).await,
-                _ => vault::route(env, &who, method, &rest, &body).await,
+                _ => vault::route(env, &url, &who, method, &rest, &body).await,
             }
         }
         (_, ["api", "identities", rest @ ..]) => {

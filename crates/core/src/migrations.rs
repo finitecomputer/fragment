@@ -768,7 +768,7 @@ pub fn vault_secret(kind: SecretKind, fragment: &str, value: &str) -> Option<(St
         let label = label[..label.len().min(room)].trim_end_matches('-');
         format!("{word}-{label}-{hash}--{suffix}")
     };
-    Some((name, PutSecret { value: Some(value), hosts, place, agents: vec![fragment.to_string()] }))
+    Some((name, PutSecret { value: Some(value), hosts, place, agents: vec![fragment.to_string()], held: None }))
 }
 
 // ---- the mover's upload

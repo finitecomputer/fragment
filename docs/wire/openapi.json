@@ -2637,6 +2637,14 @@
             },
             "type": "array"
           },
+          "held": {
+            "default": null,
+            "description": "The secret as its writer last read it (`Secret::revision`), or\n`none` for a name not kept: one that changed since is refused (409)\nand nothing is written. None, it is set whatever is held.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hosts": {
             "description": "The only hosts it is ever sent to (exact DNS names); none, it is\nparked and fills nothing.",
             "items": {
@@ -2988,6 +2996,14 @@
           },
           "place": {
             "$ref": "#/components/schemas/Place"
+          },
+          "revision": {
+            "default": null,
+            "description": "Which one it is (a new value, or a change to its hosts, place or\nagents, makes another), in every answer that reads it: what a\n`PutSecret::held` names. Never kept with it.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "setAt": {
             "description": "When its value was set, in ms since the epoch.",
@@ -7998,6 +8014,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "description": "The secret as its remover last read it (`Secret::revision`): one that changed since is refused (409) and nothing is removed. None, it is removed whatever is held.",
+            "in": "query",
+            "name": "held",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -8035,6 +8060,19 @@
             "description": "`forbidden`",
             "x-fragment-codes": [
               "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
             ]
           },
           "500": {
@@ -8148,6 +8186,19 @@
             "description": "`forbidden`",
             "x-fragment-codes": [
               "forbidden"
+            ]
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            },
+            "description": "`conflict`",
+            "x-fragment-codes": [
+              "conflict"
             ]
           },
           "500": {

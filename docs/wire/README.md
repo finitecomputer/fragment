@@ -377,15 +377,16 @@ A person's secrets, which their agents use without holding: set and listed by th
 - Credentials: NIP-98, the shell's session
 - Body: [`PutSecret`](#putsecret)
 - Answer: [`Secret`](#secret)
-- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+- Refusals ([`ErrorBody`](#errorbody)): 400 `invalid_request`; 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 #### `vault.remove`
 
 `DELETE /api/vault/{secret}`: Removes a secret: its agents' next use of it is refused.
 
 - Credentials: NIP-98, the shell's session
+- Query `held` (`string`, optional): The secret as its remover last read it (`Secret::revision`): one that changed since is refused (409) and nothing is removed. None, it is removed whatever is held.
 - Answer: [`SecretRemoved`](#secretremoved)
-- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 500 `schema_refused`; 503 `deploying`
+- Refusals ([`ErrorBody`](#errorbody)): 401 `unauthenticated`; 403 `forbidden`; 409 `conflict`; 500 `schema_refused`; 503 `deploying`
 
 ## Shapes
 
@@ -1110,6 +1111,7 @@ in, closed. `PUT /api/vault/{secret}`: a secret set (or set again), whole. Only 
 | field | type | | |
 | --- | --- | --- | --- |
 | `agents` | `array` of `string` | required | The agents that may use it, each by its fragment's name: at least one (Paul, 2026-11-09: per agent). |
+| `held` | `string` or `null` | optional | The secret as its writer last read it (`Secret::revision`), or `none` for a name not kept: one that changed since is refused (409) and nothing is written. None, it is set whatever is held. |
 | `hosts` | `array` of `string` | required | The only hosts it is ever sent to (exact DNS names); none, it is parked and fills nothing. |
 | `place` | [`Place`](#place) | optional | Where it goes on a request; none, `Authorization: Bearer {}`. |
 | `value` | `string` or `null` | optional | The value: a printable token, or, for `place.sign`, a Nostr secret key as 64 hex. None, the value it holds is kept: a secret it does not hold yet, or one that would go from signing to filling or back, is refused (400). |
@@ -1216,6 +1218,7 @@ out. A secret as its person reads it: everything but its value.
 | `hosts` | `array` of `string` | required |  |
 | `name` | `string` | required |  |
 | `place` | [`Place`](#place) | required |  |
+| `revision` | `string` or `null` | optional | Which one it is (a new value, or a change to its hosts, place or agents, makes another), in every answer that reads it: what a `PutSecret::held` names. Never kept with it. |
 | `setAt` | `integer` | required | When its value was set, in ms since the epoch. |
 
 ### `SecretAsk`
