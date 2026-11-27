@@ -1161,7 +1161,7 @@ impl FragmentCell {
         }
         if !writes.is_empty() {
             let message = format!("{} {}", p.op, p.id());
-            match self.commit_files(&key, &writes, &BTreeMap::new(), &message, &p.principal, p.depth).await {
+            match self.commit_files(&key, &writes, &BTreeMap::new(), &message, &p.principal, None, p.depth).await {
                 Ok(crate::files::Wrote::Commit(_)) => {}
                 Ok(crate::files::Wrote::Conflict(why)) => unreachable!("a mutation's commit expects nothing, so nothing conflicts: {why}"),
                 Err(e) => return self.after_failure(p, e).await,

@@ -1066,17 +1066,28 @@ impl FragmentCell {
         caller.principal().ok_or_else(|| CellError::new(ErrorCode::Unauthenticated, "sign the request"))
     }
 
-    /// Before `caller` writes its code (`POST /api/files`, a token that
-    /// writes its repo): unless their ask is its owner's (its owner, or
-    /// their own agent for them or as itself), its code is no longer its
-    /// owner's alone (`MetaKey::OthersWrote`, kept for good).
-    pub(crate) fn stamp_others(&self, caller: &Caller) -> CellResult<()> {
+    /// Before a commit to its code lands (files.rs `commit_in`: the files
+    /// API, a job's or mutation's files, an AI step's) or a token that
+    /// writes its repo is minted: unless the write is at its owner's ask,
+    /// its code is no longer its owner's alone (`MetaKey::OthersWrote`, kept
+    /// for good; FIN-615 PR 16b). `writer` signs it; `asker`, whom an agent
+    /// acts for. Its owner's ask is theirs in person, their own agent's for
+    /// them or as itself, or its own code's (its key: a trigger's, a cron's).
+    pub(crate) fn stamp_others(&self, writer: &str, asker: Option<&str>) -> CellResult<()> {
         // one with no owner reads no one's apps (`job.read`)
         let Some(owner) = self.meta(MetaKey::Owner)?.map(|o| npub::display(&o)) else { return Ok(()) };
-        let owners = caller.signed.as_ref().is_some_and(|s| match s.acting_for.as_deref() {
+        let owners = match asker {
             Some(asker) => npub::display(asker) == owner,
-            None => npub::display(&s.id) == owner || s.owner.as_deref().is_some_and(|o| npub::display(o) == owner),
-        });
+            None if npub::display(writer) == owner || writer == self.own_key()? => true,
+            None => {
+                #[derive(serde::Deserialize)]
+                struct Row {
+                    owner: Option<String>,
+                }
+                let rows: Vec<Row> = self.typed("SELECT owner FROM members WHERE principal = ? AND kind = 'agent'", vec![writer.into()])?;
+                rows.first().and_then(|r| r.owner.as_deref()).is_some_and(|o| npub::display(o) == owner)
+            }
+        };
         if owners {
             return Ok(());
         }

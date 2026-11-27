@@ -1280,7 +1280,7 @@ impl FragmentCell {
         let key = format!("{JOB_ID_PREFIX}{}:{index}", run.id);
         let message = format!("{} run {}: {} {path}", run.op, run.id, if bytes.is_some() { "write" } else { "remove" });
         let writes = [crate::files::FileWrite { path, bytes }];
-        match self.commit_files(&key, &writes, &expected, &message, &run.principal, run.depth).await.map_err(settle_files)? {
+        match self.commit_files(&key, &writes, &expected, &message, &run.principal, run.acting_for(), run.depth).await.map_err(settle_files)? {
             crate::files::Wrote::Commit(sha) => Ok(json!({ "commit": sha })),
             crate::files::Wrote::Conflict(why) => Err(permanent(format!("conflict: {why}"))),
         }

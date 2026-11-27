@@ -29,6 +29,11 @@ export class App extends DurableObject {
     return await job.read(fragment, op, input ?? {});
   }
 
+  // A file of the caller's, written by the app's own job (`job.files.write`).
+  async put_file({ path, text }, job) {
+    return await job.files.write(path, text);
+  }
+
   // An inbox's answer (`inbox.answer`, where a test declares it): a URL
   // check's challenge said back, else the platform's own answer.
   handshake({ record }) {

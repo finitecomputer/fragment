@@ -1873,10 +1873,12 @@ steps:
   where it reads), and only while the app is theirs alone: no one else in
   it or invited (`Sharing::only_you`, the label "Only you": members only)
   and its code never written at anyone else's ask (`others_wrote`, set
-  for good by `POST /api/files` or a token that writes the repo). Else
-  the step fails: "This app can read your other apps only while it's
-  yours alone." What it read is then the app's: sharing the app later
-  shares what it kept. The fragment read decides what its owner may read
+  for good by any commit to it at someone else's ask: `POST /api/files`,
+  a job's or a mutation's files, an AI step's, or a token that writes the
+  repo). An app someone else has written code into can't read your other
+  apps. Else the step fails: "This app can read your other apps only
+  while it's yours alone." What it read is then the app's: sharing the
+  app later shares what it kept. The fragment read decides what its owner may read
   there, and answers a query alone (`POST /api/f/{name}/reads/{op}`:
   `ops/{op}` for a query, any other kind 403 once the caller may see the
   fragment). Its `result`.

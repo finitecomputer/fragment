@@ -596,15 +596,36 @@ fn reads_as_owner(s: &mut Suite, api: &Api) -> Result<()> {
     anyhow::ensure!(r.status == 200, "her agent's read started: {r}");
     let agents = settle(api, &ana, &dash, started(&r), &["succeeded", "held"], long);
     s.ok("her agent's run, for her, reads none of her apps (she reads as herself, in person)", alone(&agents), &agents);
-    // Carl, once its editor, wrote its code: even gone, it reads none again
+    // Carl, its editor: a write refused writes nothing, and leaves no mark
     let carl_id = api.identity(&carl)?;
-    anyhow::ensure!(api.share(&dash, &carl_id, "editor")?.status == 200, "Carl in her dashboard");
+    let (carl_in, carl_out) = (|| api.share(&dash, &carl_id, "editor"), || api.signed(&ana, "DELETE", &format!("/api/f/{dash}/members/{carl_id}"), None));
+    anyhow::ensure!(carl_in()?.status == 200, "Carl in her dashboard");
+    let refused = api.signed(&carl, "POST", &format!("/api/f/{dash}/files"), Some(&json!({ "files": [] })))?;
+    anyhow::ensure!(carl_out()?.status == 200, "Carl removed");
+    let unwritten = read("r7", &notes, "items")?;
+    s.ok("an editor's write refused (400) leaves no mark: gone, it reads her notes again", refused.status == 400 && unwritten["status"] == "succeeded", json!({ "refused": refused.status, "run": unwritten }));
+    // Carl wrote its code: even gone, it reads none again
+    anyhow::ensure!(carl_in()?.status == 200, "Carl in her dashboard again");
     let wrote = api.signed(&carl, "POST", &format!("/api/f/{dash}/files"), Some(&json!({ "files": [{ "path": "site/carl.txt", "text": "Carl's\n" }] })))?;
     anyhow::ensure!(wrote.status == 200, "Carl wrote a file: {wrote}");
-    let gone = api.signed(&ana, "DELETE", &format!("/api/f/{dash}/members/{carl_id}"), None)?;
-    anyhow::ensure!(gone.status == 200, "Carl removed: {gone}");
-    let others = read("r7", &notes, "items")?;
+    anyhow::ensure!(carl_out()?.status == 200, "Carl removed again");
+    let others = read("r8", &notes, "items")?;
     s.ok("once someone else wrote its code, it reads none of her apps, even with them gone", alone(&others), &others);
+    // the same through the app's own job: Dave, an editor of her second dashboard
+    let (dash2, _) = jobs_fragment(s, api, &ana, "dash2", |_| {})?;
+    let r = api.signed(&ana, "PUT", &format!("/api/f/{dash2}/visibility"), Some(&json!({ "visibility": "members" })))?;
+    anyhow::ensure!(r.status == 200, "{dash2} members only: {r}");
+    let dave = api.person()?;
+    let dave_id = api.identity(&dave)?;
+    anyhow::ensure!(api.share(&dash2, &dave_id, "editor")?.status == 200, "Dave in her second dashboard");
+    let put = api.op(&dave, &dash2, "put_file", "d1", json!({ "path": "site/dave.txt", "text": "Dave's\n" }))?;
+    anyhow::ensure!(put.status == 200, "Dave's job started: {put}");
+    let put = settle(api, &dave, &dash2, started(&put), &["succeeded", "held"], long);
+    anyhow::ensure!(api.signed(&ana, "DELETE", &format!("/api/f/{dash2}/members/{dave_id}"), None)?.status == 200, "Dave removed");
+    let r = api.op(&ana, &dash2, "reads", "r9", json!({ "fragment": notes, "op": "items", "input": {} }))?;
+    anyhow::ensure!(r.status == 200, "the read started: {r}");
+    let by_job = settle(api, &ana, &dash2, started(&r), &["succeeded", "held"], long);
+    s.ok("code someone else wrote through the app's own job counts as theirs too", put["status"] == "succeeded" && alone(&by_job), json!({ "put": put, "read": by_job }));
     // the route, asked by someone who can't see her notes: no kind told
     let asked = |op: &str| api.signed(&carl, "POST", &format!("/api/f/{notes}/reads/{op}"), Some(&json!({ "id": "c1", "input": {} })));
     let (mutation, missing) = (asked("save")?, asked("no_such_op")?);

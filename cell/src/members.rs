@@ -331,7 +331,7 @@ impl FragmentCell {
         let expect = BTreeMap::from([(JOB.to_string(), Some(file.blob_sha))]);
         let key = format!("face:{by}:{}", js::random_hex::<16>());
         let write = crate::files::FileWrite { path, bytes: Some(renamed.clone().into_bytes()) };
-        match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, 0).await {
+        match self.commit_in(&repo, &key, &[write], &expect, &format!("its job, renamed {asked}"), by, None, 0).await {
             Ok(crate::files::Wrote::Commit(_)) => Ok(()),
             // not written: the attempts it may hold are the ones before
             Ok(crate::files::Wrote::Conflict(why)) => {

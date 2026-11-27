@@ -249,7 +249,7 @@ impl FragmentCell {
                 self.same_life(life, "while its template's files were read")?;
                 let repo = self.must(MetaKey::Repo)?;
                 let key = format!("template:{life}");
-                if let Wrote::Conflict(why) = self.commit_in(&repo, &key, &files, &BTreeMap::new(), &format!("start from the {which} template"), owner, 0).await? {
+                if let Wrote::Conflict(why) = self.commit_in(&repo, &key, &files, &BTreeMap::new(), &format!("start from the {which} template"), owner, None, 0).await? {
                     return Err(CellError::host(why));
                 }
                 Ok(vec![Event::Committed])
@@ -339,7 +339,7 @@ impl FragmentCell {
         // let in to this life: one ended while its ledger was asked is not its
         self.same_life(life, "while its ledger was asked")?;
         let who = self.caller_id(caller)?.to_string();
-        self.stamp_others(caller)?;
+        let asker = caller.signed.as_ref().and_then(|s| s.acting_for.clone());
         let files = body["files"].as_array().filter(|f| !f.is_empty()).ok_or_else(|| CellError::invalid("files: a list of {path, text | base64 | delete}"))?;
         let mut writes = Vec::with_capacity(files.len());
         for f in files {
@@ -379,7 +379,7 @@ impl FragmentCell {
         if manifest.as_deref().map(|m| self.title_read_stale(m)).transpose()? == Some(true) {
             return Err(CellError::new(ErrorCode::Conflict, "it was renamed since its manifest was read: nothing was written; read it again"));
         }
-        match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, 0).await? {
+        match self.commit(&key, &writes, &BTreeMap::new(), &message, &who, asker.as_deref(), 0).await? {
             Wrote::Commit(sha) => {
                 // in the life it was let in to: one ended meanwhile renames no other
                 if let Some(written) = manifest.as_deref().filter(|_| self.life().ok() == Some(life)) {

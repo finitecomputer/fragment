@@ -735,7 +735,10 @@ unfinished design, not debt.
   anyone else is in it, or once anyone else wrote its code, the step fails.
   An app's code is its editors', so a viewer who isn't its owner, or code
   someone else wrote, would read the viewer's things into what others hold
-  (SHIP IT, 2026-11-26). `others_wrote` stays set: no way back.
+  (SHIP IT, 2026-11-26). `others_wrote` stays set: no way back. An app
+  someone else wrote into before it was kept (this release) carries no
+  mark, nor does a mutation's write an agent made for someone else (its
+  pending row names no asker).
 - **Risk:** a shared dashboard can't show each viewer their own other
   apps; an app anyone else once edited never reads again; an agent's run
   reads nothing (its caps would have to travel to the app it reads).
