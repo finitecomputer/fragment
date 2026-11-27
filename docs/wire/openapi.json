@@ -888,7 +888,7 @@
           },
           "chatRelease": {
             "default": false,
-            "description": "It runs the release's chat template, its page the platform's code,\nas its face says (its blessed release): `microphone` is then the\nsigner's one yes for every such chat, which that page asks for\nbefore it records. Left out while false.",
+            "description": "It runs the release's chat template, its page the platform's code,\nas its face says (its blessed release): `microphone` is then the\nsigner's one yes for every such chat. Left out while false.",
             "type": "boolean"
           },
           "dock": {
