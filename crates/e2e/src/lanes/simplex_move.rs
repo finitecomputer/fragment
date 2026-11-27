@@ -129,10 +129,12 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     // says made (as its Worker stopping there would, or a secret's write
     // failing): its record names that connector, the one its person holds;
     // asked again, the move refuses (`--back` first) and makes nothing; its
-    // `--back` deletes it, never bound, and a fresh move makes exactly one
-    // (the review of #1541's `make`)
+    // `--back` archives it (never deletes: kept, out of its person's way),
+    // and a fresh move leaves exactly one live (the review of #1541's `make`)
     let label = agent.rsplit_once("--").map_or(agent.as_str(), |(l, _)| l).to_string();
-    let connectors = || -> Vec<String> { listed(api, &owner).into_iter().filter_map(|f| f["name"].as_str().map(str::to_string)).filter(|n| *n != old && n.rsplit_once("--").is_some_and(|(l, _)| l == format!("{label}-simplex"))).collect() };
+    // its person's connectors for this agent, but its old chat: live, then archived
+    let listed_as = |archived: bool| -> Vec<String> { listed(api, &owner).into_iter().filter(|f| (f["archived"] == true) == archived).filter_map(|f| f["name"].as_str().map(str::to_string)).filter(|n| *n != old && n.rsplit_once("--").is_some_and(|(l, _)| l == format!("{label}-simplex"))).collect() };
+    let connectors = || listed_as(false);
     let stop_made = || lever_with(api, &id, json!({ "op": "fail-set", "path": "made", "times": 1 }));
     anyhow::ensure!(stop_made()?.status == 200, "the fail-set lever");
     let stopped = mv("go")?;
@@ -150,18 +152,27 @@ pub fn simplex_move(s: &mut Suite, api: &Api) -> Result<()> {
     let again = mv("go")?;
     let still = connectors();
     let back = mv("back")?;
-    let gone = connectors();
+    let (gone, kept) = (connectors(), listed_as(true));
     anyhow::ensure!(stop_made()?.status == 200, "the fail-set lever");
     let fresh = mv("go")?;
     let fresh_name = mv("plan")?.body["record"]["connector"].as_str().unwrap_or("").to_string();
     let one = connectors();
-    let cleared = mv("back")?;
-    let none = connectors();
     s.ok(
-        "asked again, the move refuses (`already_exists`: `--back` first) and makes nothing new; `--back` deletes its connector (never bound); a fresh move makes exactly one, and its `--back` deletes that",
+        "asked again, the move refuses (`already_exists`: `--back` first) and makes nothing new; `--back` archives its connector, never deleted; a fresh move leaves exactly one live",
         again.status == 409 && again.body["error"] == "already_exists" && still == vec![first_name.clone()]
-            && back.status == 200 && gone.is_empty() && fresh.status != 200 && !fresh_name.is_empty() && fresh_name != first_name && one == vec![fresh_name.clone()] && cleared.status == 200 && none.is_empty(),
-        json!({ "again": again.body, "still": still, "back": back.body, "gone": gone, "fresh": fresh.body, "one": one, "cleared": cleared.body, "none": none }),
+            && back.status == 200 && back.body["connector"] == first_name.as_str() && gone.is_empty() && kept == vec![first_name.clone()]
+            && fresh.status != 200 && !fresh_name.is_empty() && fresh_name != first_name && one == vec![fresh_name.clone()],
+        json!({ "again": again.body, "still": still, "back": back.body, "gone": gone, "kept": kept, "fresh": fresh.body, "one": one }),
+    );
+    // that one deleted by its person: its `--back` reads it gone (the typed
+    // answer of a connector never made) and archives nothing
+    let deleted = api.signed(&owner, "DELETE", &format!("/api/f/{fresh_name}"), None)?;
+    let cleared = mv("back")?;
+    let (none, archived, after) = (connectors(), listed_as(true), mv("plan")?.body["record"].clone());
+    s.ok(
+        "its connector deleted by its person, `--back` finds it gone and archives nothing; the move is forgotten",
+        deleted.status == 200 && cleared.status == 200 && cleared.body["connector"].is_null() && none.is_empty() && archived == vec![first_name.clone()] && after.is_null(),
+        json!({ "deleted": deleted.status, "cleared": cleared.body, "none": none, "archived": archived, "record": after }),
     );
 
     // its link's save damaged on its way out of its computer each of the

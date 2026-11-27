@@ -247,7 +247,7 @@ impl Move<'_> {
 
     /// Its connector, by the name its record holds: made as the person's
     /// own from the SimpleX template (made already, by a `go` that stopped
-    /// or lost its answer: refused, never a second, until `--back` deletes
+    /// or lost its answer: refused, never a second, until `--back` archives
     /// it), on a deployment whose doors run, its inbox's secret set. Bound
     /// only once its door holds the link (`bind`).
     async fn make(&self, rec: &Value) -> CellResult<Value> {
@@ -262,10 +262,10 @@ impl Move<'_> {
         // its door fenced from now until the link is given (cell/door.mjs
         // `EXPECTING`): its setup page, opened meanwhile, starts no new
         // profile. Refused (a deployment that runs no doors), its
-        // connector goes, nothing moved.
+        // connector is archived, nothing moved.
         let mut expected = crate::routed::send(self.env, "SIMPLEX_DOOR", &door, crate::routed::internal_request("door/expect", &json!({ "door": door }).to_string())?).await?;
         if let Err(e) = answer(&mut expected, "its door's fence").await {
-            self.delete(name).await?;
+            self.archived(name, true).await?;
             self.forget().await?;
             return Err(e);
         }
@@ -274,9 +274,9 @@ impl Move<'_> {
         let rec = match self.set("making", Some(text(rec, "claim")), json!({ "door": door, "step": "made" })).await {
             Ok(rec) => rec,
             // its claim let go meanwhile (a `back`): the connector it made
-            // is no one's move, so it goes, its door with it
+            // is no one's move, archived as `back` leaves one
             Err(e) if e.code == ErrorCode::Conflict => {
-                self.delete(name).await?;
+                self.archived(name, true).await?;
                 return Err(e);
             }
             Err(e) => return Err(e),
@@ -351,14 +351,6 @@ impl Move<'_> {
         Ok(r)
     }
 
-    /// Its connector `name` deleted, its door with it (gone already: done).
-    async fn delete(&self, name: &str) -> CellResult<()> {
-        match self.as_person(name, Method::Delete, "/delete", None).await {
-            Err(e) if e.code != ErrorCode::NotFound => Err(e),
-            _ => Ok(()),
-        }
-    }
-
     async fn forget(&self) -> CellResult<Value> {
         crate::computer::ask(self.env, &self.computer, "computer/simplex-moves", &json!({ "op": "forget", "agent": self.agent })).await
     }
@@ -417,24 +409,29 @@ impl Move<'_> {
         if let Some(chat) = rec["chat"].as_str() {
             self.archived(chat, false).await?;
         }
-        // its connector never bound (no message of its person's in it): it
-        // goes. Bound, it is kept, its chat's history with it: unbound (its
-        // door ends) once it has taken what its door delivered, and archived
-        if let Some(connector) = rec["connector"].as_str().filter(|_| matches!(text(&rec, "step"), "making" | "made" | "imported")) {
-            self.delete(connector).await?;
-        } else if let Some(connector) = rec["connector"].as_str() {
-            if self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await? {
-                return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published: ask again")));
-            }
-            match self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await {
-                Err(e) if e.code != ErrorCode::NotFound => return Err(e),
-                Err(_) => {}
-                Ok(_) => self.archived(connector, true).await?,
+        // its connector kept, never deleted (the name its record holds may
+        // be one a `go` beside this one is making, or another of its
+        // person's), its chat's history with it: unbound (its door ends)
+        // once it has taken what its door delivered, and archived
+        let mut archived = None;
+        if let Some(connector) = rec["connector"].as_str() {
+            match self.unfinished(connector, "intake", &["queued", "running", "held", "blocked"]).await {
+                // never made (its `go` stopped first), or deleted since:
+                // nothing to unbind or archive. That typed answer alone
+                // (`answer`): any other refusal is asked again
+                Err(e) if e.code == ErrorCode::NotFound && e.message == fragment_proto::NOT_CREATED => {}
+                Err(e) => return Err(e),
+                Ok(true) => return Err(CellError::new(ErrorCode::Conflict, format!("{connector} has messages not yet published: ask again"))),
+                Ok(false) => {
+                    self.as_person(connector, Method::Post, "/api/door", Some(&json!({ "act": "unlink" }))).await?;
+                    self.archived(connector, true).await?;
+                    archived = Some(connector);
+                }
             }
         }
         self.forget().await?;
-        self.note(format!("{} went back to its computer; {} archived", self.agent, rec["connector"].as_str().unwrap_or("no connector"))).await?;
-        Ok(json!({ "agent": self.agent, "back": true, "connector": rec["connector"] }))
+        self.note(format!("{} went back to its computer; {} archived", self.agent, archived.unwrap_or("no connector"))).await?;
+        Ok(json!({ "agent": self.agent, "back": true, "connector": archived }))
     }
 
     /// Whether `connector` has a run of `op` in one of the `live` statuses:
@@ -464,7 +461,12 @@ async fn answer(r: &mut Response, what: &str) -> CellResult<Value> {
         return crate::json_text::<Value>(&text).map_err(|e| CellError::host(format!("{what}: {e}")));
     }
     let body: Value = crate::json_text(&text).unwrap_or(Value::Null);
-    let said = body["error"].as_str().unwrap_or("");
+    let (said, message) = (body["error"].as_str().unwrap_or(""), body["message"].as_str().unwrap_or(&text));
+    // a fragment never made, or deleted: that typed answer alone, said as
+    // the platform says it (`back` reads it so)
+    if fragment_core::door::never_made(status, said, message) {
+        return Err(CellError::new(ErrorCode::NotFound, fragment_proto::NOT_CREATED));
+    }
     let code = crate::json_text::<ErrorCode>(&format!("{said:?}")).ok().unwrap_or(if status == 409 { ErrorCode::Conflict } else { ErrorCode::UpstreamFailed });
-    Err(CellError::new(code, format!("{what}: {status} {said}: {}", body["message"].as_str().unwrap_or(&text))))
+    Err(CellError::new(code, format!("{what}: {status} {said}: {message}")))
 }

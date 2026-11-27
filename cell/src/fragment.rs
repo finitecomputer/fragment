@@ -705,7 +705,7 @@ pub(crate) fn missing(key: MetaKey) -> CellError {
 }
 
 fn not_created() -> CellError {
-    CellError::new(ErrorCode::NotFound, "no such fragment")
+    CellError::new(ErrorCode::NotFound, fragment_proto::NOT_CREATED)
 }
 
 /// Whether a standing is the caller's own (a membership, or an agent

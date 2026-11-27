@@ -626,6 +626,10 @@ pub const VALID_KIND_JS: &str = r#"export function validKind(kind) {
   return typeof kind === "string" && /^[a-z][a-z0-9._-]{0,63}$/.test(kind);
 }"#;
 
+/// The message of the one `not_found` a fragment never made, or deleted,
+/// answers whatever it is asked (cell/src/fragment.rs `not_created`).
+pub const NOT_CREATED: &str = "no such fragment";
+
 /// Every refusal the platform answers with, as `{"error": code, "message"}`.
 ///
 /// Open (`x-fragment-open`, docs/wire): a code this reader does not know

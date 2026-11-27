@@ -1794,7 +1794,10 @@ fn run(cli: Cli) -> Result<()> {
             if back {
                 let v = ask("back")?;
                 json_exit(j, &v);
-                println!("{agent}'s SimpleX is on its computer again; {} unbound and archived, its history kept", v["connector"].as_str().unwrap_or("no connector"));
+                match v["connector"].as_str() {
+                    Some(c) => println!("{agent}'s SimpleX is on its computer again; {c} unbound and archived, its history kept"),
+                    None => println!("{agent}'s SimpleX is on its computer again; no connector to archive"),
+                }
                 return Ok(());
             }
             if dry_run || !yes {
@@ -1813,7 +1816,7 @@ fn run(cli: Cli) -> Result<()> {
             // bounded: a door links within minutes; each ask goes on from its record
             let t0 = std::time::Instant::now();
             loop {
-                let v = ask("go").map_err(|e| if e.to_string().contains("already_exists") { e.context("its connector was made by a move that stopped: --back first, then --yes") } else { e })?;
+                let v = ask("go").map_err(|e| if e.to_string().contains("already_exists") { e.context("its connector was made by a move that stopped: --back archives it, then --yes") } else { e })?;
                 let step = v["record"]["step"].as_str().unwrap_or("?").to_string();
                 if step == "done" || step == "offered" {
                     json_exit(j, &v);

@@ -96,6 +96,16 @@ pub fn handover_refusal_unmarks(error: &str, retried: bool) -> bool {
     !retried && error != "moved"
 }
 
+/// Whether a fragment's answer (its HTTP `status`, typed `error` and
+/// `message`) says it was never made, or was deleted: that one typed
+/// `not_found` alone (`fragment_proto::NOT_CREATED`). Any other 404, a
+/// route's or an untyped one, is a fragment that is there and answered
+/// wrong: never read as one with nothing in it (a way back's count of its
+/// connector's unfinished intake runs, Rule C).
+pub fn never_made(status: u16, error: &str, message: &str) -> bool {
+    status == 404 && error == "not_found" && message == fragment_proto::NOT_CREATED
+}
+
 /// A SimpleX connector's door: its name and the first `DOOR_LIFE_HEX` hex
 /// digits of a digest of its life's own key (its npub, drawn new for each
 /// life), as its repo is named (`codestorage::repo_name`). A name made
@@ -351,6 +361,25 @@ mod tests {
         assert!(!handover_refusal_unmarks("moved", false));
         assert!(!handover_refusal_unmarks("forbidden", true));
         assert!(!handover_refusal_unmarks("busy", true));
+    }
+
+    /// Goal: a way back passes over a connector only when the platform
+    /// says it was never made, or was deleted. Valid: the typed
+    /// `not_found` with its own message. Invalid: a 404 untyped or typed
+    /// otherwise (a route's, an ended address's), the same message under
+    /// another status or code, and any other refusal.
+    #[test]
+    fn only_the_typed_answer_says_never_made() {
+        assert!(never_made(404, "not_found", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "", "Not Found"));
+        assert!(!never_made(404, "not_found", "no route GET /api/runs"));
+        assert!(!never_made(404, "not_found", "the app at this address has ended"));
+        assert!(!never_made(404, "not_found", "no such fragment here"));
+        assert!(!never_made(500, "not_found", fragment_proto::NOT_CREATED));
+        assert!(!never_made(404, "forbidden", fragment_proto::NOT_CREATED));
+        assert!(!never_made(403, "forbidden", "only its owner, in person, binds a connector"));
+        assert!(!never_made(500, "host_failed", "a created fragment has no owner"));
     }
 
     /// Goal: a SimpleX connector's jobs reach their own door alone, and no
