@@ -21,7 +21,7 @@ step Fragment 14 trigger_kinds e4accb2c78ba5f08
 step Fragment 15 askers 14b4892acdccbe6a
 step Fragment 16 carried_asks fb079586722eb2c1
 step Fragment 17 asks 7081acc901c95835
-step Fragment 18 owner_ask 8b461e5becf1683d
+step Fragment 18 owner_ask f267c09a4740e750
 step Registry 1 baseline fd5a79e5c834a15d
 step Registry 2 connection_signins e9d1f862c2e3e4ed
 step Registry 3 trial_hold_attempts 07e123e05a049abe
@@ -95,7 +95,7 @@ Fragment table file_commits: CREATE TABLE file_commits (key TEXT PRIMARY KEY, sh
 Fragment table index_outbox: CREATE TABLE index_outbox ( principal TEXT PRIMARY KEY, role TEXT, version INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
 Fragment table invites: CREATE TABLE invites ( email TEXT PRIMARY KEY, role TEXT NOT NULL, expires_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL)
 Fragment table joined_outbox: CREATE TABLE joined_outbox ( principal TEXT PRIMARY KEY, owner TEXT NOT NULL, added_at INTEGER NOT NULL, attempts INTEGER NOT NULL, next_at INTEGER NOT NULL)
-Fragment table lent_once: CREATE TABLE lent_once ( agent TEXT NOT NULL, asker TEXT NOT NULL, what TEXT NOT NULL, after INTEGER NOT NULL, PRIMARY KEY (agent, asker, what))
+Fragment table lent_once: CREATE TABLE lent_once ( ask TEXT PRIMARY KEY, agent TEXT NOT NULL, asker TEXT NOT NULL, what TEXT NOT NULL, after INTEGER NOT NULL, request INTEGER)
 Fragment table listed: CREATE TABLE listed ( channel TEXT NOT NULL, principal TEXT NOT NULL, seq INTEGER NOT NULL, at INTEGER NOT NULL, kind TEXT NOT NULL, fields TEXT NOT NULL, last INTEGER NOT NULL, PRIMARY KEY (channel, principal))
 Fragment table making: CREATE TABLE making (key TEXT PRIMARY KEY, run INTEGER NOT NULL, attempt INTEGER NOT NULL, at INTEGER NOT NULL)
 Fragment table members: CREATE TABLE members ( principal TEXT PRIMARY KEY, role TEXT NOT NULL, added_by TEXT NOT NULL, added_at INTEGER NOT NULL, kind TEXT, owner TEXT, lend INTEGER)

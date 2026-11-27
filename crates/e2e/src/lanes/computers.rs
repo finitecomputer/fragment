@@ -90,6 +90,7 @@ const ASKER_CHECKS: &[&str] = &[
     "its computer's word on its turns is no longer taken (the place opens them): told on the old route that their turn ended, its call for its owner on their ask still goes as them",
     "nor that their turn is its owner's: its call for its owner on their ask still goes as them",
     "on their ask, its call as itself is held to them too: refused in its owner's app where they are no member, though the agent is, by its API and by its site; its owner's same asks go, as the agent",
+    "an Allow once is bound to their next words as they are posted: in a chat that keeps two records, those words pushed out by their ask after lend that ask nothing, and it asks its owner again",
     "fail closed, never lost: while the agent's fragment refuses the chat's word, their ask is not handed to the agent (the chat's events say so); once it takes it, it is answered, as theirs",
 ];
 
@@ -228,7 +229,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
             && asking.len() == 1
             && card["body"]["asks"] == owner_id.as_str()
             && card["body"]["asker"] == ben_id.as_str()
-            && card["body"]["fragment"] == chat
+            && card["body"]["fragment"].is_null()
             && card["body"]["options"] == json!(["once", "always", "no"]),
         json!({ "paid": spent, "account": unlent, "again": again, "cards": asking }),
     );
@@ -315,7 +316,8 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let r = api.share(&hers, &ben_id, "editor")?;
     anyhow::ensure!(r.status == 200, "Ben in her own chat: {r}");
     let in_his = asked_in(s, &bens_chat, &ben, "bens-own-1", &account)?;
-    let elsewhere = open_card(w.owner, &hers, "accounts").into_iter().find(|c| c["body"]["fragment"] == bens_chat.as_str()).unwrap_or(Value::Null);
+    // the card about another chat, which it never names
+    let elsewhere = open_card(w.owner, &hers, "accounts").into_iter().find(|c| c["body"]["elsewhere"] == true && c["body"]["asker"] == ben_id.as_str()).unwrap_or(Value::Null);
     let not_in_his = cards(&ben, &bens_chat, "ask").is_empty();
     let always = answer(w.owner, &hers, &elsewhere["seq"], "always")?;
     let once = api.signed(w.owner, "POST", &format!("/api/f/{hers}/channels/chat"), Some(&json!({ "id": "aa-elsewhere", "body": { "kind": "ask_answer", "option": "once", "answers": { "channel": "work", "seq": elsewhere["seq"] } } })))?;
@@ -325,6 +327,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         asked_its_owner(&in_his)
             && elsewhere["body"]["asks"] == owner_id.as_str()
             && elsewhere["body"]["elsewhere"] == true
+            && elsewhere["body"]["fragment"].is_null()
             && elsewhere["body"]["options"] == json!(["once", "no"])
             && not_in_his
             && always.status == 400
@@ -333,13 +336,37 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         json!({ "asked": in_his, "card": elsewhere, "in_his": not_in_his, "always": always.status, "once": once.status, "given": given, "nowhere": events(api, w.owner, w.agent).into_iter().filter(|e| e["kind"] == "ask.nowhere").collect::<Vec<_>>() }),
     );
     let in_hers = asked_in(s, &hers, &ben, "bens-in-hers", &account)?;
-    let shared = open_card(w.owner, &hers, "accounts").into_iter().find(|c| c["body"]["fragment"] == hers.as_str()).unwrap_or(Value::Null);
+    let shared = open_card(w.owner, &hers, "accounts").into_iter().find(|c| c["body"]["elsewhere"] != true && c["body"]["asker"] == ben_id.as_str()).unwrap_or(Value::Null);
     let bens_view = open_card(&ben, &hers, "accounts").into_iter().any(|c| c["seq"] == shared["seq"]);
     let no = answer(w.owner, &hers, &shared["seq"], "no")?;
     s.ok(
         ASKER_CHECKS[10],
         asked_its_owner(&in_hers) && shared["body"]["asks"] == owner_id.as_str() && shared["body"]["asker"] == ben_id.as_str() && bens_view && no.status == 200,
         json!({ "asked": in_hers, "card": shared, "bens_view": bens_view, "no": no.status }),
+    );
+    // an Allow once bound to its request as that is posted: retention that
+    // drops the request passes the grant on to none of theirs after
+    let kept = s.named(api, w.owner, "asker-kept")?;
+    let r = api.create_with(w.owner, json!({ "name": kept, "template": "chat" }))?;
+    anyhow::ensure!(r.status == 200, "the chat that keeps two: {r}");
+    s.owned(&r.body, w.owner);
+    let r = api.signed(w.owner, "PUT", &format!("/api/f/{kept}/members/{}", w.identity), Some(&json!({ "role": "editor" })))?;
+    anyhow::ensure!(r.status == 200, "the agent in the chat that keeps two: {r}");
+    let r = api.share(&kept, &ben_id, "editor")?;
+    anyhow::ensure!(r.status == 200, "Ben in the chat that keeps two: {r}");
+    let first = asked_in(s, &kept, &ben, "kept-1", &account)?;
+    let card = open_card(w.owner, &kept, "accounts").first().cloned().unwrap_or(Value::Null);
+    let once = answer(w.owner, &kept, &card["seq"], "once")?;
+    // their next words ask nothing of it: the grant's one request
+    let words = asked_in(s, &kept, &ben, "kept-2", "hello there")?;
+    let lever = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": kept, "op": "posted-kept", "n": 2 })))?;
+    // their ask after, appended as their words before it are dropped
+    let after = asked_in(s, &kept, &ben, "kept-3", &account)?;
+    let dropped = !records(api, w.owner, &kept, "chat").iter().any(|r| r["body"]["text"] == "hello there");
+    s.ok(
+        ASKER_CHECKS[16],
+        asked_its_owner(&first) && once.status == 200 && !words.is_empty() && lever.status == 200 && dropped && asked_its_owner(&after),
+        json!({ "first": first, "once": once.status, "words": words, "lever": lever.status, "dropped": dropped, "after": after }),
     );
     // dangerous: deleting asks its owner to confirm it, each time
     let doomed = s.named(api, w.owner, "asker-doomed")?;
@@ -446,7 +473,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let reply = || agent_replies(&records(api, w.owner, chat, "chat"), w.identity).into_iter().find(|r| r["body"]["turn"] == turn.as_str());
     s.eventually(wake + Duration::from_secs(60), || reply().is_some());
     let said = reply().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
-    s.ok(ASKER_CHECKS[16], refused && !claimed && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "refused": refused, "claimed": claimed, "said": said }));
+    s.ok(ASKER_CHECKS[17], refused && !claimed && whose(&said) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "refused": refused, "claimed": claimed, "said": said }));
     let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
     Ok(turns.get())

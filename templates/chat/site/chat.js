@@ -1040,8 +1040,9 @@ export function mount(root) {
   const ASK_WHAT = ["spend", "accounts", "delete", "cap"];
   function onAsk(record, b) {
     if (b.kind === "ask") {
-      const about = b.fragment;
-      if (typeof b.asks !== "string" || typeof b.agent !== "string" || !ASK_WHAT.includes(b.what) || typeof about !== "string") return;
+      // a confirm names the fragment it is about; a lend's card names none
+      const about = typeof b.fragment === "string" ? b.fragment : null;
+      if (typeof b.asks !== "string" || typeof b.agent !== "string" || !ASK_WHAT.includes(b.what) || (about === null && (b.what === "delete" || b.what === "cap"))) return;
       const options = Array.isArray(b.options) ? b.options.filter((o) => typeof o === "string") : [];
       state.asks.set(record.seq, { seq: record.seq, at: record.at, n: record.seq, agent: b.agent, asker: typeof b.asker === "string" ? b.asker : null, asks: b.asks, what: b.what, fragment: about, title: typeof b.title === "string" ? b.title : null, micros: Number.isSafeInteger(b.micros) ? b.micros : null, elsewhere: b.elsewhere === true, options, expiresAt: b.expiresAt });
       expiryTimer();
