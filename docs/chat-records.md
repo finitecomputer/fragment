@@ -393,7 +393,7 @@ own, never in a turn:
 
 ```json
 { "kind": "ask", "turn": "…", "agent": "npub1…", "asker": "npub1…", "asks": "npub1…",
-  "what": "accounts", "fragment": "<name>", "title"?: "…", "micros"?: 5000000,
+  "what": "accounts", "fragment"?: "<name>", "title"?: "…", "micros"?: 5000000,
   "options": ["once", "always", "no"], "expiresAt": 1791000000000 }
 { "kind": "ask.closed", "ask": <its seq>, "turn": "…", "agent": "npub1…", "option": "once", "by": "npub1…" }
 ```
@@ -401,7 +401,8 @@ own, never in a turn:
 `what` is `spend` or `accounts` (options `once`, `always`, `no`; a card
 in another chat than its lend's, `"elsewhere": true`, `once` and `no`), or
 `delete` or `cap` (`yes`, `no`; `micros` null: the default), of
-`fragment`. Only `asks` answers, with `{kind: "ask_answer", option,
+`fragment`, which only a confirm names: a lend's place is kept in the
+card's private row, never shown to the chat it is asked in. Only `asks` answers, with `{kind: "ask_answer", option,
 answers: {channel: "work", seq}}`; a `yes` is posted once the shell has
 done it (`confirm`). A bridge takes neither kind, nor the answer.
 
