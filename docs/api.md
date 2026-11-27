@@ -1050,7 +1050,7 @@ nothing").
 
 The microphone is asked in the same dialog, the shell's own: a page
 framed by the shell asks it (`microphone?`, templates/chat/site/
-frame-messages.js) from a press in it, and the shell asks its person once
+frame-messages.js), and the shell asks its person once
 per fragment ("Let Recipes use your microphone?", saying "an app shared
 with you" when it is not theirs; "Use your microphone in chats?" for the
 release's chat, one yes for every such chat). **Allow** keeps the yes on
@@ -1059,9 +1059,10 @@ again, naming the fragment's origin in its policy; **Not now** keeps
 nothing. A frame names no microphone until then, and a visitor's (no row)
 never does. The fragment's ⋯ takes it back: its open pages, in every tab
 (every chat's, for a chat's), are made again without it (the list's
-change). A release chat's ask is its mic's press (its page the platform's
-code); an app's counts only with no press or key in the shell itself in
-the activation's life (5 s), which could pass for one in it.
+change). The consent is the dialog's own Allow, which arms after a moment
+and no page can press; against spam, one ask is open at a time across
+every frame ("busy"), and a frame told Not now asks nothing more until the
+shell loads it again (its Reload, or opened again). Nothing is exempt.
 
 ### Listed records
 

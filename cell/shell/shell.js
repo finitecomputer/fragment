@@ -326,6 +326,12 @@ function show(spec) {
   layout.show("right");
 }
 
+// Frames whose page heard Not now (or left the dialog unanswered): they ask
+// nothing more until the shell loads them again (`go`: their Reload, a yes
+// lent or taken back; or opened again, a new frame), so a page can't ask
+// again and again. Its own reload keeps it: a page that reloads itself to
+// ask again is the spam this stops.
+const micDeclined = new WeakSet();
 // A fragment's page's policy, as its row says now: the microphone lent by
 // its person's yes alone (`microphone`: asked once, `micAsk` below; a chat
 // of the release's, their one yes for every such chat). No row (a
@@ -359,6 +365,7 @@ const standins = standIns(el);
 // history (a cross-origin frame's `location.replace` is one it may call).
 function go(frame, src, replace = false) {
   if (frame.dataset.lends !== undefined) frame.allow = allowOf(frame.dataset.fragment);
+  micDeclined.delete(frame);
   if (replace && frame.contentWindow) frame.contentWindow.location.replace(new URL(src, location.href).href);
   else frame.src = src;
   // a page of the middle column sent elsewhere: its stand-in again until it comes
@@ -619,39 +626,25 @@ $("ask-form").onsubmit = (e) => {
 };
 $("ask-cancel").onclick = () => askDialog.close();
 
-// `micAsk`'s press, one in the frame: this page's activation is live (a
-// press in a frame activates its ancestors too) and focus is in that frame,
-// where a press leaves it. A press or key of the shell's own could give both
-// (its Tab into the frame; a page that takes focus itself after a press
-// here), so none may be in the activation's life (5 s in Chrome and
-// Firefox, less in Safari): an ask that soon after one asks nothing.
-const ACTIVATION_MS = 5000;
-let shellPressed = -Infinity;
-for (const type of ["pointerdown", "keydown"]) addEventListener(type, () => { shellPressed = performance.now(); }, true);
-function pressedIn(frame) {
-  if (navigator.userActivation?.isActive !== true || document.activeElement !== frame) return "asked with no click";
-  if (performance.now() - shellPressed <= ACTIVATION_MS) return "asked too soon after a press in the shell";
-  return null;
-}
 // A fragment's page asks for its person's microphone (`{fragment:
 // KIND.micAsk, nonce}`; FIN-615 PR 11): once per app, in the one ask dialog
 // ("Let Recipes use your microphone?"; "…, an app shared with you, …" when
 // not theirs, its owner's email not theirs to see, decision 48; for a chat
-// of the release's chat template, one yes for every such chat), and only
-// behind a press in it (`pressedIn`; a release chat's page, the platform's
-// code, asks only from its mic's press, as with alerts). Allow is kept on
-// their row (`PUT /api/fragments/{name}/microphone`), and its frame is made
-// again, lent it (for chats, once: their next frames are made lent); Not
-// now keeps nothing. Answered `{fragment: KIND.micAnswer, nonce, ok, error?,
-// reload?}` (`reload`: its frame is being made again, lent it). A frame of a
-// fragment not on their list (no row to keep it on: a visitor's) is
-// answered nothing.
+// of the release's chat template, one yes for every such chat). The
+// consent is the dialog's Allow, which arms after `ASK_ARM_MS` and no page
+// can press; against spam, one ask is open at a time, across every frame
+// (another is answered "busy"), and a frame told Not now asks nothing more
+// until the shell loads it again (`micDeclined`). Nothing is exempt. Allow
+// is kept on their row (`PUT /api/fragments/{name}/microphone`), and its
+// frame is made again, lent it (for chats, once: their next frames are made
+// lent); Not now keeps nothing. Answered `{fragment: KIND.micAnswer, nonce,
+// ok, error?, reload?}` (`reload`: its frame is being made again, lent it).
+// A frame of a fragment not on their list (no row to keep it on: a
+// visitor's) is answered nothing.
 addEventListener("message", async (event) => {
   const d = event.data;
   if (d?.fragment !== KIND.micAsk || typeof d.nonce !== "string" || d.nonce.length > 64) return;
   const frame = [...document.querySelectorAll("iframe[data-lends]")].find((f) => f.contentWindow === event.source);
-  // the press in it that sent it, read before any wait
-  const unpressed = frame ? pressedIn(frame) : "asked with no click";
   const name = frame?.dataset.fragment;
   const row = name && byName(name);
   if (!row) return;
@@ -670,12 +663,12 @@ addEventListener("message", async (event) => {
     if (stale) relend(name);
   };
   if (row.microphone) return lent();
-  // a release chat's ask is its mic's press (its page the platform's code)
-  if (!row.chatRelease && unpressed) return answer(false, unpressed);
+  if (micDeclined.has(frame)) return answer(false, "declined");
   // the words and the yes kept, both from its row's one fact (`chatRelease`)
   const title = titleOf(name);
   const asked = row.chatRelease ? "Use your microphone in chats?" : own(row) ? `Let ${title} use your microphone?` : `Let ${title}, an app shared with you, use your microphone?`;
   const said = await askPerson({ of: `mic:${name}`, title: asked, go: "Allow", cancel: "Not now" });
+  if (said === "declined" || said === "not answered") micDeclined.add(frame);
   if (said !== "yes") return answer(false, said);
   try {
     await api("PUT", `/api/fragments/${seg(name)}/microphone`, { microphone: true });
