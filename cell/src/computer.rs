@@ -5623,6 +5623,11 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let disk = json!({ "mountMs": number("diskMountMs"), "misses": number("diskMisses"), "refetches": number("diskRefetches") });
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex, "disk": disk, "epoch": epoch })).await?);
         }
+        // a bridge from before FIN-615 PR 8 tells its turns here, and takes
+        // a 404 as nothing to tell (its `unknown_ok`): answered so, never
+        // signed for it, which on someone else's ask could refuse and hold
+        // its turn (the debt ledger, "An old bridge's turns route")
+        "/api/computer/turns" => return Err(CellError::new(ErrorCode::NotFound, "no route tells an agent's turns: its places open them")),
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
         "/api/computer/door" if req.method() == Method::Post => {
