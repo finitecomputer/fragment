@@ -95,7 +95,7 @@ const ASKER_CHECKS: &[&str] = &[
     "an Allow once is bound to their next words as they are posted: in a chat that keeps two records, those words pushed out by their ask after lend that ask nothing, and it asks its owner again",
     "fail closed, never lost: while the agent's fragment refuses the chat's word, their ask is not handed to the agent (the chat's events say so); once it takes it, it is answered, as theirs",
     "app code's words, said in an app's chat for whoever called it, are an ask no one proves: the agent's call for its owner on them is refused outside that app, and lends no one its owner's reach",
-    "on them it acts in that app alone, as itself; and its owner's next ask is its owner's again, narrowing nothing",
+    "on them it acts in that app alone, as itself (a bridge from before telling that turn on its old route answered 404, nothing to tell); and its owner's next ask is its owner's again, narrowing nothing",
     "with no turn open, its owner's routine runs a job for its owner, its computer naming no one: Calories is told them, and sums their own day",
 ];
 
@@ -437,9 +437,9 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let told = |verb: &str, body: Value| format!("fetch http://api.fragment.internal/api/computer/turns with {} in x-fragment-agent {verb} {body}", w.agent);
     let last = |said: &str| said.rsplit(" then ").next().unwrap_or_default().to_string();
     let withheld = asked_by_ben(s, 11, &format!("{} then {}", told("deleting", json!({ "life": life, "generation": generation, "turn": "$TURN" })), op("whoami", "who-withheld")))?;
-    s.ok(ASKER_CHECKS[13], withheld.starts_with("fetched 4") && whose(&last(&withheld)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": withheld }));
+    s.ok(ASKER_CHECKS[13], withheld.starts_with("fetched 404") && whose(&last(&withheld)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": withheld }));
     let retold = asked_by_ben(s, 12, &format!("{} then {}", told("putting", json!({ "life": life, "generation": generation, "turn": "$TURN", "place": chat, "asker": owner_id })), op("whoami", "who-retold")))?;
-    s.ok(ASKER_CHECKS[14], retold.starts_with("fetched 4") && whose(&last(&retold)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": retold }));
+    s.ok(ASKER_CHECKS[14], retold.starts_with("fetched 404") && whose(&last(&retold)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": retold }));
     // its owner's app the agent is an editor of, and Ben no member
     let private = s.named(api, w.owner, "asker-private")?;
     let c = s.create(api, w.owner, &private)?;
@@ -504,11 +504,14 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let for_owner = |on: &str, id: &str| format!("fetch http://api.fragment.internal/api/f/{on}/ops/whoami?for={owner_id} with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
     let outside = said_by_code(s, "code-outside", &for_owner(&private, "code-outside"))?;
     s.ok(ASKER_CHECKS[18], outside.starts_with("fetched 403") && outside.contains("as itself"), json!({ "said": outside }));
-    let inside = said_by_code(s, "code-inside", &for_owner(&says, "code-inside"))?;
+    // (and a bridge from before this release, telling that turn on its
+    // old route, is answered 404 there, nothing to tell, though no one
+    // proves this ask)
+    let inside = said_by_code(s, "code-inside", &format!("{} then {}", told("deleting", json!({ "life": life, "generation": generation, "turn": "$TURN" })), for_owner(&says, "code-inside")))?;
     let owners = asked_by(s, w.owner, "owner-after-code", &for_owner(&private, "owner-after-code"))?;
     s.ok(
         ASKER_CHECKS[19],
-        whose(&inside) == json!({ "principal": w.identity, "role": "editor" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
+        inside.starts_with("fetched 404") && whose(&last(&inside)) == json!({ "principal": w.identity, "role": "editor" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
         json!({ "in the app": inside, "its owner's next": owners }),
     );
 
@@ -2117,6 +2120,11 @@ fn telegram_checks(s: &mut Suite, api: &Api, c: &Doors, fetched: &dyn Fn(&Suite,
         shared[..2] == ["door poked visibility", "door poked invite"] && shared[2..] == ["door poked rotate, its share link shown", "door poked status, its share link shown"],
         json!(shared),
     );
+    // unnamed (its computer naming no one), its egress signs it as itself
+    // there, never for its owner: sharing is its owner's by its word alone
+    let unnamed = fetched(s, 444, &format!("door poke {plain} visibility itself"))?;
+    pokes += 1;
+    s.ok("unnamed, the agent shares nothing of its owner's, even with no one else's turn open: its visibility refused, as itself a viewer", unnamed.starts_with("door refused: 403"), &unnamed);
     // nor, as itself, a viewer of it; and no one is made more than a viewer
     // of a connector, so its members list says the role that counts
     let made_editor = api.signed(c.owner, "PUT", &format!("/api/f/{name}/members/{}", c.identity), Some(&json!({ "role": "editor" })))?;

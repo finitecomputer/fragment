@@ -2927,3 +2927,39 @@ async fn a_late_card_with_unavailable_history_runs_nothing() {
         bridge.stop().await;
     }
 }
+
+/// Goal (FIN-720): a turn let go while it is made ready never reaches its
+/// runtime. Juniper claims Paul's turn, then, while its file downloads,
+/// Juniper leaves the chat: its engine lets the turn go (its place closed
+/// its ask, so its calls would be held to nothing), and its download over,
+/// it is not run (its `fetch` never made). Juniper's next turn, in another
+/// chat, comes after it in its runtime's lane: once that one is answered,
+/// the let-go one would have run.
+#[tokio::test]
+async fn a_turn_let_go_while_made_ready_never_runs() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"hello file");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| {
+        w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone()));
+        w.blob_get_delay_ms = 5_000;
+    });
+    let dir = support::dir("let-go-made-ready");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 3).await;
+    let text = format!("fetch {}/ran-after-let-go with x in x-test", fake.url());
+    let said = fake.say(&chat, &person("paul"), json!({ "text": text, "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "text/plain", "name": "a.txt" }] }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "its turn claimed, its file downloading", |w| w.bodies(&chat, "work", "turn.start").iter().any(|b| b["turn"] == turn.as_str()) && w.calls.iter().any(|c| c.contains("/blobs/"))).await;
+    let before = fake.with(|w| w.calls.len());
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().members.retain(|m| m.principal != "npub1juniper"));
+    fake.drop_sockets();
+    // its bridge reads the chat again, and finds itself gone from it
+    fake.until(WAIT, "the chat read again", |w| w.calls[before..].iter().any(|c| c.contains(&format!("/api/f/{chat}/")) && !c.contains("/blobs/"))).await;
+    fake.say(&other, &person("paul"), json!({ "text": "hi" }));
+    fake.until(WAIT * 2, "its next turn answered, behind the let-go one", |w| replies(w, &other).len() == 1).await;
+    fake.with(|w| assert!(!w.calls.iter().any(|c| c.contains("/ran-after-let-go")), "never run: {:?}", w.calls));
+    bridge.stop().await;
+}

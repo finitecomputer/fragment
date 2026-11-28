@@ -301,7 +301,11 @@ impl FragmentCell {
         let turns: Vec<mandate::Turn> = rows.iter().map(|r| turn_of(r, now)).collect();
         let proof = mandate::proof(&owner, &turns);
         let invites = site.is_none() && fragment.is_none() && (path == "/api/invites" || path.starts_with("/api/invites/"));
-        let call = mandate::Call { for_owner, presence, fragment, site: site.is_some(), honors_for: mandate::honors_for(method, &path), invites };
+        // what only its owner does by its route: sharing (the router's own
+        // list, `permit::reserved`), and answering their invites
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        let shares = site.is_none() && matches!(parts.as_slice(), ["api", "f", _, rest @ ..] if fragment_core::permit::reserved(method, rest).is_some());
+        let call = mandate::Call { for_owner, presence, fragment, site: site.is_some(), honors_for: mandate::honors_for(method, &path), invites, reserved: invites || shares };
         match mandate::signs(&proof, call) {
             mandate::Signs::Itself => Ok((bare, None)),
             mandate::Signs::ForOwner => {

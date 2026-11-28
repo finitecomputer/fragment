@@ -23,7 +23,7 @@
 //! - SimpleX, when the image names its core (simplex/run.rs): told each
 //!   read of the computer, and waited for by the answer to a hold.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -363,7 +363,8 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
     crate::ev!("bridge.start", { "computer": computer.computer, "agents": computer.agents.len(), "listed": listed, "gated": ready.is_some(), "runtimes": runs, "boot": engine.state().boot + 1, "life": life });
 
     let lanes = Lanes::new(api.clone(), stop.clone(), Claims { inbox: inbox_tx.clone(), hold: cfg.hold.clone(), in_flight: claims_in_flight, simplex: simplex.clone() });
-    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves, RuntimeLane::spawn(api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone()))).collect();
+    let held = Held::default();
+    let runtime_lanes: BTreeMap<String, RuntimeLane> = to_runtime.into_iter().map(|(serves, (tx, memory))| (serves.clone(), RuntimeLane::spawn(&serves, api.clone(), tx, memory, marks.clone(), scratch.clone(), turn_files.clone(), held.clone(), inbox_tx.clone()))).collect();
     tokio::spawn(keepalive(api.clone(), keep_rx, cfg.keepalive_ping, stop.clone()));
     tokio::spawn(crate::load::watch(inbox_tx.clone(), Msg::Input, Duration::from_millis(limits::LOAD_SLICE_MS), held_rx.clone(), stop.clone()));
     let follows = Follows { api: api.clone(), inbox: inbox_tx.clone(), shared: shared.clone(), stop: stop.clone(), running: Arc::new(Mutex::new(HashMap::new())), discovering: Mutex::new(HashMap::new()), last: Mutex::new(HashMap::new()) };
@@ -388,6 +389,7 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
             }
         }
         if step.dirty {
+            held.ended(|t| engine.state().turns.get(t).is_none_or(|t| t.phase == engine::Phase::Ended));
             store.lock().expect("store").write(engine.state())?;
             // a turn over lets its files go (bounded: the turns open)
             turn_files.lock().expect("turn files").retain(|t, _| engine.state().turns.get(t).is_some_and(|t| t.phase != engine::Phase::Ended));
@@ -405,7 +407,12 @@ pub async fn run(cfg: Config, runtimes: Runtimes, stop: watch::Receiver<bool>) -
                     let answers = !files.is_empty() && body["turn"].as_str().and_then(|t| engine.state().turns.get(t)).is_some_and(|t| t.ret.is_some());
                     lanes.push(&fragment, Job::Post { agent, channel, id, body, files, relay, answers })
                 }
-                Effect::Claim { agent, fragment, turn, id, body } => lanes.push(&fragment, Job::Claim { agent, turn, id, body }),
+                Effect::Claim { agent, fragment, turn, id, body } => {
+                    // held from its claim, in the step that makes it: let go
+                    // only as the engine lets it go (`Held::ended`)
+                    held.claimed(&turn);
+                    lanes.push(&fragment, Job::Claim { agent, turn, id, body })
+                }
                 Effect::Fence { agent, fragment, turn, prompt, id, body } => lanes.push(&fragment, Job::Fence { agent, turn, prompt, id, body }),
                 Effect::Owed { agent, fragment, channel, turn, id, body } => match engine.state().turns.get(&turn).map(|t| t.fragment.clone()) {
                     // an answer goes from its question's chat's lane, after
@@ -1768,6 +1775,40 @@ async fn upload(api: &Api, fragment: &str, agent: &str, files: &[LocalFile]) -> 
 
 // ---- the runtime's commands ----
 
+/// The turns this life holds, from their claim (`claimed`) until the
+/// engine runs them no more (`ended`): one let go while it was made ready
+/// (its agent gone from its chat, whose place closed its ask, so its calls
+/// would be held to nothing) never reaches its runtime (`send_held`), one
+/// lock deciding each.
+#[derive(Clone, Default)]
+struct Held {
+    open: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Held {
+    fn claimed(&self, turn: &str) {
+        self.open.lock().expect("held").insert(turn.to_string());
+    }
+
+    /// Those `gone` says the engine runs no more, let go (bounded: the
+    /// turns open).
+    fn ended(&self, gone: impl Fn(&str) -> bool) {
+        self.open.lock().expect("held").retain(|t| !gone(t));
+    }
+
+    /// `send`, while `turn` is held: under the lock `ended` takes, so it is
+    /// not let go between the look and the send. False, nothing sent, once
+    /// it is not.
+    fn send_held(&self, turn: &str, send: impl FnOnce()) -> bool {
+        let open = self.open.lock().expect("held");
+        if !open.contains(turn) {
+            return false;
+        }
+        send();
+        true
+    }
+}
+
 /// Commands to the runtime in order; a turn's attachments are downloaded,
 /// and its note read from its chat's journal, before it is handed (so a Stop
 /// never overtakes its Start), as an answer's are before it is. A turn
@@ -1780,7 +1821,9 @@ impl RuntimeLane {
     /// One runtime's lane: a turn's commands all go to one runtime, so they
     /// keep the engine's order, and a runtime slow to read its commands
     /// holds no other's.
-    fn spawn(api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles) -> RuntimeLane {
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(serves: &str, api: Api, to_runtime: mpsc::Sender<Command>, memory: Option<Memory>, marks: Marks, scratch: Arc<Scratch>, turn_files: TurnFiles, held: Held, inbox: mpsc::Sender<Msg>) -> RuntimeLane {
+        let serves = serves.to_string();
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
         tokio::spawn(async move {
             // bounded by the engine: ends when it drops its sender
@@ -1842,8 +1885,21 @@ impl RuntimeLane {
                     assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
-                if to_runtime.send(c).await.is_err() {
-                    return;
+                // room for it first, then at once to its runtime while its
+                // engine still holds it: nothing waits between the two
+                let Ok(room) = to_runtime.reserve().await else { return };
+                let Command::Start(ts) = &c else {
+                    room.send(c);
+                    continue;
+                };
+                let turn = ts.turn.clone();
+                if !held.send_held(&turn, move || room.send(c)) {
+                    // let go while it was made ready (its agent gone from
+                    // its chat, whose place closed its ask): it never runs
+                    // (FIN-720). Its end is stale to the engine, which let it go.
+                    crate::ev!("turn.discarded", { "turn": turn, "why": "let go before it reached its runtime" });
+                    let end = Event::End { turn, outcome: records::Outcome::Stopped };
+                    let _ = inbox.send(Msg::Input(Input::Runtime { runtime: serves.clone(), event: end })).await;
                 }
             }
         });
