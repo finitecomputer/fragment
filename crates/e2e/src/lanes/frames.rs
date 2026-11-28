@@ -279,17 +279,19 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let item = "[...document.querySelectorAll('[role=menuitem]')].find((b) => b.textContent.includes('Turn off microphone'))";
     let offered = chrome.until(&shell, &format!("!!{item}"), wait);
     super::chat::shell_shots(&mut chrome, &shell, &shots, "mic-off-app", (1280, 860))?;
-    chrome.eval(&shell, &format!("({item} || {more}?.click(), true)"))?;
-    chrome.until(&shell, &format!("!!{item}"), wait);
-    chrome.eval(&shell, &format!("({item}?.click(), true)"))?;
+    // its item pressed in the same turn its menu is (re)opened: the shell
+    // closes a menu on resize or blur, and the shots' viewport change
+    // delivers its resize late, so a press in a later turn could find the
+    // menu gone and do nothing (#1580's CI, twice)
+    let pressed = chrome.eval(&shell, &format!("(() => {{ let i = {item}; if (!i || i.closest('[inert]')) {{ {more}?.click(); i = {item}; }} i?.click(); return !!i; }})()"))? == json!(true);
     let unlent = chrome.until(&shell, &format!("document.querySelector({})?.allow === 'clipboard-write'", frame_of(&app)), wait);
     let taken = s.eventually(wait, || row_of(&app)["microphone"].is_null());
     let elsewhere = chrome.until(&other, &format!("document.querySelector({})?.allow === 'clipboard-write'", frame_of(&app)), wait);
     let refused_again = elsewhere && s.eventually(wait, || chrome.eval_in_frame(&other, &app, "document.getElementById('mic').textContent.startsWith('mic:refused')").ok() == Some(json!(true)));
     s.ok(
         "its window's ⋯ offers Turn off microphone while it is lent, which takes the yes back and makes its frame again, lent none, in this tab and the other",
-        offered && unlent && taken && elsewhere && refused_again,
-        json!({ "offered": offered, "unlent": unlent, "taken": taken, "elsewhere": elsewhere, "refused again": refused_again }),
+        offered && pressed && unlent && taken && elsewhere && refused_again,
+        json!({ "offered": offered, "pressed": pressed, "unlent": unlent, "taken": taken, "elsewhere": elsewhere, "refused again": refused_again }),
     );
     chrome.close(other)?;
     chrome.close(shell)?;
