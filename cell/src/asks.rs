@@ -481,8 +481,11 @@ impl FragmentCell {
         match told {
             Ok(version) => {
                 let _ = self.exec("UPDATE asks_told SET told = MAX(told, ?), attempts = 0 WHERE agent = ?", vec![SqlStorageValue::Integer(version), agent.as_str().into()]);
+                // an ended turn's ask is kept `ENDED_KEPT_MS`; one never
+                // claimed, though it let go, until `TURN_HELD_MS`, so its
+                // claim, however late, opens it again with its words trimmed
                 let _ = self.exec(
-                    "DELETE FROM asks WHERE agent = ? AND ((until IS NOT NULL AND at < ?) OR at < ?)",
+                    "DELETE FROM asks WHERE agent = ? AND ((turn IS NOT NULL AND until IS NOT NULL AND at < ?) OR at < ?)",
                     vec![agent.as_str().into(), SqlStorageValue::Integer(js::now_ms() - ENDED_KEPT_MS), SqlStorageValue::Integer(js::now_ms() - limits::TURN_HELD_MS)],
                 );
             }
