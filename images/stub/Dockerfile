@@ -75,11 +75,11 @@ RUN --mount=type=cache,id=stub-cli-registry,target=/usr/local/cargo/registry \
  && cargo build --release --locked -p fragment-cli \
  && mkdir -p /out && cp target/release/fragment /out/
 
-# A computer's disk's daemon (docs/computers.md, "A disk"): fpac v0.1.0's
+# A computer's disk's daemon (docs/computers.md, "A disk"): fpac v0.1.1's
 # static x86_64 build, named by its SHA-256 (FPAC's docs/release.md), as
 # our Hermes image takes it.
 FROM alpine:3.20 AS fpac
-ADD --checksum=sha256:9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e https://github.com/finitecomputer/fpac/releases/download/v0.1.0/fpac-9ba3a424803481b29daca3080444d702330b07a3f52ab583561e44ba11da399e /fpac
+ADD --checksum=sha256:6b664c74264f74720d39a745c138817fb55428110939f87d734187c5e7e3e1db https://github.com/finitecomputer/fpac/releases/download/v0.1.1/fpac-6b664c74264f74720d39a745c138817fb55428110939f87d734187c5e7e3e1db /fpac
 
 # Alpine's busybox for the few commands the Computer DO runs in a container
 # (`true` while it polls, `touch` for the restore marker), and its mke2fs

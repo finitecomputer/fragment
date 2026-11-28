@@ -396,7 +396,9 @@ enum MetaKey {
     /// flush, as that start told its guest: `<generation> <ms>`.
     DiskFlushKept,
     /// The test lever's outage of its disk's route at its next stop
-    /// (`fpac-refuse-at-stop`), in ms from that stop's signal.
+    /// (`fpac-refuse-at-stop`), in ms from that stop's signal: `<ms>`, or
+    /// `<ms> pages` when only its gets of map pages are refused
+    /// (`fpac-refuse-pages-at-stop`: its final checkpoint's loads).
     RefuseAtStop,
     /// The test lever's slow snapshot for its next sleep (`slow-snapshot`),
     /// in ms.
@@ -622,9 +624,10 @@ pub struct ComputerCell {
     /// agents' Vault secrets name a host more. In memory only: a new
     /// isolate arms again at the next read.
     armed: RefCell<Option<(u64, Vec<String>)>>,
-    /// Until when its disk's route refuses, as R2 down would (the lever
-    /// `fpac-refuse-at-stop`'s, from a stop's signal). In memory only.
-    refuse_until: std::cell::Cell<Option<i64>>,
+    /// Until when its disk's route refuses, as R2 down would, and whether
+    /// only its gets of map pages (the levers `fpac-refuse-at-stop` and
+    /// `fpac-refuse-pages-at-stop`, from a stop's signal). In memory only.
+    refuse_until: std::cell::Cell<Option<(i64, bool)>>,
     /// Its schema as it started (schema.rs): ready, or refused.
     schema: crate::schema::Schema,
     /// When its owner's next look hands over the uses it owes
@@ -1913,9 +1916,11 @@ impl ComputerCell {
         let prefix = fpac::disk_prefix(id).ok_or_else(|| CellError::host(format!("{id} names no disk")))?;
         let name = prefix.trim_start_matches("disks/").trim_end_matches('/').to_string();
         let mut props = json!({ "prefix": prefix, "name": name, "epoch": generation, "volume": disk.volume, "head": disk.head.map(|h| h.encode()) });
-        // the lever's outage (`fpac-refuse-at-stop`): its route answers 503 until then
-        if let Some(until) = self.refuse_until.get().filter(|u| *u > js::now_ms()) {
+        // the lever's outage (`fpac-refuse-at-stop`): its route answers 503
+        // until then, to map pages' gets alone when `refusePages`
+        if let Some((until, pages)) = self.refuse_until.get().filter(|(u, _)| *u > js::now_ms()) {
             props["refuseUntil"] = json!(until);
+            props["refusePages"] = json!(pages);
         }
         Ok(js::to_js(&props))
     }
@@ -3018,13 +3023,17 @@ impl ComputerCell {
 
     /// The test lever `fpac-refuse-at-stop`: its route refuses (503, as R2
     /// down) for its ms from this stop's signal, its intercepts armed again
-    /// with that in their props. Taken once.
+    /// with that in their props; `fpac-refuse-pages-at-stop`'s, only its
+    /// gets of map pages. Taken once.
     async fn refuse_at_stop(&self, generation: u64, id: &str) {
-        let Some(ms) = self.cfg.test_hooks.then(|| self.take_ms(MetaKey::RefuseAtStop)).flatten() else { return };
-        self.refuse_until.set(Some(js::now_ms() + ms));
+        let Some(asked) = self.cfg.test_hooks.then(|| self.meta(MetaKey::RefuseAtStop).ok().flatten()).flatten() else { return };
+        let _ = self.delete_meta(MetaKey::RefuseAtStop);
+        let (ms, pages) = asked.strip_suffix(" pages").map_or((asked.as_str(), false), |ms| (ms, true));
+        let Ok(ms) = ms.parse::<i64>() else { return };
+        self.refuse_until.set(Some((js::now_ms() + ms, pages)));
         let hosts = self.armed.borrow().as_ref().filter(|(a, _)| *a == generation).map(|(_, h)| h.clone()).unwrap_or_default();
         match self.arm(generation, id, hosts).await {
-            Ok(true) => console_log!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "generation": generation, "ms": ms })),
+            Ok(true) => console_log!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "generation": generation, "ms": ms, "pages": pages })),
             other => console_error!("{}", json!({ "computer": id, "lever": "fpac-refuse-at-stop", "armed": other.ok() })),
         }
     }
@@ -3949,11 +3958,14 @@ impl ComputerCell {
             // its disk's route refuses (503, as R2 down) for `ms` from its
             // next stop's signal, at most `fpac::guest_flush_ms`'s bound: its
             // final flush tried again until it lands (FIN-783)
-            "fpac-refuse-at-stop" => {
+            // (`fpac-refuse-pages-at-stop`: only its gets of map pages, the
+            // loads its final checkpoint makes, FPAC v0.1.1 asking again)
+            op @ ("fpac-refuse-at-stop" | "fpac-refuse-pages-at-stop") => {
                 let max = fpac::guest_flush_ms(fpac::flush_kept_ms(self.rules().unsaved_max_ms));
-                let ms = b.ms.map(i64::from).filter(|ms| (1..=max).contains(ms)).ok_or_else(|| CellError::invalid(format!("fpac-refuse-at-stop names its ms, 1 to {max}")))?;
-                self.set_meta(MetaKey::RefuseAtStop, &ms.to_string())?;
-                Ok(json!({ "computer": id, "refuseAtStop": ms }))
+                let ms = b.ms.map(i64::from).filter(|ms| (1..=max).contains(ms)).ok_or_else(|| CellError::invalid(format!("{op} names its ms, 1 to {max}")))?;
+                let pages = op == "fpac-refuse-pages-at-stop";
+                self.set_meta(MetaKey::RefuseAtStop, &format!("{ms}{}", if pages { " pages" } else { "" }))?;
+                Ok(json!({ "computer": id, "refuseAtStop": ms, "pages": pages }))
             }
             "fpac-head" => {
                 let line = b.head.as_deref().ok_or_else(|| CellError::invalid("fpac-head names a head"))?;

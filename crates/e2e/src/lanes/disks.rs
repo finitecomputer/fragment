@@ -40,7 +40,7 @@ const CYCLES_MAX: u32 = 1_000;
 const CRASH_EVERY: u32 = 10;
 const FILL_MIB: u32 = 64;
 
-const DISK_CHECKS: [&str; 15] = [
+const DISK_CHECKS: [&str; 16] = [
     "a computer made while its image goes on disks is on one: a new disk of 20,000 MiB, no head yet",
     "its first start mounts the new disk: the start line's path is disk, saying how long its mount took",
     "a sleep is a signal and a wait: its daemon's final flush posts that life's head, clean, its sleep line saying so, and no save is taken",
@@ -56,6 +56,7 @@ const DISK_CHECKS: [&str; 15] = [
     "its owner's wipe from the CLI (`fragment operator wipe --yes`) finishes, its disk's settle waited out within its calls, and deletes every object of its disk's lives",
     "a computer on a disk restores no save, so a restore's retry never touches it: damage armed for its next restores (the lever `damage-restores`) stays unspent through a blank first life's fall back to a new disk, and through a wake after an export took a save, no save found unusable and its writes read there",
     "a sleep whose disk's storage is unreachable at its final flush (the lever `fpac-refuse-at-stop`, past the old 150 s wait) keeps its container until that flush lands: a write made at its stop, which only that flush ships, is there after the next wake, its sleep clean",
+    "a sleep whose storage refuses only the map pages its final checkpoint loads (the lever `fpac-refuse-pages-at-stop`, far past FPAC v0.1.0's six quick tries; the pages of a file its owner deleted from Storage, which that life never loaded) asks for them again until they answer: its stop lasts the outage, its head clean, and its life's write is there after the next wake",
 ];
 
 pub fn disks(s: &mut Suite, api: &Api) -> Result<()> {
@@ -290,8 +291,62 @@ fn disk_checks(s: &mut Suite, api: &Api) -> Result<()> {
         at_stop == "at stop: disk/last-words.txt" && armed.status == 200 && slept && took_ms >= REFUSE_MS && clean && first_line(&read) == "read disk/last-words.txt: said at the stop" && (!local || last_sleep.as_ref().is_some_and(|l| l["clean"] == true)) && slept_again,
         json!({ "atStop": at_stop, "armed": armed.body, "slept": slept, "tookMs": took_ms, "head": after["head"], "read": read, "sleepLine": last_sleep, "sleptAgain": slept_again }),
     );
+
+    // FPAC v0.1.1: a life fills two files in its work, the second's map
+    // pages past the region the lane's other writes reuse. Those pages are
+    // its boot's (written in its first minute), which the next open loads,
+    // so a life between writes a little else, its checkpoint naming its
+    // own boot's pages alone. The one after deletes the second file from
+    // its owner's Storage, and ext4's discards punch extents in pages that
+    // life never loaded (a punch, like a whole extent's write, needs no
+    // page loaded), which its sleep's checkpoint must load: a file's
+    // punches in fewer segments than a periodic checkpoint waits for
+    // (`CHECKPOINT_AFTER_SEGMENTS`), so none loads them first. Its storage
+    // refuses those gets alone, past v0.1.0's six quick tries (which
+    // exited unclean at once): the checkpoint asks again until they
+    // answer. A stop that loaded no page would end in seconds: its time
+    // proves the loads were asked for.
+    let mut filled = vec![];
+    for i in 0..BIG_FILES {
+        filled.push(talk.said(s, &format!("fill-data work/big{i}.bin 256"))?);
+    }
+    let (filled_slept, _) = put_to_sleep(s, api, &owner, &id);
+    let between = talk.said(s, "write disk/between.txt a life between")?;
+    let (between_slept, _) = put_to_sleep(s, api, &owner, &id);
+    let wrote = talk.said(s, "write disk/pages.txt asked again")?;
+    let deleted = api.signed(&owner, "POST", &format!("/api/computers/{id}/files/delete"), Some(&json!({ "path": format!("work/big{}.bin", BIG_FILES - 1) }))).map_or(0, |r| r.status);
+    let life = view()["restored"]["generation"].as_u64().unwrap_or(0);
+    let armed = lever_with(api, &id, json!({ "op": "fpac-refuse-pages-at-stop", "ms": PAGES_REFUSE_MS }))?;
+    let t0 = Instant::now();
+    let slept = s.eventually(Duration::from_millis(PAGES_REFUSE_MS) + WAKE + WAKE, || {
+        let _ = api.signed(&owner, "POST", &format!("/api/computers/{id}/sleep"), Some(&json!({})));
+        phase(api, &owner, &id) == "asleep"
+    });
+    let took_ms = t0.elapsed().as_millis() as u64;
+    let after = row();
+    let clean = head_of(&after["head"]).is_some_and(|(e, c)| e == life && c);
+    let read = talk.said(s, "read disk/pages.txt")?;
+    let last_sleep = lines(s).1.into_iter().rev().find(|l| l["sleep"]["generation"] == life).map(|l| l["sleep"].clone());
+    let (slept_again, _) = put_to_sleep(s, api, &owner, &id);
+    s.ok(
+        DISK_CHECKS[15],
+        filled.iter().all(|f| f.starts_with("filled")) && filled_slept && between == "wrote disk/between.txt" && between_slept && wrote == "wrote disk/pages.txt" && deleted == 200 && armed.status == 200 && armed.body["pages"] == true && slept && took_ms >= PAGES_REFUSE_MS && clean && first_line(&read) == "read disk/pages.txt: asked again" && (!local || last_sleep.as_ref().is_some_and(|l| l["clean"] == true && l["exited"] == true)) && slept_again,
+        json!({ "filled": filled, "deleted": deleted, "armed": armed.body, "slept": slept, "tookMs": took_ms, "head": after["head"], "read": read, "sleepLine": last_sleep, "sleptAgain": slept_again }),
+    );
     wiped(s, api, &owner, &id)
 }
+
+/// The 256 MiB files a life fills; a later life deletes the last, whose
+/// map pages (256 MiB of the volume each) lie past the lane's other writes.
+/// Its punches are a few dozen segments, far under the count after which
+/// a periodic checkpoint would load its pages before the stop (FPAC's
+/// `CHECKPOINT_AFTER_SEGMENTS`; a GiB's punches reached it).
+const BIG_FILES: u32 = 2;
+
+/// How long its storage refuses its map pages' gets from its stop's signal
+/// (`fpac-refuse-pages-at-stop`): far past FPAC v0.1.0's six quick tries,
+/// which took milliseconds, and past a stop that loads nothing.
+const PAGES_REFUSE_MS: u64 = 30_000;
 
 /// How long its disk's route refuses from its stop's signal
 /// (`fpac-refuse-at-stop`): past the old wait (the guest's 140 s, the
