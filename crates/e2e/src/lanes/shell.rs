@@ -7737,7 +7737,8 @@ fn app_policy_ui(s: &mut Suite, api: &Api, b: &mut Browser, page: &Page, app: &s
     let opened = b.until(&shell, &format!("!!{pane}?.querySelector('iframe') && !!{pane}.querySelector('button[aria-label=Reload]')"), wait);
     // in the same task as the press: nothing it could have waited for came
     let sent = b.eval(&shell, &format!("(() => {{ {pane}.querySelector('button[aria-label=Reload]').click(); const f = {pane}.querySelector('iframe'); return {{ src: f.hasAttribute('src'), allow: f.allow }}; }})()"))?;
-    let named = sent["src"] == true && sent["allow"] == "clipboard-write";
+    // its clipboard lent at its own origin, the page it lands on (FIN-508)
+    let named = sent["src"] == true && sent["allow"] == json!(format!("clipboard-write {}", api.site_origin(app)));
     let told = s.eventually(wait, || {
         let Ok(frame) = b.frame(app) else { return false };
         let state = b.eval(&frame, "navigator.permissions.query({ name: 'microphone' }).then((p) => p.state)");

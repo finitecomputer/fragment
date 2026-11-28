@@ -878,8 +878,8 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
   return { computerRow, computerKey, nameSimplex, dispose: () => removeEventListener("message", onMessage) };
 }
 
-// Settings' connectors, Telegram's and SimpleX's (templates/telegram,
-// templates/simplex: their READMEs): each agent's chat on that messenger,
+// Settings' connectors, Telegram's, Slack's and SimpleX's (templates/telegram,
+// templates/slack, templates/simplex: their READMEs): each agent's chat on that messenger,
 // a connector of the person's own and a hosted door (docs/api.md, "An
 // agent's doors"), for an agent whose runtime takes one (agent-runtimes.js
 // `doors`), on any seat. Its row: Set up, its connector's own setup page in
@@ -907,7 +907,8 @@ export function createSimplex({ api, el, actionLine, named, seg, computer, title
 // what it is (a tag each, beside "Experimental": Paul, 2026-10-31,
 // literally so), and its setup page for an agent (`name`, as Settings
 // names it). Telegram's offers a bot its owner's Vault holds (`vault`: its
-// host); SimpleX's page shows a QR code (`tall`).
+// host); SimpleX's page shows a QR code, and Slack's first step two
+// fields under its link and its line (`tall`).
 export const TELEGRAM = {
   door: "telegram",
   title: "Telegram",
@@ -915,6 +916,16 @@ export const TELEGRAM = {
   tag: ["Less secure", "Telegram's servers can read these messages"],
   setup: () => "/setup.html",
   vault: { host: "api.telegram.org", key: "TELEGRAM_BOT_TOKEN" },
+};
+// Slack's page makes the agent's own Slack app, named as Settings names
+// the agent (`name`).
+export const SLACK = {
+  door: "slack",
+  title: "Slack",
+  said: "Bring your agents into your team's Slack.",
+  tag: ["Less secure", "Slack's servers, and everyone in a room it's in, can read these messages"],
+  setup: (name) => `/setup.html?name=${encodeURIComponent(name)}`,
+  tall: true,
 };
 export const SIMPLEX = {
   door: "simplex",
@@ -1108,7 +1119,7 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
   // Settings show them; the doors read first when asked (`read`) or when
   // the list's chats with reach changed since they were.
   async function refreshConnectors(read = false) {
-    const shown = [TELEGRAM, SIMPLEX].filter((kind) => document.getElementById(sectionId(kind)));
+    const shown = [TELEGRAM, SLACK, SIMPLEX].filter((kind) => document.getElementById(sectionId(kind)));
     if (!shown.length) return;
     if (read || (listed() && JSON.stringify(reaching()) !== asked)) await readDoors();
     for (const kind of shown) {
@@ -1116,5 +1127,5 @@ export function createConnectors({ api, el, section, actionLine, named, seg, com
       if (s && s.dataset.key !== keyOf(kind)) fill(kind, s);
     }
   }
-  return { telegramSection: () => sectionOf(TELEGRAM), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors };
+  return { telegramSection: () => sectionOf(TELEGRAM), slackSection: () => sectionOf(SLACK), simplexSection: () => sectionOf(SIMPLEX), refreshConnectors, readConnectors: readDoors };
 }

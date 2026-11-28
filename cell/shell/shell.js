@@ -34,7 +34,7 @@ import { createOnboarding } from "./onboarding.js";
 import { createComputer } from "./computer.js";
 import { createAgentSettings } from "./agent-settings.js";
 import { createRuntimes } from "./agent-runtimes.js";
-import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SIMPLEX } from "./connections.js";
+import { createConnections, createAgentHomes, createSimplex, createConnectors, TELEGRAM, SLACK, SIMPLEX } from "./connections.js";
 import { createConnectorSetup } from "./connector-setup.js";
 import { el, section, line, actionLine, createSettings } from "./settings.js";
 import { createLauncher } from "./launcher.js";
@@ -335,22 +335,24 @@ const micDeclined = new WeakSet();
 // A fragment's page's policy, as its row says now: the microphone lent by
 // its person's yes alone (`microphone`: asked once, `micAsk` below; a chat
 // of the release's, their one yes for every such chat). No row (a
-// visitor's), none. A bare `microphone` is the src's origin's, the mint's
-// on this page's; the page lands at the fragment's own, which the browser
-// would refuse without asking, so it names that origin (known here, no
-// request).
-function allowOf(name) {
-  return byName(name)?.microphone === true ? `clipboard-write; microphone ${originAt(name)}` : "clipboard-write";
+// visitor's), none; a page that `lends` nothing (a setup's, a files
+// view's), its clipboard alone. A bare feature is the src's origin's, the
+// mint's on this page's; the page lands at the fragment's own, which the
+// browser would refuse (its clipboard, in silence; its microphone, without
+// asking), so it names that origin for both (known here, no request).
+function allowOf(name, lends = true) {
+  const at = originAt(name);
+  return lends && byName(name)?.microphone === true ? `clipboard-write ${at}; microphone ${at}` : `clipboard-write ${at}`;
 }
 // A frame of `src` (the mint's, for fragment `name`; a port's ticket). A
 // fragment's page (`lends`: its chat's, its window's) has `allowOf`'s
 // policy, read again at each navigation `go` makes (a policy holds from a
 // navigation on); any other frame (a files view's, a setup's, a port's) is
-// lent none, and asks for none.
+// lent no microphone, and asks for none.
 function frameOf(src, title, name = null, { lends = false } = {}) {
   const frame = el("iframe");
   frame.setAttribute("aria-label", title);
-  frame.allow = name && lends ? allowOf(name) : "clipboard-write";
+  frame.allow = name ? allowOf(name, lends) : "clipboard-write";
   frame.dataset.src = src;
   if (name) frame.dataset.fragment = name;
   if (name && lends) frame.dataset.lends = "";
@@ -693,7 +695,8 @@ function relend(only = null) {
   for (const frame of document.querySelectorAll("iframe[data-lends]")) {
     const name = frame.dataset.fragment;
     const now = allowOf(name);
-    if (frame.allow === now || (only ? name !== only : !frame.allow.includes("microphone"))) continue;
+    // lent nothing now: by its whole policy, never a word in it (its origin may say "microphone")
+    if (frame.allow === now || (only ? name !== only : frame.allow === allowOf(name, false))) continue;
     go(frame, frame.dataset.src);
   }
 }
@@ -1434,7 +1437,7 @@ async function setPinned(name, pinned) {
 // `homeChatOf`), so this is known from the list alone, before any door is
 // read. Asked once more in the shell's dialog, which names it, and asked
 // again as it is confirmed. ----
-const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
+const DOOR_CHAT = new RegExp(`-(?:${[TELEGRAM.door, SLACK.door, SIMPLEX.door].join("|")})(?:-\\d+)?$`);
 function deleteItems(name) {
   const f = byName(name);
   if (!f || f.kind !== "chat" || !own(f) || f.sharing?.reach === true || DOOR_CHAT.test(labelOf(name)) || threads.isPair(f)) return [];
@@ -1691,7 +1694,7 @@ const { computerRow, computerKey, nameSimplex } = createSimplex({
   api, el, actionLine, named, seg, computer: () => state.computer,
   titleOf, frameOf, pressSetup, openSetup, simplexChatOf, openChat, notice, setHome, markOffer, refresh: () => refreshConnectors(),
 });
-const { telegramSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
+const { telegramSection, slackSection, simplexSection, refreshConnectors, readConnectors } = createConnectors({
   api, el, section, actionLine, named, seg, computer: () => state.computer, fragments: () => state.fragments, listed: () => !reads.listFailed, own,
   connectorLabel, markOffer, framed, frameOf, originAt, pressSetup, openSetup, openChat, notice, load, titleOf, computerRow, computerKey,
   doorsRead: () => (forgetDoors(), renderChats()),
@@ -2316,7 +2319,7 @@ const settings = createSettings({
     },
     entered: () => { renderHeading(); renderChats(); leaveSidebar(); } },
   notices: { hideNotice, noticeCurrent: (gen) => asks.current(gen), notice },
-  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, readConnectors },
+  sections: { computerSection, connectionsSection: (...args) => connectionsSection(...args), simplexSection, telegramSection, slackSection, readConnectors },
   agents: { getComputer: () => state.computer, getAgents: () => state.agents, faceControls, agentSettings, addAgentForm, renderAgentFaces, paintHomes },
   releaseInfo: () => ({ mine: release.mine, deployed: DEPLOYED }),
   allFragments: () => state.fragments, own, freeLabel, load, named, openApp, openFiles, openSkills: () => openSkills(), markOffer,

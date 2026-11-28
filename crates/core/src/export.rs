@@ -635,12 +635,18 @@ fn clock(ms: i64) -> (i64, u32, u32, i64, i64, i64) {
 
 /// Who a principal is, as a transcript names them: a member's email or an
 /// agent's name, a short npub for anyone the fragment no longer names.
+/// `members` holds the fragment's members (`principal -> owner` for agents,
+/// `None` for people) so relayed and room-heard records are honored only from
+/// the keys that may carry them.
 #[derive(Debug, Default, Clone)]
-pub struct Names(pub BTreeMap<String, String>);
+pub struct Names {
+    pub display: BTreeMap<String, String>,
+    pub members: BTreeMap<String, Option<String>>,
+}
 
 impl Names {
     pub fn of(&self, principal: &str) -> String {
-        if let Some(n) = self.0.get(principal) {
+        if let Some(n) = self.display.get(principal) {
             return n.clone();
         }
         if principal == "platform" {
@@ -655,6 +661,46 @@ impl Names {
             _ => shown,
         }
     }
+
+    fn relayed_owner<'a>(&self, principal: &str, author: Option<&str>, body: &'a Value) -> Option<(&'a str, &'a str)> {
+        if author.is_some_and(|a| a != "door") || self.members.is_empty() {
+            return None;
+        }
+        if body.get("heard").is_some_and(|v| !v.is_null()) {
+            return None;
+        }
+        let r = body.get("relayed")?.as_object()?;
+        let via = r.get("via")?.as_str().filter(|v| crate::connectors::id_ok(v))?;
+        let target = r.get("for")?.as_str().filter(|f| crate::npub::is_identity(f))?;
+        let allowed = match self.members.get(principal) {
+            None => true,
+            Some(Some(owner)) => owner == target,
+            Some(None) => false,
+        };
+        allowed.then_some((via, target))
+    }
+
+    /// Someone a door heard: only on a record the platform stamped a door's,
+    /// as the bridge runs it (docs/chat-records.md, "A message heard in a room").
+    fn heard_speaker<'a>(&self, principal: &str, author: Option<&str>, body: &'a Value) -> Option<(&'a str, String)> {
+        if author != Some("door") || self.members.is_empty() {
+            return None;
+        }
+        if !crate::npub::is_identity(principal) || self.members.contains_key(principal) {
+            return None;
+        }
+        if body.get("relayed").is_some_and(|v| !v.is_null()) {
+            return None;
+        }
+        let h = body.get("heard")?.as_object()?;
+        let via = h.get("via")?.as_str().filter(|v| crate::connectors::id_ok(v))?;
+        let _from = h.get("from")?.as_str().filter(|f| door_token(f, 128))?;
+        let name = one_line(h.get("name")?.as_str()?);
+        if name.is_empty() {
+            return None;
+        }
+        Some((via, cut_chars(&name, NAME_MAX_CHARS)))
+    }
 }
 
 /// One record of a chat, as the transcript reads it.
@@ -664,6 +710,7 @@ pub struct Said<'a> {
     pub seq: i64,
     pub at: i64,
     pub principal: &'a str,
+    pub author: Option<&'a str>,
     pub body: &'a Value,
 }
 
@@ -702,7 +749,40 @@ pub fn transcript_part(r: &Said, names: &Names) -> Option<String> {
                     if text.trim().is_empty() && files.is_empty() {
                         return None;
                     }
-                    let mut out = format!("\n**{}** · {when}\n\n", one_line(&who));
+                    let is_turn = r.body.get("turn").and_then(Value::as_str).is_some();
+                    let room = if is_turn { RoomParsed::Absent } else { parse_room(r.body) };
+                    let (speaker, origin, has_room) = if is_turn {
+                        (one_line(&who), None, false)
+                    } else if let (RoomParsed::Valid(place), Some((via, name))) = (&room, names.heard_speaker(r.principal, r.author, r.body)) {
+                        (escape_md(&name), Some(format!("{} · {}", door_name(via), escape_md(place))), true)
+                    } else if let Some((via, owner)) = names.relayed_owner(r.principal, r.author, r.body) {
+                        // a relayed message's room only when stamped a door's; a
+                        // malformed one is no one's relay either way (speakers.js)
+                        let room = match room {
+                            RoomParsed::Valid(_) if r.author != Some("door") => RoomParsed::Absent,
+                            room => room,
+                        };
+                        match &room {
+                            RoomParsed::Malformed => (one_line(&who), None, false),
+                            RoomParsed::Valid(place) => (one_line(&names.of(owner)), Some(format!("via {} · {}", door_name(via), escape_md(place))), true),
+                            RoomParsed::Absent => (one_line(&names.of(owner)), Some(format!("via {}", door_name(via))), false),
+                        }
+                    } else {
+                        (one_line(&who), None, false)
+                    };
+                    let mut out = match origin {
+                        Some(o) => format!("\n**{speaker}** ({o}) · {when}\n\n"),
+                        None => format!("\n**{speaker}** · {when}\n\n"),
+                    };
+                    if has_room {
+                        let ctx = parse_context(r.body);
+                        if !ctx.is_empty() {
+                            for (who, line) in ctx {
+                                out.push_str(&format!("> **{}:** {}\n", escape_md(&who), escape_md(&line)));
+                            }
+                            out.push('\n');
+                        }
+                    }
                     if !text.trim().is_empty() {
                         out.push_str(text.trim_end());
                         out.push('\n');
@@ -778,7 +858,109 @@ fn attachments(body: &Value) -> Vec<String> {
 
 /// A text on one line, for a line of markdown.
 fn one_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
+    let flat: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    flat.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Escapes inline Markdown and HTML metacharacters so untrusted outside display
+/// names, room names, and quoted context cannot break transcript formatting or
+/// inject links, images, or raw HTML.
+fn escape_md(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if matches!(c, '\\' | '`' | '*' | '_' | '[' | ']' | '(' | ')' | '<' | '>' | '!' | '~' | '|') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn cut_chars(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_none() {
+        head
+    } else {
+        let mut s: String = head.chars().take(max.saturating_sub(1)).collect();
+        s.push('…');
+        s
+    }
+}
+
+fn door_name(via: &str) -> &str {
+    match via {
+        "simplex" => "SimpleX",
+        "telegram" => "Telegram",
+        "slack" => "Slack",
+        other => other,
+    }
+}
+
+/// A door's id for a room (at most 64) or a speaker (at most 128), by the
+/// record's own rule (docs/chat-records.md, "A message heard in a room"),
+/// as the bridge and the chat page read it.
+fn door_token(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A name a door gives (a room's, a speaker's), cut at this many characters.
+const NAME_MAX_CHARS: usize = 60;
+
+enum RoomParsed {
+    Absent,
+    Malformed,
+    Valid(String),
+}
+
+fn parse_room(body: &Value) -> RoomParsed {
+    let Some(v) = body.get("room").filter(|v| !v.is_null()) else {
+        return RoomParsed::Absent;
+    };
+    let Some(r) = v.as_object() else { return RoomParsed::Malformed };
+    let Some(id) = r.get("id").and_then(Value::as_str).filter(|s| door_token(s, 64)) else {
+        return RoomParsed::Malformed;
+    };
+    let name = match r.get("name") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => cut_chars(&one_line(s), NAME_MAX_CHARS),
+        Some(_) => return RoomParsed::Malformed,
+    };
+    // `thread` is the door's own, for its replies: read by no one here
+    RoomParsed::Valid(if name.is_empty() { id.to_string() } else { name })
+}
+
+fn parse_context(body: &Value) -> Vec<(String, String)> {
+    const MAX_MESSAGES: usize = 20;
+    const MAX_BYTES: usize = 16 * 1024;
+    let Some(items) = body.get("context").and_then(Value::as_array) else {
+        return vec![];
+    };
+    if items.is_empty() || items.len() > MAX_MESSAGES {
+        return vec![];
+    }
+    let mut bytes = 0usize;
+    let mut out = Vec::with_capacity(items.len());
+    for c in items {
+        let Some(o) = c.as_object() else { return vec![] };
+        let (Some(raw_name), Some(raw_text)) = (o.get("name").and_then(Value::as_str), o.get("text").and_then(Value::as_str)) else {
+            return vec![];
+        };
+        if !matches!(o.get("at"), None | Some(Value::Null)) && o.get("at").and_then(Value::as_i64).is_none() {
+            return vec![];
+        }
+        let name = one_line(raw_name);
+        let text = one_line(raw_text);
+        if name.is_empty() || text.is_empty() {
+            return vec![];
+        }
+        bytes = bytes.saturating_add(raw_name.len()).saturating_add(raw_text.len());
+        if bytes > MAX_BYTES {
+            return vec![];
+        }
+        out.push((cut_chars(&name, NAME_MAX_CHARS), cut_chars(&text, 4000)));
+    }
+    out
 }
 
 /// A code span around `text`, fenced past any run of backticks in it.
@@ -1001,8 +1183,10 @@ mod tests {
     #[test]
     fn a_transcript() {
         let mut names = Names::default();
-        names.0.insert("npub1person".into(), "paul@example.com".into());
-        names.0.insert("npub1agent".into(), "Juniper".into());
+        names.display.insert("npub1person".into(), "paul@example.com".into());
+        names.display.insert("npub1agent".into(), "Juniper".into());
+        names.members.insert("npub1person".into(), None);
+        names.members.insert("npub1agent".into(), Some("npub1person".into()));
         let rec = |channel, seq, principal, body: Value| (channel, seq, principal, body);
         let sha = "b".repeat(64);
         let recs = vec![
@@ -1020,7 +1204,7 @@ mod tests {
         ];
         let mut out = transcript_head(NAME, Some("Garden"), 1_791_000_000_000);
         for (i, (channel, seq, principal, body)) in recs.iter().enumerate() {
-            let said = Said { channel, seq: *seq, at: 1_791_000_000_000 + i as i64 * 60_000, principal, body };
+            let said = Said { channel, seq: *seq, at: 1_791_000_000_000 + i as i64 * 60_000, principal, author: None, body };
             out.extend(transcript_part(&said, &names));
         }
         assert!(out.starts_with("# Garden\n"), "{out}");
@@ -1036,9 +1220,119 @@ mod tests {
         assert!(!out.contains("turn.start") && !out.contains("draft-ui-thing") && !out.contains("idle"), "{out}");
         // the order: time, then a message before work of the same moment
         let chat = serde_json::json!({});
-        let a = Said { channel: "work", seq: 1, at: 5, principal: "x", body: &chat };
-        let b = Said { channel: "chat", seq: 9, at: 5, principal: "x", body: &chat };
+        let a = Said { channel: "work", seq: 1, at: 5, principal: "x", author: None, body: &chat };
+        let b = Said { channel: "chat", seq: 9, at: 5, principal: "x", author: None, body: &chat };
         assert!(b.order() < a.order());
+    }
+
+    /// Goal (FIN-508): transcripts show outside speakers, rooms, prior room
+    /// context, and relayed owners from trusted doors, while ignoring spoofed
+    /// or malformed room/heard/relayed fields from members or non-door authors.
+    #[test]
+    fn transcript_rooms_and_outside_speakers() {
+        let paul = crate::npub::identity_of(&"11".repeat(32));
+        let juniper = crate::npub::identity_of(&"22".repeat(32));
+        let conn = crate::npub::identity_of(&"33".repeat(32));
+        let mut names = Names::default();
+        names.display.insert(paul.clone(), "paul@example.com".into());
+        names.display.insert(juniper.clone(), "Juniper".into());
+        names.members.insert(paul.clone(), None);
+        names.members.insert(juniper.clone(), Some(paul.clone()));
+
+        let heard_body = serde_json::json!({
+            "text": "@Juniper is the deploy green?",
+            "heard": { "via": "slack", "from": "U0456", "name": "Maple\nLee" },
+            "room": { "id": "C0123", "name": "#deploys", "thread": "1790000000.000100" },
+            "context": [
+                { "name": "Sam", "text": "deploy started", "at": 1_790_000_000_000i64 },
+                { "name": "Alex", "text": "watching\nlogs" }
+            ]
+        });
+        let heard = transcript_part(&Said { channel: "chat", seq: 1, at: 1_791_000_000_000, principal: &conn, author: Some("door"), body: &heard_body }, &names).unwrap();
+        assert!(heard.contains("**Maple Lee** (Slack · #deploys) · 2026-10-03 04:00 UTC\n\n> **Sam:** deploy started\n> **Alex:** watching logs\n\n@Juniper is the deploy green?\n"), "{heard}");
+
+        // Markdown/HTML metacharacters in outside speaker, room name, and context are escaped
+        let tricky = serde_json::json!({
+            "text": "check link",
+            "heard": { "via": "slack", "from": "U0457", "name": "**Admin** [x](https://evil.test)" },
+            "room": { "id": "C0124", "name": "#ops <img>" },
+            "context": [{ "name": "Bot_1", "text": "![px](https://evil.test/t) <script>" }]
+        });
+        let r_tricky = transcript_part(&Said { channel: "chat", seq: 10, at: 1_791_000_030_000, principal: &conn, author: Some("door"), body: &tricky }, &names).unwrap();
+        assert!(r_tricky.contains(r"**\*\*Admin\*\* \[x\]\(https://evil.test\)** (Slack · #ops \<img\>)"), "{r_tricky}");
+        assert!(r_tricky.contains(r"> **Bot\_1:** \!\[px\]\(https://evil.test/t\) \<script\>"), "{r_tricky}");
+
+        // Owner relayed in a Slack room vs a Telegram DM (no room)
+        let relayed_room = serde_json::json!({
+            "text": "ship it",
+            "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" },
+            "room": { "id": "C0123", "name": "#deploys" }
+        });
+        let r_room = transcript_part(&Said { channel: "chat", seq: 2, at: 1_791_000_060_000, principal: &conn, author: Some("door"), body: &relayed_room }, &names).unwrap();
+        assert!(r_room.contains("**paul@example.com** (via Slack · #deploys) · 2026-10-03 04:01 UTC\n\nship it\n"), "{r_room}");
+
+        let relayed_dm = serde_json::json!({
+            "text": "ping from phone",
+            "relayed": { "via": "telegram", "for": &paul, "agent": "juniper--k3x9" }
+        });
+        let r_dm = transcript_part(&Said { channel: "chat", seq: 3, at: 1_791_000_120_000, principal: &conn, author: Some("door"), body: &relayed_dm }, &names).unwrap();
+        assert!(r_dm.contains("**paul@example.com** (via Telegram) · 2026-10-03 04:02 UTC\n\nping from phone\n"), "{r_dm}");
+
+        // Unnamed room falls back to room.id
+        let unnamed = serde_json::json!({
+            "text": "hi",
+            "heard": { "via": "slack", "from": "U9", "name": "Sam" },
+            "room": { "id": "D9999" }
+        });
+        let r_unnamed = transcript_part(&Said { channel: "chat", seq: 4, at: 1_791_000_180_000, principal: &conn, author: Some("door"), body: &unnamed }, &names).unwrap();
+        assert!(r_unnamed.contains("**Sam** (Slack · D9999)"), "{r_unnamed}");
+
+        // Spoofing rejected: chat member, app code, external person on public chat, contradictory relayed+heard
+        let spoof_member = transcript_part(&Said { channel: "chat", seq: 5, at: 1_791_000_240_000, principal: &paul, author: Some("door"), body: &heard_body }, &names).unwrap();
+        assert!(spoof_member.contains("**paul@example.com** · 2026-10-03 04:04 UTC\n\n@Juniper is the deploy green?"), "{spoof_member}");
+        assert!(!spoof_member.contains("Maple") && !spoof_member.contains("#deploys") && !spoof_member.contains("deploy started"), "{spoof_member}");
+
+        let spoof_code = transcript_part(&Said { channel: "chat", seq: 6, at: 1_791_000_300_000, principal: &conn, author: Some("code"), body: &heard_body }, &names).unwrap();
+        assert!(!spoof_code.contains("Maple") && !spoof_code.contains("#deploys"), "{spoof_code}");
+
+        let spoof_person = transcript_part(&Said { channel: "chat", seq: 7, at: 1_791_000_360_000, principal: &conn, author: Some("person"), body: &heard_body }, &names).unwrap();
+        assert!(!spoof_person.contains("Maple") && !spoof_person.contains("#deploys"), "{spoof_person}");
+
+        // Unstamped, as the bridge reads it (docs/chat-records.md): no one
+        // heard, and a relayed owner's message without its room.
+        let unstamped = transcript_part(&Said { channel: "chat", seq: 11, at: 1_791_000_480_000, principal: &conn, author: None, body: &heard_body }, &names).unwrap();
+        assert!(!unstamped.contains("Maple") && !unstamped.contains("#deploys"), "{unstamped}");
+        let unstamped_relay = transcript_part(&Said { channel: "chat", seq: 12, at: 1_791_000_540_000, principal: &conn, author: None, body: &relayed_room }, &names).unwrap();
+        assert!(unstamped_relay.contains("**paul@example.com** (via Slack) · ") && !unstamped_relay.contains("#deploys"), "{unstamped_relay}");
+        // a malformed room is no one's relay, stamped or not, as the page reads it
+        let bad_room = serde_json::json!({ "text": "odd", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": "C0123" });
+        let unstamped_bad = transcript_part(&Said { channel: "chat", seq: 13, at: 1_791_000_600_000, principal: &conn, author: None, body: &bad_room }, &names).unwrap();
+        assert!(!unstamped_bad.contains("paul@example.com") && !unstamped_bad.contains("via Slack"), "{unstamped_bad}");
+
+        // the record's own rules (docs/chat-records.md), as the bridge and the
+        // page read them: a `thread` is the door's own and refuses nothing; a
+        // room id past 64, or a speaker's id that is no `[A-Za-z0-9._-]`, is none
+        let odd_thread = serde_json::json!({ "text": "t", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": { "id": "C0123", "thread": "id\u{85}tail" } });
+        let r_thread = transcript_part(&Said { channel: "chat", seq: 14, at: 1_791_000_660_000, principal: &conn, author: None, body: &odd_thread }, &names).unwrap();
+        assert!(r_thread.contains("**paul@example.com** (via Slack) · "), "{r_thread}");
+        let long_room = serde_json::json!({ "text": "t", "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" }, "room": { "id": "C".repeat(65) } });
+        let r_long = transcript_part(&Said { channel: "chat", seq: 15, at: 1_791_000_720_000, principal: &conn, author: Some("door"), body: &long_room }, &names).unwrap();
+        assert!(!r_long.contains("paul@example.com"), "{r_long}");
+        let accented = serde_json::json!({ "text": "t", "heard": { "via": "slack", "from": "U\u{e9}", "name": "Maple" }, "room": { "id": "C0123" } });
+        let r_accented = transcript_part(&Said { channel: "chat", seq: 16, at: 1_791_000_780_000, principal: &conn, author: Some("door"), body: &accented }, &names).unwrap();
+        assert!(!r_accented.contains("Maple"), "{r_accented}");
+        let named = serde_json::json!({ "text": "t", "heard": { "via": "slack", "from": "U1", "name": "M".repeat(70) }, "room": { "id": "C0123" } });
+        let r_named = transcript_part(&Said { channel: "chat", seq: 17, at: 1_791_000_840_000, principal: &conn, author: Some("door"), body: &named }, &names).unwrap();
+        assert!(r_named.contains(&format!("**{}…** (Slack · C0123)", "M".repeat(59))), "a name is cut at 60: {r_named}");
+
+        let both = serde_json::json!({
+            "text": "conflicting",
+            "relayed": { "via": "slack", "for": &paul, "agent": "juniper--k3x9" },
+            "heard": { "via": "slack", "from": "U1", "name": "Maple" },
+            "room": { "id": "C0123", "name": "#deploys" }
+        });
+        let r_both = transcript_part(&Said { channel: "chat", seq: 8, at: 1_791_000_420_000, principal: &conn, author: Some("door"), body: &both }, &names).unwrap();
+        assert!(!r_both.contains("Maple") && !r_both.contains("paul@example.com") && !r_both.contains("#deploys"), "{r_both}");
     }
 
     /// Goal: times read as RFC 3339 and as a person reads them, in UTC.

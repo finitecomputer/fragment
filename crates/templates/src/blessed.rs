@@ -25,7 +25,7 @@ include!("blessed_names.rs");
 /// doors"): a fragment made from one is its owner's alone to edit, and may
 /// be bound as their agent's door of its name while it runs no other code
 /// (cell/src/doors.rs).
-pub const CONNECTORS: &[&str] = &["simplex", "telegram"];
+pub const CONNECTORS: &[&str] = &["simplex", "telegram", "slack"];
 
 /// A blessed template, when `name` is one: named statics, never
 /// `crate::ALL`, so a binary links only the index of the templates it
@@ -39,6 +39,7 @@ pub fn template(name: &str) -> Option<&'static Template> {
         "sessions" => Some(&crate::SESSIONS),
         "telegram" => Some(&crate::TELEGRAM),
         "simplex" => Some(&crate::SIMPLEX),
+        "slack" => Some(&crate::SLACK),
         _ => None,
     }
 }
@@ -435,6 +436,7 @@ mod tests {
         assert!(names.contains("gws-slides"), "the connected Google Slides service skill");
         assert!(names.contains("import-agent-home"), "an agent's home brought over (FIN-463)");
         assert!(names.contains("disk-space-finite"), "room made on a filling disk, files moved to storage");
+        assert!(names.contains("team-rooms"), "what a turn in a door's room is told cites it (FIN-508: images/bridge note.rs `place`)");
         // a connection's skill is its docs and its quirks, and no code: the
         // one caller is `fragment connection call` (FIN-509)
         assert!(connections.iter().any(|(_, c)| c == "google"), "Google's skill names its connection");

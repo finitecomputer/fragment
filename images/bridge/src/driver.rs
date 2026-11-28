@@ -1161,9 +1161,10 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // a writer the view has no name for (a person or another agent past
         // the last read's bound, or new): read again, with it first
         let unknown = records::is_identity(&record.principal) && record.principal != agent.identity && !view.view.names.contains_key(&record.principal);
-        // its owner's words carried by another key: whether this chat is a
-        // door of the agent's, as its row says now (the engine takes them
-        // as its owner's only through that door: `relayed_for`), read again
+        // its owner's words carried by another key, or someone's its door
+        // heard in a room: whether this chat is a door of the agent's, as
+        // its row says now (the engine takes them as its owner's, or as
+        // their speaker's, only through that door: `whose`), read again
         // whenever its view names none, so a door bound since it was read
         // (an unlink and a link again, its agent a member throughout, which
         // no join announces) is seen at its first record. One read a
@@ -1171,7 +1172,7 @@ async fn feed(api: &Api, agent: &Agent, fragment: &str, record: Record, inbox: &
         // failing in a way asking again may pass ends the follow, which
         // reads the record again from the cursor, so an owner's message is
         // never taken for its carrier's for a blip.
-        let relays = record.at >= view.since && record.principal != agent.identity && records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment);
+        let relays = record.at >= view.since && record.principal != agent.identity && (records::relayed(&record.body).is_some_and(|r| r.for_ == agent.owner && r.agent == agent.fragment) || records::heard(&record.body).is_some());
         let door = relays && view.view.door.is_none();
         if !view.fresh(shared.joined_at(fragment)) || unknown || door {
             match view.read(api, agent, fragment, Some(&record.principal)).await {
@@ -2050,11 +2051,13 @@ impl RuntimeLane {
                     ts.files = files;
                     // its disk first (filling: make room), its age (a late
                     // message's), then a late card answer's turn's own note
-                    // (engine.rs `hand`)
-                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), note].into_iter().flatten().collect();
+                    // (engine.rs `hand`), then its room (where, and what was
+                    // said there just before), then the journal's
+                    let notes: Vec<String> = [ts.disk.take(), ts.age.take(), ts.note.take(), ts.place.take(), note].into_iter().flatten().collect();
                     ts.note = (!notes.is_empty()).then(|| notes.join("\n\n"));
-                    // (its own, a card's turn, in the cut note's place: `note_for`)
-                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 6), "a turn's notes are bounded");
+                    // (its own, a card's turn, in the cut note's place; a
+                    // room's in a history's or a recap's: `note_for`)
+                    assert!(ts.note.as_ref().is_none_or(|n| n.len() <= limits::DISK_NOTE_MAX_BYTES + limits::AGE_NOTE_MAX_BYTES + limits::HISTORY_NOTE_MAX_BYTES + limits::NOTE_MAX_BYTES + 8), "a turn's notes are bounded");
                     ts.quote = quote;
                 }
                 // room for it first, then no turn its agent ended still held
@@ -2216,8 +2219,29 @@ async fn quote_of(api: &Api, ts: &TurnStart, seq: u64) -> Option<Quote> {
         crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes no message" });
         return None;
     }
+    // a room's words are told only in it, and the chat's only outside any
+    // room: what the record itself says, so nothing else need be read
+    if room_of(&r, &ts.agent) != ts.room {
+        crate::ev!("quote.none", { "turn": ts.turn, "seq": seq, "why": "it quotes another room's words" });
+        return None;
+    }
     let id = records::turn_id(&ts.agent.fragment, &ts.fragment, records::CHAT, seq);
     Some(Quote { id, text: records::cut_bytes(&text, limits::QUOTE_TEXT_MAX_BYTES), own: own_words(&r.principal, &r.body, &ts.agent) })
+}
+
+/// The room of the agent's door a `chat` record was said in, as the record
+/// itself says (docs/chat-records.md, "A message heard in a room"): the
+/// agent's own reply names its turn's (`room`), and a record the platform
+/// stamped a door's names its `room`. Any other record is the chat's own,
+/// in no room, whatever it claims.
+fn room_of(r: &Record, agent: &crate::runtime::Agent) -> Option<String> {
+    if r.by(&agent.identity) {
+        return r.body.get("room").and_then(Value::as_str).filter(|id| records::valid_token(id, 64)).map(str::to_string);
+    }
+    match records::said(&r.body) {
+        records::Said::Message(m) if r.by_door() => m.room.map(|room| room.id),
+        _ => None,
+    }
 }
 
 /// Whether a record `principal` posted is `agent`'s own words (a quote of
@@ -2346,6 +2370,18 @@ async fn card_history(api: &Api, agent: &Agent, fragment: &str, record: &Record)
 /// far enough to say, or what it missed did not read: its marker stays, and
 /// the next turn is asked again.
 async fn note_for(api: &Api, ts: &TurnStart, seen: Option<Option<String>>) -> (Option<String>, Option<bool>) {
+    // a turn in a room (`TurnStart::room`) is told its room alone (`place`):
+    // never the chat's history or recap, nor another turn's cut, which may
+    // be another room's talk; only, continuing its own cut turn, that turn.
+    // Its marker (the chat's own conversation's) stays as it is: a room's
+    // turn says nothing of what that conversation holds
+    if ts.room.is_some() {
+        let cut = match ts.continues {
+            Some(_) => cut_note(api, ts, None).await,
+            None => None,
+        };
+        return (cut, None);
+    }
     let (before, history) = tokio::join!(before(api, ts, seen.as_ref().map(Option::as_deref)), history_note(api, ts));
     let (before, behind) = before.map_or((None, None), |(b, behind)| (Some(b), behind));
     if behind == Some(true) {

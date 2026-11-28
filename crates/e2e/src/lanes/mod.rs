@@ -69,6 +69,7 @@ mod simplex_move;
 mod site;
 mod slides;
 mod sync;
+mod slack;
 mod telegram_settings;
 mod templates;
 mod trials;

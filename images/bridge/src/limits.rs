@@ -49,6 +49,23 @@ pub const MESSAGE_TEXT_MAX_BYTES: usize = 32 * 1024;
 /// past it.
 pub const QUOTE_TEXT_MAX_BYTES: usize = 4096;
 
+/// A room's context (docs/chat-records.md, "A message heard in a room"):
+/// what was said there just before a message, as the agent's door sends
+/// it. Its newest lines are read, at most this many, each one's text cut
+/// to `ROOM_CONTEXT_LINE_MAX_BYTES`: a turn in a room is told them all
+/// (note.rs, `place`), within `PLACE_NOTE_MAX_BYTES`.
+pub const ROOM_CONTEXT_LINES_MAX: usize = 20;
+pub const ROOM_CONTEXT_LINE_MAX_BYTES: usize = 640;
+/// A name a door gives (a room's, a speaker's), at most this many
+/// characters, on one line.
+pub const ROOM_NAME_MAX_CHARS: usize = 60;
+/// What a turn in a room is told of it (note.rs, `place`), at most: where
+/// it is, whose words they are, and the room's context.
+pub const PLACE_NOTE_MAX_BYTES: usize = 20 * 1024;
+/// Where it is and whose words they are, at most: the line a queued turn
+/// keeps in the state (engine.rs, `Turn::place`; its context it does not).
+pub const PLACE_LINE_MAX_BYTES: usize = 1024;
+
 /// A reply's text posted as one record, at most: under the platform's
 /// 64 KiB body cap with room for the turn, attachments, and `to`.
 pub const REPLY_TEXT_MAX_BYTES: usize = 56 * 1024;
@@ -445,6 +462,12 @@ const _: () = assert!(RECAP_PAGE_RECORDS <= NOTE_PAGE_RECORDS && RECAP_PAGE_RECO
 const _: () = assert!(RECAP_SCAN_RECORDS.div_ceil(RECAP_PAGE_RECORDS as usize) + NOTE_SCAN_RECORDS_MAX / (NOTE_PAGE_RECORDS as usize) < HISTORY_PAGES_MAX, "a recap's reads (the chat, `work`, and the channel list's one page) are one budget");
 const _: () = assert!(NAMES_READ_MS_MAX < NOTE_READ_MS_MAX && RECAP_SPARE_MS < NOTE_READ_MS_MAX, "names are a note's detail");
 const _: () = assert!(HISTORY_NOTE_MAX_BYTES <= MESSAGE_TEXT_MAX_BYTES, "a chat's history is told in no more than a message holds");
+// a line: "> ", its name (at most 4 bytes a character, and a mark of
+// 11: note.rs `sayer`), ": ", its text, a newline; and its header
+const _: () = assert!(ROOM_CONTEXT_LINES_MAX * (ROOM_CONTEXT_LINE_MAX_BYTES + 4 * ROOM_NAME_MAX_CHARS + 20) + 1024 <= PLACE_NOTE_MAX_BYTES, "a room's context is told whole");
+const _: () = assert!(2 * 4 * ROOM_NAME_MAX_CHARS + 4 * 32 + 160 <= PLACE_LINE_MAX_BYTES, "a room's line holds both names and a door's at their bound");
+const _: () = assert!(TURNS_OPEN_MAX * PLACE_LINE_MAX_BYTES <= STATE_FILE_MAX_BYTES / 8, "every open turn's room line is a small part of the state");
+const _: () = assert!(PLACE_NOTE_MAX_BYTES <= HISTORY_NOTE_MAX_BYTES, "a turn in a room is told its room in place of a chat's history or recap (driver.rs, `note_for`)");
 const _: () = assert!(NOTE_PAGE_RECORDS as usize <= NOTE_SCAN_RECORDS_MAX && NOTE_PAGE_RECORDS <= CATCHUP_PAGE_RECORDS);
 const _: () = assert!(2 * NOTE_SCAN_RECORDS_MAX <= HISTORY_RECORDS_MAX && 2 * NOTE_SCAN_RECORDS_MAX / NOTE_PAGE_RECORDS as usize + 2 <= HISTORY_PAGES_MAX, "a read's bounds hold both scans");
 const _: () = assert!(HOPS_MAX >= 1, "an agent's record is one hop at least");

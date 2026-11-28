@@ -371,8 +371,9 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
         s.ok("in the shell's frame, the chat's mic asks its person in the shell, and once they allow it, records at once", false, json!({ "framed": false, "allow": allow }));
         return chrome.close(shell);
     }
-    let origin_allow = json!(format!("clipboard-write; microphone {}", api.site_origin(chat)));
-    let unlent_allow = json!("clipboard-write");
+    let origin_allow = json!(format!("clipboard-write {o}; microphone {o}", o = api.site_origin(chat)));
+    // its clipboard lent at its own origin, the page it lands on (FIN-508)
+    let unlent_allow = json!(format!("clipboard-write {}", api.site_origin(chat)));
     // its origin is the shell page's to know (its `fragment-origin` meta):
     // the frame names it in its policy and navigates, no status read first
     let asked: Vec<String> = chrome
@@ -455,7 +456,7 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
     chrome.until(&shell, &format!("!!{item}"), wait);
     chrome.eval(&shell, &format!("({item}?.click(), true)"))?;
     let neither = s.eventually(wait, || lent(chat) == Some(false) && lent(&other) == Some(false));
-    let unlent = chrome.until(&shell, &format!("document.querySelector({frame_of})?.allow === 'clipboard-write'"), wait);
+    let unlent = chrome.until(&shell, &format!("document.querySelector({frame_of})?.allow === {}", unlent_allow), wait);
     let ready_again = unlent && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
     press_mic(chrome)?;
     let asks_again = chrome.until(&shell, &asking, wait);

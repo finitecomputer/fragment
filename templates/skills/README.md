@@ -51,7 +51,7 @@ default agent. A fragment on it names it and holds nothing else:
 
 ## The managed set
 
-Nine are Fragment platform contracts:
+Ten are Fragment platform contracts:
 
 | Skill | Why it is ours |
 |---|---|
@@ -64,6 +64,7 @@ Nine are Fragment platform contracts:
 | chat-attachments-finite | A file sent in a Fragment chat as an attachment (`MEDIA:` in a reply), not by email or a path |
 | slides-finite | The slides template: a deck's build, its notes and presenting live |
 | disk-space-finite | Room on a computer's 20 GB disk: caches cleared, big files moved to storage (`fragment offload`) and back |
+| team-rooms | A door's shared rooms (a Slack channel or DM): everyone reads the reply, and the asker may not be the owner (what a room's turn is told: docs/chat-records.md) |
 
 A connection's skill (Linear, Salesforce, Google) is not listed here: the
 folder is the list. Each names its connection in its frontmatter

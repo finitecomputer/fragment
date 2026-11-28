@@ -723,6 +723,8 @@ async fn an_agents_model_and_effort_are_its_sessions_flags() {
             continues: None,
             age: None,
             disk: None,
+            room: None,
+            place: None,
         };
         to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
         // bounded by `wait()`: its events until its end
@@ -1058,4 +1060,106 @@ async fn a_let_go_turn_whose_interrupt_goes_unanswered_has_its_process_replaced(
     assert_eq!(s.replies(), vec!["The next turn's own answer".to_string()]);
     bridge.stop().await;
     s.done();
+}
+
+/// Goal (FIN-508, a session per room): a door's rooms are many, each a
+/// session, and past `SESSIONS_MAX` of them the least lately used idle one
+/// stops for the next, never refusing it. Returning to a room stopped so
+/// resumes its own session (its id is derived: `session_id`), its
+/// transcript on disk. Method: turns in nine rooms of one chat, one after
+/// another, then the first room's again; the session ids `claude` was
+/// started with.
+#[tokio::test]
+async fn past_its_sessions_a_room_stops_an_idle_one_and_resumes_after() {
+    use fragment_bridge::runtime::claude::{session_id, SESSIONS_MAX};
+    use fragment_bridge::runtime::{Agent, ClaudeSettings, Command, Event, Runtime, RuntimeIo, TurnStart};
+
+    let dir = support::dir("claude-rooms");
+    let bin = dir.join("bin/claude");
+    std::fs::create_dir_all(bin.parent().expect("its bin")).expect("its bin");
+    std::fs::copy(env!("CARGO_BIN_EXE_fake-claude"), &bin).expect("fake-claude copied");
+    std::fs::write(bin.with_file_name("fake-claude.json"), r#"{"mode":"echo"}"#).expect("its mode");
+    let claude = Claude {
+        config: ClaudeConfig {
+            bin: bin.clone(),
+            home: dir.clone(),
+            config_dir: dir.join("claude-config"),
+            work_dir: dir.join("work"),
+            state_dir: dir.join("claude-state"),
+            model: Some("claude-haiku-5-5".into()),
+            idle: Duration::from_secs(300),
+            drain: Duration::from_millis(fragment_bridge::runtime::claude::DRAIN_MS_DEFAULT),
+            run_as: None,
+            installer: None,
+        },
+    };
+    let (to_runtime, commands) = tokio::sync::mpsc::channel(16);
+    let (events, mut from_runtime) = tokio::sync::mpsc::channel(64);
+    let (stop, shutdown) = tokio::sync::watch::channel(false);
+    let (_hold, held) = tokio::sync::watch::channel(false);
+    let running = tokio::spawn(Box::new(claude).run(RuntimeIo { commands, events, shutdown, held, unquiet: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }));
+
+    let mut rooms: Vec<usize> = (0..=SESSIONS_MAX).collect();
+    rooms.push(0);
+    for (n, room) in rooms.into_iter().enumerate() {
+        let agent = Agent { fragment: "juniper--k3x9".into(), identity: "npub1juniper".into(), name: "juniper".into(), owner: "npub1paul".into(), credentials: vec![], key: None, runtime: Some("claude".into()), claude: ClaudeSettings::default() };
+        let id = format!("t{n}");
+        let ts = TurnStart {
+            turn: id.clone(),
+            agent,
+            fragment: "slack--k3x9".into(),
+            chat_name: "slack".into(),
+            seq: n as u64 + 1,
+            asker: "slack:U0456".into(),
+            asker_name: format!("Maple · Slack · #room-{room}"),
+            text: format!("hi room {room}"),
+            attachments: vec![],
+            attachments_in: None,
+            late: None,
+            files: vec![],
+            routine: false,
+            claim_seq: None,
+            note: None,
+            command: false,
+            reply_to: None,
+            quote: None,
+            simplex: false,
+            continues: None,
+            age: None,
+            disk: None,
+            room: Some(format!("C{room:04}")),
+            place: None,
+        };
+        to_runtime.send(Command::Start(Box::new(ts))).await.expect("the runtime runs");
+        // bounded by `wait()`: its events until its end
+        let ended = tokio::time::timeout(Duration::from_millis(wait()), async {
+            while let Some(e) = from_runtime.recv().await {
+                if let Event::End { turn, outcome } = e {
+                    if turn == id {
+                        return Some(outcome);
+                    }
+                }
+            }
+            None
+        })
+        .await;
+        assert!(matches!(ended, Ok(Some(fragment_bridge::records::Outcome::Idle))), "turn {n} (room {room}): {ended:?}");
+    }
+    let _ = stop.send(true);
+    drop(to_runtime);
+    let _ = running.await;
+
+    let heard = std::fs::read_to_string(bin.with_file_name("heard.jsonl")).expect("what claude was started with");
+    let started: Vec<Vec<String>> = heard
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter_map(|v| v["args"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+        .collect();
+    let flag = |a: &[String], k: &str| a.iter().position(|x| x == k).and_then(|i| a.get(i + 1)).cloned();
+    let ids: Vec<String> = started.iter().filter_map(|a| flag(a, "--session-id").or_else(|| flag(a, "--resume"))).collect();
+    assert_eq!(ids.len(), SESSIONS_MAX + 2, "a process a room, and the first room's again: {ids:?}");
+    assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), SESSIONS_MAX + 1, "a session a room: {ids:?}");
+    let first = session_id("juniper--k3x9", "slack--k3x9/C0000", 0);
+    assert_eq!((ids[0].as_str(), ids[ids.len() - 1].as_str()), (first.as_str(), first.as_str()), "the first room's own, again");
+    assert!(started.last().expect("started").iter().any(|x| x == "--resume"), "resumed: {:?}", started.last());
 }

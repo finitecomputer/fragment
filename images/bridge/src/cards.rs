@@ -29,6 +29,10 @@ pub struct Fresh {
     pub note: String,
     /// The answer as its runtime reads it (`runtime::LateCard`).
     pub late: crate::runtime::LateCard,
+    /// The room of the agent's door its card's turn was in (its start's
+    /// `room`): the fresh turn runs in that room's conversation, never the
+    /// chat's own, so a DM's words stay in the DM (FIN-508).
+    pub room: Option<String>,
 }
 
 /// `answer`, an owner's `prompt_response` on `chat`, against the agent's
@@ -85,6 +89,13 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     }
     let start = work.iter().find(|r| of(r, "turn.start") && r.body["turn"] == turn).ok_or(Unavailable::Missing)?;
     let asker = start.body["asker"].as_str().ok_or(Unavailable::Corrupt)?;
+    // its room, as its start names it; one that names none readable is
+    // never run in the chat's own conversation
+    let room = match &start.body["room"] {
+        Value::Null => None,
+        Value::String(r) if records::valid_token(r, 64) => Some(r.clone()),
+        _ => return Err(Unavailable::Corrupt),
+    };
     if chat.iter().any(|r| r.channel == records::CHAT && r.seq < answer.seq && r.at >= asked.at && r.by(asker) && matches!(records::said(&r.body), Said::Stop { turn: Some(t) } if t == turn)) {
         return Ok(Some(Resolved { closed: closed(Closed::Stopped), fresh: None }));
     }
@@ -105,7 +116,7 @@ pub fn resolve(agent: &Agent, answer: &Record, work: &[Record], chat: &[Record],
     let mut closed = records::turn_prompt_closed(turn, &prompt, Closed::Answered, Some((&option, &answer.principal, words.as_deref())));
     closed["answerSeq"] = json!(answer.seq);
     let late = crate::runtime::LateCard { prompt: prompt.clone(), option: option.clone(), request: cause.and_then(note::asked) };
-    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late }) }))
+    Ok(Some(Resolved { closed, fresh: Some(Fresh { text, note, late, room }) }))
 }
 
 #[cfg(test)]
@@ -189,6 +200,15 @@ mod tests {
         coded[0].body["code"] = json!(true);
         let unread = resolve(&agent(), &chat[2], &coded, &chat, None, name, 20).unwrap().unwrap().fresh.unwrap();
         assert!(unread.note.contains("It was answering app code; what they asked is not in this chat's record.") && !unread.note.contains("Robin"), "{}", unread.note);
+        // FIN-508: a card asked in a room is answered in that room
+        assert_eq!(late(&work, &chat, &chat[2], 20).unwrap().unwrap().fresh.unwrap().room, None, "the chat's own: no room");
+        let mut roomed = work.clone();
+        roomed[0].body["room"] = json!("D0789");
+        assert_eq!(late(&roomed, &chat, &chat[2], 20).unwrap().unwrap().fresh.unwrap().room.as_deref(), Some("D0789"), "its turn's room");
+        for odd in [json!("not a room!"), json!(7), json!({ "id": "D0789" })] {
+            roomed[0].body["room"] = odd.clone();
+            assert_eq!(late(&roomed, &chat, &chat[2], 20), Err(Unavailable::Corrupt), "a room it cannot read ({odd}) is never the chat's own");
+        }
     }
 
     /// Goal (the rollback's double run): only a closure the late path wrote

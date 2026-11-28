@@ -102,6 +102,14 @@ fn own<'a>(r: &'a Record, agent: &str, kind: &str) -> Option<&'a Value> {
     (r.by(agent) && r.body["kind"] == kind).then_some(&r.body)
 }
 
+/// Whether a record is a room's (docs/chat-records.md, "A message heard in
+/// a room"): a turn's claim or a message naming one. A room's talk is its
+/// own conversation's, never the chat's: the chat's own walks (`previous`,
+/// `behind`, `exchanges`, `recap`) pass it over.
+fn in_room(b: &Value) -> bool {
+    b.get("room").is_some_and(|r| !r.is_null())
+}
+
 /// Whether a `turn.end` is a refusal: the turn never ran.
 fn refused(end: &Value) -> bool {
     end["outcome"] == "error" && crate::engine::refusal(field(end, "error"))
@@ -121,7 +129,7 @@ pub fn previous(work: &[Record], agent: &str, from_start: bool) -> Before {
             continue;
         }
         let Some(start) = own(r, agent, "turn.start") else { continue };
-        if start["agent"] != agent {
+        if start["agent"] != agent || in_room(start) {
             continue;
         }
         let turn = field(start, "turn");
@@ -157,7 +165,7 @@ pub fn behind(work: &[Record], agent: &str, seen: Option<&str>, from_start: bool
             ends.push((field(end, "turn"), end));
             continue;
         }
-        let Some(start) = own(r, agent, "turn.start").filter(|s| s["agent"] == agent) else { continue };
+        let Some(start) = own(r, agent, "turn.start").filter(|s| s["agent"] == agent && !in_room(s)) else { continue };
         let turn = field(start, "turn");
         if seen == Some(turn) {
             return Some(false);
@@ -366,6 +374,51 @@ fn step_list(steps: &[CutStep], total: usize) -> String {
     said.join("; ")
 }
 
+/// A door as a person calls it: its id, its first letter a capital
+/// (`slack`: Slack).
+fn door(via: &str) -> String {
+    let mut c = via.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
+}
+
+/// Who asks a turn in a room, as its runtime calls them: their name (as a
+/// recap names a sayer, `sayer`: no one outside reads as the agent or its
+/// owner), the door and the room (`Maple · Slack · #deploys`).
+pub fn speaker(name: &str, via: &str, room: &records::Room) -> String {
+    format!("{} · {} · {}", sayer(name), door(via), room.name)
+}
+
+/// What a turn in a room is told before its message (docs/chat-records.md,
+/// "A message heard in a room"), first: where it is, that everyone there
+/// reads what the agent says, and whether its asker (`name`) is its owner.
+/// One line, at most `PLACE_LINE_MAX_BYTES`: a queued turn keeps it in the
+/// state (`Turn::place`). It names the `team-rooms` skill, which says what
+/// it means: an index of skills shows each one's description cut short
+/// (Hermes': 60 characters), so the note is what sends the agent to it.
+pub fn place(name: &str, owner: bool, via: &str, room: &records::Room) -> String {
+    let whose = if owner { "your owner" } else { "not your owner" };
+    let line = format!("You are in {} {}, a room others share: everyone in it reads what you say there. {} is {whose}. Read your team-rooms skill before you answer.", door(via), room.name, sayer(name));
+    assert!(line.len() <= limits::PLACE_LINE_MAX_BYTES && !line.contains('\n'), "where a turn is, one short line: {}", line.len());
+    line
+}
+
+/// Then what was said in its room just before, oldest first, if anything:
+/// held in memory alone (`Turn::before`), never in the state. With `place`,
+/// at most `PLACE_NOTE_MAX_BYTES`.
+pub fn said_before(room: &records::Room) -> Option<String> {
+    if room.context.is_empty() {
+        return None;
+    }
+    let mut note = "Said there just before, oldest first:".to_string();
+    // a line each, so no words read as a line of their own
+    for l in &room.context {
+        let text = l.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        note.push_str(&format!("\n> {}: {text}", sayer(&l.name)));
+    }
+    assert!(note.len() + 1 + limits::PLACE_LINE_MAX_BYTES <= limits::PLACE_NOTE_MAX_BYTES, "a room's note is bounded: {}", note.len());
+    Some(note)
+}
+
 /// How long ago a turn's message was said, in plain words, when it is
 /// handed at least `MESSAGE_AGE_TOLD_MS` after it (an outage, a restart, a
 /// sleep, a backlog), so its agent can judge whether it is still wanted;
@@ -525,7 +578,7 @@ pub fn exchanges<'a>(chat: &'a [Record], me: &str, owner: &str, since: i64, unti
             begins = true;
             break;
         }
-        if r.channel == records::CHAT && r.at <= until && records::is_identity(&r.principal) && message(r).is_some() {
+        if r.channel == records::CHAT && r.at <= until && records::is_identity(&r.principal) && !in_room(&r.body) && message(r).is_some() {
             said.push(r);
         }
     }
@@ -583,7 +636,7 @@ pub fn recap(said: &[&Record], work: &[Record], me: &str, owner: &str, names: &B
     let started: Vec<(&str, i64, Option<u64>)> = work
         .iter()
         .filter_map(|r| {
-            let b = own(r, me, "turn.start").filter(|b| b["agent"] == me)?;
+            let b = own(r, me, "turn.start").filter(|b| b["agent"] == me && !in_room(b))?;
             let here = b["cause"]["fragment"] == chat && b["cause"]["channel"] == records::CHAT;
             Some((b["turn"].as_str()?, r.at, b["cause"]["seq"].as_u64().filter(|_| here)))
         })
@@ -762,6 +815,22 @@ mod tests {
 
     const ME: &str = "npub1juniper";
     const LIFE: &str = "0123456789abcdef0123456789abcdef";
+
+    /// Goal (limits): a room's note at its most (every line of its context
+    /// whole, each name and text at its bound, in letters of four bytes)
+    /// stays within its bound, each line one line.
+    #[test]
+    fn a_rooms_note_at_its_most_is_bounded() {
+        let big = "𝔸".repeat(limits::ROOM_NAME_MAX_CHARS);
+        let line = records::Line { name: big.clone(), text: "𝔸\n".repeat(limits::ROOM_CONTEXT_LINE_MAX_BYTES / 5) };
+        let room = records::Room { id: "C0123".into(), name: big.clone(), context: vec![line; limits::ROOM_CONTEXT_LINES_MAX] };
+        let line = place(&big, false, "abcdefghijklmnopqrstuvwxyzabcdef", &room);
+        assert!(line.len() <= limits::PLACE_LINE_MAX_BYTES);
+        let note = format!("{line}\n{}", said_before(&room).expect("its context"));
+        assert!(note.len() <= limits::PLACE_NOTE_MAX_BYTES);
+        assert_eq!(note.lines().count(), 2 + limits::ROOM_CONTEXT_LINES_MAX, "a line each");
+        assert_eq!(speaker("Maple", "slack", &room), format!("Maple · Slack · {big}"));
+    }
 
     /// A `work` channel, as the agent `ME` (and another agent) post it.
     #[derive(Default)]

@@ -268,11 +268,20 @@ impl World {
     /// `append`, its time `ago_ms` before now: a message that waited (an
     /// outage's backlog).
     pub fn append_aged(&mut self, fragment: &str, channel: &str, principal: &str, body: Value, ago_ms: i64) -> Value {
+        self.append_by(fragment, channel, principal, None, body, ago_ms)
+    }
+
+    /// `append_aged`, stamped as the platform stamps who wrote it
+    /// (`author`: docs/chat-records.md, "Who wrote a record").
+    pub fn append_by(&mut self, fragment: &str, channel: &str, principal: &str, author: Option<&str>, body: Value, ago_ms: i64) -> Value {
         let at = self.now() - ago_ms;
         let f = self.fragments.get_mut(fragment).expect("a fragment of the fake");
         let c = f.channels.get_mut(channel).expect("a channel of the fragment");
         let seq = c.records.len() as u64 + 1;
-        let record = json!({ "channel": channel, "seq": seq, "at": at, "principal": principal, "kind": "message", "body": body });
+        let mut record = json!({ "channel": channel, "seq": seq, "at": at, "principal": principal, "kind": "message", "body": body });
+        if let Some(author) = author {
+            record["author"] = json!(author);
+        }
         c.records.push(record.clone());
         self.log.push(format!("record {fragment} {channel} {seq}"));
         let mut frame = record.clone();
@@ -515,6 +524,12 @@ impl Fake {
     /// `principal` says `body` in `fragment`'s `chat`.
     pub fn say(&self, fragment: &str, principal: &str, body: Value) -> Value {
         self.with(|w| w.append(fragment, "chat", principal, body))
+    }
+
+    /// `say`, as an open hosted door's own release code publishes it: the
+    /// platform stamps it the door's (`author: door`).
+    pub fn say_as_door(&self, fragment: &str, principal: &str, body: Value) -> Value {
+        self.with(|w| w.append_by(fragment, "chat", principal, Some("door"), body, 0))
     }
 
     /// `say`, as said `ago` before now: one that waited.

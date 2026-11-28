@@ -6,6 +6,7 @@
 // same three parts: its tags, one line, its controls.
 import * as fragment from "./__fragment.js";
 import { KIND } from "./frame-messages.js";
+import { icon } from "./icons.js";
 
 export const framed = window.parent !== window;
 
@@ -21,6 +22,71 @@ export function button(text, cls, onclick) {
   b.type = "button";
   b.addEventListener("click", onclick);
   return b;
+}
+
+// A Copy, as the shell's (settings.js `buildSection`): its copy icon and
+// word, then a check and "Copied" for a moment once copied. A clipboard
+// that refuses (none, no permission, a webview's) selects what it copies
+// (`shown`), to copy by hand, and says so in `said`; Copy stays Copy, to
+// try again. Each press numbered: an older one's answer changes nothing.
+export function copyButton(text, shown, what) {
+  const b = el("button", "quiet setup-copy");
+  b.type = "button";
+  const said = el("p", "setup-error");
+  said.setAttribute("role", "status");
+  said.hidden = true;
+  const shows = (copied) => {
+    b.replaceChildren(icon(copied ? "check" : "copy"), copied ? "Copied" : "Copy");
+    b.setAttribute("aria-label", copied ? "Copied" : `Copy ${what}`);
+  };
+  shows(false);
+  let presses = 0;
+  b.addEventListener("click", async () => {
+    const mine = ++presses;
+    said.hidden = true;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      if (mine !== presses) return;
+      // the browser's older copy, as the chat page's (response-actions.js
+      // `copy`): a hidden field's text, copied by this press
+      if (copiedByHand(text)) {
+        shows(true);
+        setTimeout(() => mine === presses && shows(false), 1500);
+        return;
+      }
+      shows(false);
+      const range = document.createRange();
+      range.selectNodeContents(shown);
+      getSelection()?.removeAllRanges();
+      getSelection()?.addRange(range);
+      said.textContent = "Couldn't copy it. It's selected: copy it yourself (Ctrl+C, or ⌘C on a Mac).";
+      said.hidden = false;
+      return;
+    }
+    if (mine !== presses) return;
+    shows(true);
+    setTimeout(() => mine === presses && shows(false), 1500);
+  });
+  return { button: b, said };
+}
+
+function copiedByHand(text) {
+  const field = el("textarea");
+  field.value = text;
+  field.setAttribute("aria-hidden", "true");
+  field.style.position = "fixed";
+  field.style.opacity = "0";
+  document.body.append(field);
+  field.select();
+  let copied = false;
+  try {
+    copied = document.execCommand("copy");
+  } catch {
+    copied = false;
+  }
+  field.remove();
+  return copied;
 }
 
 export const row = (...items) => {

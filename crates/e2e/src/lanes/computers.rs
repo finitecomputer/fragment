@@ -66,9 +66,9 @@ pub(super) const QUEUE_DRAIN: Duration = Duration::from_secs(3);
 
 /// The app `asker_checks` asks: it tells whom it was told (`whoami`), and
 /// has an op for editors and up (`backstage`).
-const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
-const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
-const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
+pub(super) const WHOAMI_APP: &[u8] = include_bytes!("../../fixtures/chat.mjs");
+pub(super) const WHOAMI_JSON: &[u8] = include_bytes!("../../fixtures/chat.json");
+pub(super) const FORMAT_MJS: &[u8] = include_bytes!("../../fixtures/format.mjs");
 const SAYS_APP: &[u8] = include_bytes!("../../fixtures/says.mjs");
 const SAYS_JSON: &[u8] = include_bytes!("../../fixtures/says.json");
 
@@ -3246,6 +3246,8 @@ pub fn computers(s: &mut Suite, api: &Api) -> Result<()> {
             let sx = super::simplex_settings::Agent { owner: &owner, computer: &id, agent: &agent_name, chat: &chat_name, identity: &identity, wake };
             replies_so_far += super::simplex_settings::checks(s, api, &sx, &fetched)?;
             replies_so_far += telegram_checks(s, api, &doors, &fetched, wake)?;
+            // Slack's connector, its rooms and outside speakers (FIN-508)
+            super::slack::checks(s, api, &super::slack::Agent { owner: &owner, owner_id: &owner_id, agent: &agent_name, identity: &identity, wake })?;
             // SimpleX's connector, on a door (run by name: its stack builds the door's image)
             let sx = super::simplex_door::Agent { owner: &owner, owner_id: &owner_id, computer: &id, agent: &agent_name, identity: &identity, wake };
             super::simplex_door::connector(s, api, &sx)?;

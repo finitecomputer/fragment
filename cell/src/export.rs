@@ -367,6 +367,11 @@ struct Frag {
     /// meta costs the cell's Wasm more than its budget leaves.
     meta: Value,
     names: BTreeMap<String, String>,
+    /// Unfiltered membership (`principal -> agent owner`) for transcript
+    /// attribution; `meta["members"]` omits person members' own agents
+    /// (decision 64). Empty in jobs stored before this field existed.
+    #[serde(default)]
+    members: BTreeMap<String, Option<String>>,
     /// Its channels, and the newest record of each as its facts were read.
     channels: Vec<(String, i64)>,
     tables: Option<Vec<String>>,
@@ -1495,9 +1500,27 @@ impl PrincipalCell {
                 let (works, work_more) = if work < work_max { self.page(run, &person, &name, "work", work).await? } else { (vec![], false) };
                 let chat_end = !chat_more || chats.last().is_some_and(|r| r.seq >= chat_max);
                 let work_end = !work_more || works.last().is_some_and(|r| r.seq >= work_max);
-                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Value)> { rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), crate::json_text(r.body.get()).unwrap_or(Value::Null))).collect() };
+                let parse = |rs: &[Record], max: i64| -> Vec<(i64, i64, String, Option<String>, Value)> {
+                    rs.iter().filter(|r| r.seq <= max).map(|r| (r.seq, r.at, r.principal.clone(), r.author.clone(), crate::json_text(r.body.get()).unwrap_or(Value::Null))).collect()
+                };
                 let (a, b) = (parse(&chats, chat_max), parse(&works, work_max));
-                let names = core::Names(run.job.frag().names.clone());
+                let members: BTreeMap<String, Option<String>> = if !run.job.frag().members.is_empty() {
+                    run.job.frag().members.clone()
+                } else {
+                    run.job
+                        .frag()
+                        .meta["members"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|m| {
+                            let p = m["principal"].as_str()?.to_string();
+                            let owner = (m["kind"] == "agent").then(|| m["owner"].as_str().map(str::to_string)).flatten();
+                            Some((p, owner))
+                        })
+                        .collect()
+                };
+                let names = core::Names { display: run.job.frag().names.clone(), members };
                 let (mut ai, mut bi, mut out) = (0, 0, String::new());
                 let (mut chat_at, mut work_at) = (chat, work);
                 // A record goes in only once nothing unread of the other
@@ -1505,8 +1528,8 @@ impl PrincipalCell {
                 // channel holds more, the next step reads on from both
                 // cursors. Bounded: each round takes one record of the pages.
                 loop {
-                    let x = a.get(ai).map(|r| core::Said { channel: "chat", seq: r.0, at: r.1, principal: &r.2, body: &r.3 });
-                    let y = b.get(bi).map(|r| core::Said { channel: "work", seq: r.0, at: r.1, principal: &r.2, body: &r.3 });
+                    let x = a.get(ai).map(|r| core::Said { channel: "chat", seq: r.0, at: r.1, principal: &r.2, author: r.3.as_deref(), body: &r.4 });
+                    let y = b.get(bi).map(|r| core::Said { channel: "work", seq: r.0, at: r.1, principal: &r.2, author: r.3.as_deref(), body: &r.4 });
                     let said = match (x, y) {
                         (Some(x), Some(y)) if x.order() <= y.order() => x,
                         (Some(_), Some(y)) => y,
@@ -1591,7 +1614,7 @@ impl PrincipalCell {
             transcript: None,
             skipped: vec![],
         };
-        let mut frag = Frag { meta: Value::Null, names: BTreeMap::new(), channels: vec![], tables: None, schema: None, bytes: 0, counted: 0, blobs: 0 };
+        let mut frag = Frag { meta: Value::Null, names: BTreeMap::new(), members: BTreeMap::new(), channels: vec![], tables: None, schema: None, bytes: 0, counted: 0, blobs: 0 };
         let status = match self.read_json(person, name, "status", "").await? {
             Ok(s) => s,
             Err(e) => {
@@ -1624,6 +1647,14 @@ impl PrincipalCell {
                 vec![]
             }
         };
+        // full membership for transcript attribution (before filtering out
+        // person members' own agents from meta.json per decision 64)
+        for m in &members {
+            if let Some(p) = m["principal"].as_str() {
+                let owner = (m["kind"] == "agent").then(|| m["owner"].as_str().map(str::to_string)).flatten();
+                frag.members.insert(p.to_string(), owner);
+            }
+        }
         // an agent in with its person is no entry of its own (decision 64)
         let people: Vec<String> = members.iter().filter(|m| m["kind"] != "agent" && m["role"] != "owner").filter_map(|m| m["principal"].as_str().map(str::to_string)).collect();
         let members: Vec<Value> = members.into_iter().filter(|m| !(m["kind"] == "agent" && m["owner"].as_str().is_some_and(|o| people.iter().any(|p| p == o)))).collect();
@@ -1831,6 +1862,8 @@ struct Record {
     seq: i64,
     at: i64,
     principal: String,
+    #[serde(default, skip_serializing)]
+    author: Option<String>,
     kind: String,
     body: Box<RawValue>,
 }

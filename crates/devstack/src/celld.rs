@@ -98,11 +98,11 @@ pub fn write_secrets_file(project: &Path, config: &serde_json::Value) -> Result<
 }
 
 /// A self-hosted deployment's connectors (`FRAGMENT_CONNECTORS`): the
-/// cell's default, less Telegram, whose webhook needs the platform reachable
+/// cell's default, less Telegram and Slack, whose webhooks need the platform reachable
 /// from the internet, which a box on a tailnet is not (docs/self-host.md).
 pub fn connectors() -> String {
     let all = fragment_core::connectors::Policy::default();
-    let rows: Vec<&fragment_core::connectors::Connector> = all.entries().iter().filter(|c| c.id != "telegram").collect();
+    let rows: Vec<&fragment_core::connectors::Connector> = all.entries().iter().filter(|c| c.id != "telegram" && c.id != "slack").collect();
     serde_json::to_string(&rows).expect("connectors serialize")
 }
 
@@ -517,9 +517,9 @@ mod tests {
     }
 
     /// Goal: a self-hosted stack's connectors are the default's but
-    /// Telegram, and the cell takes them as it takes a deployment's.
+    /// Telegram and Slack, and the cell takes them as it takes a deployment's.
     #[test]
-    fn a_self_hosted_stack_links_no_telegram() {
+    fn a_self_hosted_stack_links_no_telegram_or_slack() {
         let policy = fragment_core::connectors::Policy::parse(&connectors()).unwrap();
         let ids: Vec<&str> = policy.entries().iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, ["simplex"]);

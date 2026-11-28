@@ -38,7 +38,8 @@ pub fn trips_hourly_breaker(this_hour: u64, connector: bool) -> bool {
 
 /// The deployment's connectors, checked (`new`). Absent from a config, it
 /// is `default()`: SimpleX, with `relay::HOSTS` on 443, and Telegram (a
-/// hosted connector: templates/telegram, no relay). `[]` allows none.
+/// hosted connector: templates/telegram, no relay) and Slack (another:
+/// templates/slack). `[]` allows none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy(Vec<Connector>);
 
@@ -60,7 +61,7 @@ pub enum Action {
 impl Default for Policy {
     fn default() -> Self {
         let targets = crate::relay::HOSTS.iter().map(|h| RelayTarget { host: (*h).into(), port: crate::relay::PORT }).collect();
-        Policy::new(vec![Connector { id: "simplex".into(), relay_targets: targets }, Connector { id: "telegram".into(), relay_targets: vec![] }]).expect("the default policy is valid")
+        Policy::new(vec![Connector { id: "simplex".into(), relay_targets: targets }, Connector { id: "telegram".into(), relay_targets: vec![] }, Connector { id: "slack".into(), relay_targets: vec![] }]).expect("the default policy is valid")
     }
 }
 
@@ -152,7 +153,7 @@ mod tests {
 
     use super::*;
 
-    /// Goal: the default is today's SimpleX relay and Telegram; `[]` allows
+    /// Goal: the default is today's SimpleX relay, Telegram and Slack; `[]` allows
     /// nothing but an unlink; an id the policy lacks is refused; bad ids are
     /// refused.
     #[test]
@@ -164,6 +165,7 @@ mod tests {
         for a in [Action::Link, Action::Redeem, Action::Check, Action::Relay] {
             assert_eq!(p.authorize("npub1paul", "juniper--abcd", "simplex", a), Ok(()), "{a:?}");
             assert_eq!(p.authorize("npub1paul", "juniper--abcd", "telegram", a), Ok(()), "{a:?}");
+            assert_eq!(p.authorize("npub1paul", "juniper--abcd", "slack", a), Ok(()), "{a:?}");
             assert!(none.authorize("npub1paul", "juniper--abcd", "simplex", a).is_err(), "{a:?}");
             assert!(p.authorize("npub1paul", "juniper--abcd", "signal", a).is_err(), "{a:?}");
         }

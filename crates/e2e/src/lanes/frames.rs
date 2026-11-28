@@ -209,7 +209,7 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let buttons = chrome.eval(&shell, "[document.getElementById('ask-cancel').textContent, document.getElementById('ask-go').textContent]")?;
     s.ok(
         "an app's window is lent no microphone (its policy names none, and its page's request is refused); its ask as it loads opens the shell's one dialog, saying the app is shared with them",
-        up && allow == json!("clipboard-write") && said.as_str().is_some_and(|t| t.starts_with("mic:refused")) && asked && title.as_str().is_some_and(|t| t.starts_with("Let ") && t.ends_with(", an app shared with you, use your microphone?")) && buttons == json!(["Not now", "Allow"]),
+        up && allow == json!(format!("clipboard-write {}", api.site_origin(&app))) && said.as_str().is_some_and(|t| t.starts_with("mic:refused")) && asked && title.as_str().is_some_and(|t| t.starts_with("Let ") && t.ends_with(", an app shared with you, use your microphone?")) && buttons == json!(["Not now", "Allow"]),
         json!({ "up": up, "allow": allow, "said": said, "asked": asked, "title": title, "buttons": buttons }),
     );
     let armed = chrome.until(&shell, "!document.getElementById('ask-go').disabled", wait);
@@ -252,7 +252,8 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     chrome.front(&shell)?;
     let armed_again = chrome.until(&shell, "!document.getElementById('ask-go').disabled", wait);
     chrome.click(&shell, "#ask-go")?;
-    let lent_allow = serde_json::to_string(&format!("clipboard-write; microphone {}", api.site_origin(&app)))?;
+    let lent_allow = serde_json::to_string(&format!("clipboard-write {o}; microphone {o}", o = api.site_origin(&app)))?;
+    let clipboard_only = format!("clipboard-write {}", api.site_origin(&app));
     let relent = chrome.until(&shell, &format!("document.querySelector({})?.allow === {lent_allow}", frame_of(&app)), wait);
     let live = s.eventually(wait, || chrome.eval_in_frame(&shell, &app, "document.getElementById('mic').textContent.startsWith('mic:live')").ok() == Some(json!(true)));
     let kept = row_of(&app)["microphone"] == json!(true);
@@ -269,7 +270,7 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let reloaded = chrome.until(&other, &format!("document.querySelector({})?.allow === {lent_allow}", frame_of(&app)), wait);
     s.ok(
         "its window in another tab, made before the yes, is not made again under their hand, and its Reload makes it with the yes",
-        other_up && other_asked && untouched == json!("clipboard-write") && reloaded,
+        other_up && other_asked && untouched == clipboard_only.as_str() && reloaded,
         json!({ "up": other_up, "asked there": other_asked, "untouched": untouched, "reloaded": reloaded }),
     );
     // its window's More: the microphone taken back, in both tabs
@@ -282,9 +283,9 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     chrome.eval(&shell, &format!("({item} || {more}?.click(), true)"))?;
     chrome.until(&shell, &format!("!!{item}"), wait);
     chrome.eval(&shell, &format!("({item}?.click(), true)"))?;
-    let unlent = chrome.until(&shell, &format!("document.querySelector({})?.allow === 'clipboard-write'", frame_of(&app)), wait);
+    let unlent = chrome.until(&shell, &format!("document.querySelector({})?.allow === {}", frame_of(&app), serde_json::to_string(&clipboard_only)?), wait);
     let taken = s.eventually(wait, || row_of(&app)["microphone"].is_null());
-    let elsewhere = chrome.until(&other, &format!("document.querySelector({})?.allow === 'clipboard-write'", frame_of(&app)), wait);
+    let elsewhere = chrome.until(&other, &format!("document.querySelector({})?.allow === {}", frame_of(&app), serde_json::to_string(&clipboard_only)?), wait);
     let refused_again = elsewhere && s.eventually(wait, || chrome.eval_in_frame(&other, &app, "document.getElementById('mic').textContent.startsWith('mic:refused')").ok() == Some(json!(true)));
     s.ok(
         "its window's ⋯ offers Turn off microphone while it is lent, which takes the yes back and makes its frame again, lent none, in this tab and the other",
@@ -305,7 +306,7 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let allow = allow_of(&mut chrome, &shell, "#frames", &app)?;
     s.ok(
         "an app at a chat's address (`/?chat=`), framed in the middle column, is lent no microphone either",
-        framed && allow.as_str().is_some_and(|a| !a.contains("microphone")),
+        framed && allow == json!(format!("clipboard-write {}", api.site_origin(&app))),
         json!({ "framed": framed, "allow": allow }),
     );
     chrome.close(shell)?;
@@ -345,7 +346,7 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let after = allow_of(&mut chrome, &apps, "#stack", &chat)?;
     s.ok(
         "a chat of the release's (its row says so) is lent no microphone until its person's yes; their one yes for chats lends every chat of theirs, and its window then names the chat's own origin",
-        window && before == json!("clipboard-write") && yes.status == 200 && both && window_again && after == json!(format!("clipboard-write; microphone {}", api.site_origin(&chat))),
+        window && before == json!(format!("clipboard-write {}", api.site_origin(&chat))) && yes.status == 200 && both && window_again && after == json!(format!("clipboard-write {o}; microphone {o}", o = api.site_origin(&chat))),
         json!({ "reaches": reaches, "before": before, "yes": yes.status, "both": both, "after": after }),
     );
     chrome.close(apps)?;
