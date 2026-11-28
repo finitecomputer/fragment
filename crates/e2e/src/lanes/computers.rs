@@ -89,13 +89,14 @@ const ASKER_CHECKS: &[&str] = &[
     "in its owner's own chat (a chat as a person makes one), shared with them, their ask asks her on a card there, which they both read",
     "its owner asks it in her own chat to delete her app, and they ask it to delete her board: each a confirm card for her where it was asked, the app and the board kept; her own delete, then Yes, closes the card. While her turns are open in two chats, her ask asks in neither (409): a confirm names what it is about",
     "its owner's invites are answered for its owner alone: its owner's own ask lists them (`for`, which they take, kept), and theirs is refused",
-    "its computer's word on its turns is no longer taken (the place opens them): told on the old route that their turn ended, its call for its owner on their ask still goes as them",
-    "nor that their turn is its owner's: its call for its owner on their ask still goes as them",
-    "on their ask, its call as itself is held to them too: refused in its owner's app where they are no member, though the agent is, by its API and by its site; its owner's same asks go, as the agent",
+    "its computer has no word on its turns (the place opens them): the route it told them on is gone, and its call for its owner on their ask still goes as them",
+    "nor can it say their turn is its owner's: its call for its owner on their ask still goes as them",
+    "on their ask, its call as itself is held to them too: refused in its owner's app where they are no member, though the agent is, by its API and by its site; its owner's same asks go, for its owner by its API (its route takes whom it acts for) and as the agent on its site",
     "an Allow once is bound to their next words as they are posted: in a chat that keeps two records, those words pushed out by their ask after lend that ask nothing, and it asks its owner again",
     "fail closed, never lost: while the agent's fragment refuses the chat's word, their ask is not handed to the agent (the chat's events say so); once it takes it, it is answered, as theirs",
     "app code's words, said in an app's chat for whoever called it, are an ask no one proves: the agent's call for its owner on them is refused outside that app, and lends no one its owner's reach",
     "on them it acts in that app alone, as itself; and its owner's next ask is its owner's again, narrowing nothing",
+    "with no turn open, its owner's routine runs a job for its owner, its computer naming no one: Calories is told them, and sums their own day",
 ];
 
 /// Ben, a person in its owner's chat, asks the agent there for things
@@ -426,18 +427,19 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let bens = asked_by_ben(s, 8, &invites)?;
     s.ok(ASKER_CHECKS[12], owners.starts_with("fetched 200") && owners.contains("\"invites\"") && bens.starts_with("fetched 403"), json!({ "owner": owners, "ben": bens }));
 
-    // what a computer could say of its turns before the place opened them
-    // (FIN-720's `computer/turns`, as its bridge life and its start): that
-    // Ben's turn ended, or was its owner's, in the turn itself (`$TURN`)
+    // what a computer said of its turns before the place opened them
+    // (FIN-720's `computer/turns`, as its bridge life and its start), a
+    // route no more: that Ben's turn ended, or was its owner's, in the turn
+    // itself (`$TURN`)
     let life = records(api, w.owner, chat, "work").into_iter().rev().find(|r| r["principal"] == w.identity && r["body"]["kind"] == "turn.start").map(|r| r["body"]["life"].clone()).unwrap_or(Value::Null);
     let generation = api.signed(w.owner, "GET", &format!("/api/computers/{}", w.id), None)?.body["generation"].clone();
     anyhow::ensure!(life.is_string() && generation.is_u64(), "the bridge's life and its computer's start: {life} {generation}");
     let told = |verb: &str, body: Value| format!("fetch http://api.fragment.internal/api/computer/turns with {} in x-fragment-agent {verb} {body}", w.agent);
     let last = |said: &str| said.rsplit(" then ").next().unwrap_or_default().to_string();
     let withheld = asked_by_ben(s, 11, &format!("{} then {}", told("deleting", json!({ "life": life, "generation": generation, "turn": "$TURN" })), op("whoami", "who-withheld")))?;
-    s.ok(ASKER_CHECKS[13], whose(&last(&withheld)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": withheld }));
+    s.ok(ASKER_CHECKS[13], withheld.starts_with("fetched 4") && whose(&last(&withheld)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": withheld }));
     let retold = asked_by_ben(s, 12, &format!("{} then {}", told("putting", json!({ "life": life, "generation": generation, "turn": "$TURN", "place": chat, "asker": owner_id })), op("whoami", "who-retold")))?;
-    s.ok(ASKER_CHECKS[14], whose(&last(&retold)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": retold }));
+    s.ok(ASKER_CHECKS[14], retold.starts_with("fetched 4") && whose(&last(&retold)) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": retold }));
     // its owner's app the agent is an editor of, and Ben no member
     let private = s.named(api, w.owner, "asker-private")?;
     let c = s.create(api, w.owner, &private)?;
@@ -454,7 +456,7 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
     let owners_site = asked_by(s, w.owner, "owner-site", &on_site("site-owner"))?;
     s.ok(
         ASKER_CHECKS[15],
-        bens.starts_with("fetched 4") && whose(&owners) == json!({ "principal": w.identity, "role": "editor" }) && bens_site.starts_with("fetched 4") && owners_site.starts_with("fetched 200"),
+        bens.starts_with("fetched 4") && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }) && bens_site.starts_with("fetched 4") && owners_site.starts_with("fetched 200"),
         json!({ "ben": bens, "owner": owners, "ben on its site": bens_site, "owner on its site": owners_site }),
     );
 
@@ -509,6 +511,22 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         whose(&inside) == json!({ "principal": w.identity, "role": "editor" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
         json!({ "in the app": inside, "its owner's next": owners }),
     );
+
+    // with no turn open: its owner's routine (on its own fragment's tasks,
+    // no chat's ask), its computer naming no one, whose call its egress
+    // signs for its owner, its route taking whom it acts for
+    let bare_summary = |id: &str| format!("fetch http://api.fragment.internal/api/f/{calories}/ops/summarize with {} in x-fragment-agent posting {{\"id\":\"{id}\",\"input\":{{}}}}", w.agent);
+    let owners_replies = || records(api, w.owner, &calories, "replies").into_iter().filter(|r| r["body"]["for"] == owner_id.as_str() && r["body"]["text"].is_string()).collect::<Vec<_>>();
+    let before = owners_replies().len();
+    let schedules = format!("/api/f/{}/schedules", w.agent);
+    let made = api.signed(w.owner, "POST", &schedules, Some(&json!({ "cron": "0 0 1 1 *", "channel": "tasks", "record": routine(&bare_summary("sum-routine"), chat) })))?;
+    anyhow::ensure!(made.status == 200, "the routine made: {made}");
+    turns.set(turns.get() + 1);
+    cron_now(api, w.agent)?;
+    let summed = s.eventually(wake + Duration::from_secs(30), || owners_replies().len() > before);
+    let last = owners_replies().last().and_then(|r| r["body"]["text"].as_str().map(str::to_string)).unwrap_or_default();
+    let removed = api.signed(w.owner, "DELETE", &format!("{schedules}/{}", made.body["schedule"]["id"]), None)?;
+    s.ok(ASKER_CHECKS[20], summed && last.contains("porridge") && !last.contains("toast") && removed.status == 200, json!({ "summed": summed, "reply": last, "removed": removed.status }));
     let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
     Ok(turns.get())

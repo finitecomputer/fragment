@@ -140,9 +140,9 @@ mid-append leaves a torn last line, and the log is read up to it.
   record, before the bridge has it, and the bridge's claim and end there
   open and close it. Its claim of someone else's ask is answered only
   once the agent's fragment holds it (a 502 is no answer: the turn is
-  claimed again). The bridge still tells its turns (`engine::Told`,
-  `driver::Turns`), which the platform answers and does not read; that
-  goes with the route (the debt ledger). A turn the bridge gives up on
+  claimed again). The bridge tells the platform nothing of its turns.
+  Its runtimes still name their owner (`FRAGMENT_FOR`) on what is their
+  owner's work; the egress says whose a call may be. A turn the bridge gives up on
   (gone quiet, or its agent gone from its chat) is interrupted at its
   runtime as it is forgotten (`Forget`: Claude Code's session and Hermes'
   relay alike, the relay's again at Hermes' next dial should it be

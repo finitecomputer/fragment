@@ -16,7 +16,8 @@
 //!    acts through it (no operations, nothing a membership would let them
 //!    change).
 //! 3. **An agent acts for its owner, capped** (decision R17): a request an
-//!    agent signs `for=<its owner>` (no one else: `may_act_for`) acts with
+//!    agent signs `for=<its owner>` (no one else: `may_act_for`; its
+//!    egress, while no one else's turn is open: `mandate::signs`) acts with
 //!    the lower of that identity's role and a cap. The cap is the agent's
 //!    own role (its membership, or the visibility floor), or, on a
 //!    fragment its owner belongs to, the owner's role; never more than
@@ -690,12 +691,10 @@ impl ForRefusal {
 /// Whom a request signed by an identity of `kind`, owned by `owner`, may
 /// name in `for`: an agent its own owner, and no one else. An app is told
 /// the named identity as `call.principal` and keys "who did it" on it
-/// (cli/GUIDE.md, "Who did it"), and nothing binds a request to a person
-/// who asked but its owner's computer setting `FRAGMENT_FOR` to them, so
-/// naming anyone else would let any agent's key speak as that person
-/// wherever the role floor reaches (a public doc's notes). Every caller
-/// the platform ships names the agent's owner (the bridge, Hermes, the
-/// CLI's `FRAGMENT_FOR`).
+/// (cli/GUIDE.md, "Who did it"). An agent's computer names its owner to
+/// say a call is their work; its egress honors that only while no one
+/// else's turn is open, and names them itself where a route takes `for`
+/// (`mandate::signs`). Anyone else's ask is their mandate's.
 pub fn may_act_for(kind: IdentityKind, owner: Option<&str>, named: &str) -> Result<(), ForRefusal> {
     match (kind, owner) {
         (IdentityKind::Agent, Some(owner)) if owner == named => Ok(()),
@@ -1187,6 +1186,35 @@ mod tests {
                 Verdict::Ask(Ask::Confirm { danger: Danger::Cap, of: Whom::Asker }),
             ),
             ("Juniper, for Ana, never deletes Ben's fragment", Facts { action: Dangerous(Danger::Delete), ..bens }, refused(Owner, Why::Short, false), refused(Owner, Why::Short, false)),
+            // with no turn open (a routine, the skill sync, a delegate) its
+            // egress signs for Ana (`mandate::signs`): her own fragments are
+            // its, at most an editor's, and never owning
+            (
+                "With no turn open, Juniper reads Ana's private notes for her (her skill sync, her routine)",
+                Facts { visibility: V::Members, standing: for_ana(Some(Owner), None), action: Read(Viewer) },
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "With no turn open, Juniper edits them for her, at most an editor",
+                Facts { visibility: V::Members, standing: for_ana(Some(Owner), None), action: Act(Editor) },
+                Verdict::Allow(Editor),
+                Verdict::Allow(Editor),
+            ),
+            (
+                "With no turn open, Juniper never does what only their owner does",
+                Facts { visibility: V::Members, standing: for_ana(Some(Owner), None), action: Act(Owner) },
+                refused(Owner, Why::Capped, false),
+                refused(Owner, Why::Capped, false),
+            ),
+            (
+                "During Ben's turn the same call goes as Ben, who is not in Ana's notes: refused",
+                // his mandate: he is the asker, with nothing there; Juniper's
+                // cap is hers, which his standing never reaches past
+                Facts { visibility: V::Members, standing: Standing { signed: true, cap: Some(Cap { agent: None, owner: Some(Owner) }), ..Standing::default() }, action: Read(Viewer) },
+                refused(Viewer, Why::Capped, false),
+                refused(Viewer, Why::Capped, false),
+            ),
         ];
         for &(case, facts, today, target) in rows {
             assert_eq!(decide(&facts), today, "{case}: today");
