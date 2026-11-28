@@ -592,6 +592,33 @@ fn by_invoice(s: &mut Suite, api: &Api) -> Result<()> {
             && seat(api, &carded)["seat"]["comped"] == true,
         json!({ "stray": stray, "org": after.body, "seat": seat(api, &carded) }),
     );
+    // a Checkout whose subscription's event came first (the org paying
+    // again), then that subscription canceled and the org marked, before
+    // its completion is applied: its buyer's return seats no one, and fails
+    // nothing (Codex's scoped check: it was a registry panic)
+    let late = api.person()?;
+    let late_org = buys(s, api, &late)?;
+    let first = subscription_of(s, &late_org).context("its subscription")?;
+    s.stripe.set_status(&first, "canceled").map_err(anyhow::Error::msg)?;
+    let lapsed = s.eventually(PUSHED, || seat(api, &late)["seat"]["good"] == false);
+    let open = api.signed(&late, "POST", "/api/billing/checkout", Some(&json!({})))?;
+    let session = open.body["session"].as_str().unwrap_or("").to_string();
+    s.stripe.hold_events(true);
+    s.stripe.complete(&session).map_err(anyhow::Error::msg)?;
+    s.stripe.drop_held("checkout.session.completed");
+    s.stripe.release_events(false);
+    let paying = s.eventually(PUSHED, || seat(api, &late)["seat"]["good"] == true);
+    let second = subscription_of(s, &late_org).context("its new subscription")?;
+    s.stripe.set_status(&second, "canceled").map_err(anyhow::Error::msg)?;
+    let lapsed_again = s.eventually(PUSHED, || seat(api, &late)["seat"]["good"] == false);
+    let marked = mark(&late_org, true)?;
+    let back = api.signed(&late, "POST", &format!("/api/billing/sessions/{session}"), Some(&json!({})))?;
+    let theirs = seat(api, &late);
+    s.ok(
+        "a Checkout's subscription come first, then canceled and its org marked paid by invoice: its buyer's return answers (200), seating no one, their seat a comp, the org still paid by invoice and no one its payer",
+        lapsed && open.status == 200 && paying && second != first && lapsed_again && marked.status == 200 && back.status == 200 && theirs["seat"]["comped"] == true && theirs["invoiced"] == true && theirs["pays"] == false,
+        json!({ "back": back.body, "seat": theirs }),
+    );
     Ok(())
 }
 

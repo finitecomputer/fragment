@@ -554,9 +554,14 @@ impl RegistryCell {
                     return Err(CellError::host(format!("a new org {} refused its first subscription {}", b.org, b.subscription.id)));
                 }
             }
-            // their org buying again: its admin still, and nothing else pays
+            // their org buying again: its admin still, and nothing else pays,
+            // by card or by invoice (an org marked since its Checkout opened,
+            // its subscription's event come first, takes it no more: a stray)
             Some(_) => {
                 let Some(m) = mine.filter(|m| m.admins(Some(&b.org))) else { return Ok(false) };
+                if self.invoiced(&b.org)?.is_some() {
+                    return Ok(false);
+                }
                 self.apply_subscription_copy(&b.org, &b.subscription, None)?;
                 if self.billing_row(&b.org)?.and_then(|r| r.subscription).as_deref() != Some(b.subscription.id.as_str()) {
                     return Ok(false);
