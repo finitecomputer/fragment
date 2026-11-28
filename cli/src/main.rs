@@ -638,7 +638,8 @@ enum OperatorCmd {
         key_file: Option<PathBuf>,
     },
     /// Comp a seat for an email: in --org, else the org its person is in,
-    /// else a new org of one (the email is mailed)
+    /// else a new org of one (the email is mailed). Someone in another org
+    /// than --org is offered it, and moves once they accept it
     Comp {
         email: String,
         /// seat (a computer that sleeps) or always-on

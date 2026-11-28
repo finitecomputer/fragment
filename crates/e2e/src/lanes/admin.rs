@@ -493,6 +493,7 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     b.click(&page, "#tabs button[data-tab=orgs]")?;
     let orgs = b.until(&page, &format!("[...document.querySelectorAll('#org-rows tr')].some(r => r.textContent.includes({email:?}))"), wait);
     s.ok("its orgs list holds the comp's new org of one", orgs, "");
+    org_acts(s, api, &mut b, &page, &email, &shots)?;
     b.click(&page, "#tabs button[data-tab=health]")?;
     let health = b.until(&page, "document.querySelectorAll('#health-facts dt').length >= 8", wait);
     s.ok("it shows billing's health", health, "");
@@ -507,6 +508,90 @@ pub fn admin_page(s: &mut Suite, api: &Api) -> Result<()> {
     let missing = b.until(&theirs, "document.readyState === 'complete' && !document.getElementById('status') && document.body.innerText.includes('no route /admin')", wait);
     s.ok("to anyone else it is the 404 of a path that is not there: nothing of the page", missing, b.eval(&theirs, "document.body.innerText")?);
     Ok(())
+}
+
+/// An org's own acts on the admin's page (docs/billing.md, "An org paid by
+/// invoice", "An org's own credit"), each through the route the CLI uses:
+/// the org of one `email`'s comp made is marked paid by invoice with its
+/// prepaid seats, a seat is comped into it for someone in another org (an
+/// offer: FIN-562), it is credited under a payment's id, its budget set
+/// and its payer named, and the mark cleared (its seats stay). Each reads
+/// back from the API as the page said.
+fn org_acts(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, page: &crate::browser::Page, email: &str, shots: &std::path::Path) -> Result<()> {
+    let wait = std::time::Duration::from_secs(15);
+    let status = |b: &mut crate::browser::Browser| b.eval(page, "document.getElementById('status').textContent");
+    b.eval(page, &format!("[...document.querySelectorAll('#org-rows tr')].find(r => r.textContent.includes({email:?})).click()"))?;
+    let opened = b.until(page, &format!("!document.getElementById('org').hidden && document.querySelector('#org h2')?.textContent === {email:?} && /paid by invoice/.test(document.getElementById('org').textContent)"), wait);
+    let org = b.eval(page, "document.querySelector('#org dl dd').textContent")?.as_str().unwrap_or("").to_string();
+    s.ok("an org opens with its id, whether it is paid by invoice, its credit, and its acts", opened && fragment_core::org::valid_org_id(&org), b.eval(page, "document.getElementById('org').innerText")?);
+    // the form's own submit, as a press is (each form is the org view's, in order)
+    let submit = |b: &mut crate::browser::Browser, n: usize, values: &[&str]| -> Result<()> {
+        let values = serde_json::to_string(values)?;
+        b.eval(page, &format!("(() => {{ const f = document.querySelectorAll('#org form')[{n}]; const v = {values}; [...f.elements].filter(e => e.tagName !== 'BUTTON').forEach((e, i) => {{ if (v[i] !== undefined) e.value = v[i]; }}); f.requestSubmit(); }})()"))?;
+        Ok(())
+    };
+    submit(b, 0, &["3"])?;
+    let marked = b.until(page, "/is paid by invoice, 3 prepaid seats/.test(document.getElementById('status').textContent) && /yes: 1 of 3 prepaid seats taken/.test(document.getElementById('org').textContent)", wait);
+    let view = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}"), None)?;
+    s.ok("it marks the org paid by invoice with 3 prepaid seats, and says so", marked && view.body["invoiced"]["seats"] == 3, json!([status(b)?, view.body["invoiced"]]));
+    // the org's view as an operator sees it, wide and narrow, light and dark
+    for scheme in ["light", "dark"] {
+        b.color_scheme(page, scheme)?;
+        for (width, height, mobile) in [(1280, 900, false), (390, 844, true)] {
+            b.viewport(page, width, height, mobile)?;
+            b.eval(page, "document.getElementById('org').scrollIntoView()")?;
+            let _ = b.screenshot(page, &shots.join(format!("org-invoiced-{width}-{scheme}.png")));
+        }
+    }
+    b.color_scheme(page, "light")?;
+    b.viewport(page, 1280, 900, false)?;
+    // someone in another org: offered its seat, not moved
+    let elsewhere = api.person()?;
+    let theirs = api.signed(&s.operator, "POST", "/api/admin/seats", Some(&json!({ "email": Api::email_of(&elsewhere), "kind": "seat" })))?;
+    anyhow::ensure!(theirs.status == 200, "a comp of their own: {theirs}");
+    submit(b, 1, &[&Api::email_of(&elsewhere), "seat_always_on"])?;
+    // mailed too, where the deployment sends mail
+    let offered = b.until(page, &format!("/^comped: {} in {email}, offered: theirs once they accept it(, mailed)?$/.test(document.getElementById('status').textContent)", regex_text(&Api::email_of(&elsewhere))), wait);
+    let seat = api.signed(&elsewhere, "GET", "/api/seat", None)?;
+    s.ok(
+        "it comps a seat into the org for someone in another org: offered it, they stay where they are",
+        offered && seat.body["org"]["id"] == theirs.body["org"]["id"] && seat.body["offered"].as_array().into_iter().flatten().any(|o| o["org"]["id"] == org.as_str() && o["comped"] == true),
+        json!([status(b)?, seat.body]),
+    );
+    let payment = format!("inv-{}", &Keys::generate().pubkey_hex()[..10]);
+    submit(b, 2, &["12.50", "an invoice paid", &payment])?;
+    let credited = b.until(page, &format!("document.getElementById('status').textContent === 'credited {email} $12.50' && /\\$12\\.50 left/.test(document.getElementById('org').textContent)"), wait);
+    submit(b, 3, &["40"])?;
+    let budgeted = b.until(page, &format!("document.getElementById('status').textContent === \"{email}'s budget is $40 a month\" && /of its \\$40\\.00 budget/.test(document.getElementById('org').textContent)"), wait);
+    let ledger = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/ledger"), None)?;
+    s.ok(
+        "it credits the org under the payment's id, and sets its budget: its ledger says so",
+        credited && budgeted && ledger.body["balanceMicros"] == 12_500_000 && ledger.body["budgetMicros"] == 40_000_000,
+        json!([status(b)?, ledger.body]),
+    );
+    // a person who signs in (the comp's email waits on its yes, no one's yet)
+    let payer = Api::email_of(&elsewhere);
+    submit(b, 4, &[&payer])?;
+    let named = b.until(page, &format!("document.getElementById('status').textContent === \"{email}'s credit is invoiced to {payer}\""), wait);
+    let content = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
+    let logged = |action: &str| content.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == action).count();
+    s.ok(
+        "it names who the org's credit is invoiced to; its governance log holds the mark, the grant, the budget and the payer, once each",
+        named && logged("invoiced") == 1 && logged("ledger-grant") == 1 && logged("ledger-budget") == 1 && logged("payer-named") == 1,
+        json!([status(b)?, content.body["log"]]),
+    );
+    b.eval(page, "window.confirm = () => true")?;
+    b.eval(page, "[...document.querySelectorAll('#org button')].find(x => x.textContent === 'Clear the mark').click()")?;
+    let cleared = b.until(page, &format!("document.getElementById('status').textContent === \"{email} is no longer paid by invoice: its seats stay; its admins can't add more\" && /paid by invoiceno/.test(document.querySelector('#org dl').textContent)"), wait);
+    let view = api.signed(&s.operator, "GET", &format!("/api/admin/orgs/{org}"), None)?;
+    let seats = view.body["members"].as_array().map_or(0, |m| m.iter().filter(|m| m["seat"].is_string()).count());
+    s.ok("it clears the mark, saying its seats stay: the org's seat and the offer are there still", cleared && view.body["invoiced"].is_null() && seats == 2, json!([status(b)?, view.body]));
+    Ok(())
+}
+
+/// `text`, matched as itself in a JavaScript regular expression.
+fn regex_text(text: &str) -> String {
+    text.chars().flat_map(|c| if ".+*?^$()[]{}|\\/".contains(c) { vec!['\\', c] } else { vec![c] }).collect()
 }
 
 /// The operators' glance (`GET /api/admin/glance`), the admin Worker's:

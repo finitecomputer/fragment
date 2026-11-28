@@ -1181,6 +1181,7 @@ value Reason org_not_paying
 value Reason org_pays
 value Reason payer_only
 value Reason pays
+value Reason prepaid_seats_taken
 value Reason private_while_reaching
 value Reason step_down_first
 value Reason stripe_refused

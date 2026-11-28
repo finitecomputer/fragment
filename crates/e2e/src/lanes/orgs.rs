@@ -182,8 +182,31 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
     );
     let erin_seat = r.body["seat"]["id"].as_str().unwrap_or("").to_string();
     api.signed(&operator, "DELETE", &format!("/api/admin/seats/{erin_seat}"), None)?;
-    let offered = comp(json!({ "email": alice_email, "kind": "seat", "org": api.signed(&bob, "GET", "/api/seat", None)?.body["org"]["id"] }))?;
-    s.ok("a person in an org is not comped into another (409)", offered.status == 409, &offered);
+    // FIN-562: a comp into another org was 409 here, kept so nobody joins
+    // without their own yes; an offer keeps that, and lets staff place
+    // someone (a moved person in an org of one) in the org that pays
+    let bob_org = api.signed(&bob, "GET", "/api/seat", None)?.body["org"]["id"].clone();
+    let offered = comp(json!({ "email": alice_email, "kind": "seat", "org": bob_org }))?;
+    let again = comp(json!({ "email": alice_email, "kind": "seat", "org": bob_org }))?;
+    let hers = api.signed(&alice, "GET", "/api/seat", None)?;
+    let offer = offered.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let shown = hers.body["offered"].as_array().into_iter().flatten().any(|o| o["id"] == offer.as_str() && o["comped"] == true && o["org"]["id"] == bob_org);
+    s.ok(
+        "a person in an org comped into another is offered it there (a comp, waiting on their yes), not moved: they keep their own seat and org; again, the same offer",
+        offered.status == 200
+            && offered.body["created"] == true
+            && offered.body["seat"]["person"].is_null()
+            && offered.body["seat"]["comped"] == true
+            && again.status == 200
+            && again.body["created"] == false
+            && again.body["seat"]["id"] == offer.as_str()
+            && shown
+            && hers.body["seat"]["id"] == alice_seat.as_str()
+            && hers.body["org"]["id"] == alice_org.as_str(),
+        json!([offered.body, again.body, hers.body]),
+    );
+    let declined = api.signed(&alice, "POST", &format!("/api/seat/offers/{offer}/decline"), Some(&json!({})))?;
+    s.ok("they decline it, and stay where they are", declined.status == 200 && declined.body["seat"]["id"] == alice_seat.as_str() && declined.body["offered"] == json!([]), &declined);
 
     // ---- changing and ending comps
     let r = api.signed(&operator, "PATCH", &format!("/api/admin/seats/{alice_seat}"), Some(&json!({ "kind": "seat" })))?;
@@ -272,5 +295,190 @@ pub fn orgs(s: &mut Suite, api: &Api) -> Result<()> {
         none.status == 200 && none.body["seat"].is_null() && none.body["org"].is_null() && none.body["offered"] == json!([]) && none.body["guest"] == (plan == "guest"),
         json!({ "seat": none.body, "plan": plan }),
     );
+    invoiced(s, api)
+}
+
+/// An org paid by invoice (FIN-824; docs/billing.md, "An org paid by
+/// invoice"): an operator's mark, once by its id, in its governance log and
+/// the operators'. While it is set its admins offer and remove seats, each
+/// a comp, within its prepaid seats; cleared, its seats stay and no more
+/// are offered. FIN-562's move into it is an offer, taken by its yes.
+/// Valid, invalid and replay.
+fn invoiced(s: &mut Suite, api: &Api) -> Result<()> {
+    let operator = s.operator.clone();
+    let comp = |body: Value| api.signed(&operator, "POST", "/api/admin/seats", Some(&body));
+    let fresh = || format!("inv-{}", &Keys::generate().pubkey_hex()[..12]);
+
+    // an org staff made for someone paying up front: comped, no subscription
+    let admin = api.person()?;
+    let made = comp(json!({ "email": Api::email_of(&admin), "kind": "seat_always_on" }))?;
+    let org = made.body["org"]["id"].as_str().unwrap_or("").to_string();
+    let add = |email: &str| api.signed(&admin, "POST", "/api/org/seats", Some(&json!({ "email": email })));
+    let unpaid = add(&email("inv-a"))?;
+    s.ok(
+        "an admin of an org staff made, paid outside Stripe and not marked, offers no seat (400 org_not_paying)",
+        made.status == 200 && unpaid.status == 400 && unpaid.body["reason"] == "org_not_paying",
+        json!([made.body, unpaid.body]),
+    );
+
+    // ---- marked, with two prepaid seats
+    let mark = |body: Value| api.signed(&operator, "PUT", &format!("/api/admin/orgs/{org}/invoiced"), Some(&body));
+    let id = fresh();
+    let set = mark(json!({ "id": id, "invoiced": true, "seats": 2 }))?;
+    let replay = mark(json!({ "id": id, "invoiced": true, "seats": 2 }))?;
+    let other = mark(json!({ "id": id, "invoiced": true, "seats": 3 }))?;
+    let content = api.signed(&operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
+    let entries = content.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == "invoiced" && e["request"] == format!("invoiced:{id}").as_str() && e["detail"]["seats"] == 2).count();
+    let ops = api.signed(&operator, "GET", "/api/admin/log", None)?;
+    let logged = ops.body["entries"].as_array().into_iter().flatten().filter(|e| e["action"] == "org-invoiced" && e["target"] == org.as_str()).count();
+    s.ok(
+        "an operator marks it paid by invoice, two prepaid seats; again by its id, the same, logged once in its governance log and the operators'; another body under its id 409",
+        set.status == 200
+            && set.body["id"] == org.as_str()
+            && set.body["invoiced"]["seats"] == 2
+            && set.body["invoiced"]["at"].is_i64()
+            && replay.status == 200
+            && replay.body["invoiced"] == set.body["invoiced"]
+            && other.status == 409
+            && entries == 1
+            && logged == 1,
+        json!({ "set": set.body, "replay": replay.body, "other": other.status, "log": content.body["log"], "entries": entries, "logged": logged }),
+    );
+    let view = api.signed(&admin, "GET", "/api/org", None)?;
+    let mine = api.signed(&admin, "GET", "/api/seat", None)?;
+    let listed = api.signed(&operator, "GET", "/api/admin/orgs", None)?;
+    let row = listed.body["orgs"].as_array().into_iter().flatten().find(|o| o["id"] == org.as_str()).cloned().unwrap_or(Value::Null);
+    s.ok(
+        "its admin's view of it, their own seat and the operators' list say it is paid by invoice",
+        view.body["invoiced"]["seats"] == 2 && mine.body["invoiced"] == true && mine.body["seat"]["comped"] == true && row["invoiced"]["seats"] == 2,
+        json!([view.body, mine.body, row]),
+    );
+
+    // ---- its admin's seats: comps, within its prepaid seats
+    let dana_email = email("inv-dana");
+    let offered = add(&dana_email)?;
+    let again = add(&dana_email)?;
+    let seat = offered.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    s.ok(
+        "its admin offers a seat: a comp, outside Stripe, waiting on the email; again, the same",
+        offered.status == 200
+            && offered.body["created"] == true
+            && offered.body["seat"]["comped"] == true
+            && offered.body["seat"]["seat"] == "seat_always_on"
+            && offered.body["seat"]["person"].is_null()
+            && again.status == 200
+            && again.body["created"] == false
+            && again.body["seat"]["id"] == seat.as_str(),
+        json!([offered.body, again.body]),
+    );
+    let full = add(&email("inv-e"))?;
+    s.ok("past its two prepaid seats, held or offered, no seat is offered (400 prepaid_seats_taken)", full.status == 400 && full.body["reason"] == "prepaid_seats_taken", &full);
+    let dana = Keys::generate();
+    let session = api.sign_in(&dana_email)?;
+    api.approve(&session, &dana)?;
+    let accepted = api.signed(&dana, "POST", &format!("/api/seat/offers/{seat}/accept"), Some(&json!({})))?;
+    let pushed = s.eventually(PUSHED, || {
+        let v = ledger(api, &dana);
+        v["plan"] == "seat_always_on" && v["seat"] == "active"
+    });
+    s.ok(
+        "whoever signs in with it accepts it: a comped seat there, good, paid by invoice, its plan pushed to their ledger",
+        accepted.status == 200
+            && accepted.body["seat"]["id"] == seat.as_str()
+            && accepted.body["seat"]["comped"] == true
+            && accepted.body["seat"]["good"] == true
+            && accepted.body["invoiced"] == true
+            && pushed,
+        json!([accepted.body, ledger(api, &dana)]),
+    );
+    let removed = api.signed(&admin, "DELETE", &format!("/api/org/seats/{seat}"), None)?;
+    let pushed = s.eventually(PUSHED, || ledger(api, &dana)["seat"] == "canceled");
+    let theirs = api.signed(&dana, "GET", "/api/seat", None)?;
+    s.ok(
+        "its admin removes it: the comp ends, their seat canceled, in no org",
+        removed.status == 200 && removed.body["id"] == seat.as_str() && pushed && theirs.body["seat"].is_null() && theirs.body["org"].is_null(),
+        json!([removed.body, theirs.body]),
+    );
+    // an admin's place, offered and taken as a paying org's is
+    let second = api.person()?;
+    let place = api.signed(&admin, "POST", "/api/org/admins", Some(&json!({ "email": Api::email_of(&second) })))?;
+    let took = api.signed(&second, "POST", &format!("/api/seat/offers/{}/accept", place.body["admin"]["id"].as_str().unwrap_or("")), Some(&json!({})))?;
+    s.ok(
+        "its admin offers someone an admin's place, and they accept it: an admin of it, seatless",
+        place.status == 200 && took.status == 200 && took.body["admin"] == true && took.body["seat"].is_null() && took.body["org"]["id"] == org.as_str(),
+        json!([place.body, took.body]),
+    );
+
+    // ---- FIN-562: someone the move placed in an org of one is offered a
+    // comp in it, and moves by their own yes
+    let moved = api.person()?;
+    let theirs = comp(json!({ "email": Api::email_of(&moved), "kind": "seat_always_on" }))?;
+    let into = comp(json!({ "email": Api::email_of(&moved), "kind": "seat_always_on", "org": org }))?;
+    let offer = into.body["seat"]["id"].as_str().unwrap_or("").to_string();
+    let before = api.signed(&moved, "GET", "/api/seat", None)?;
+    let yes = api.signed(&moved, "POST", &format!("/api/seat/offers/{offer}/accept"), Some(&json!({})))?;
+    s.ok(
+        "an operator's comp into it for someone in an org of one of their own is an offer: they stay until they accept it, then hold its comped seat, paid by invoice",
+        theirs.status == 200
+            && into.status == 200
+            && into.body["seat"]["person"].is_null()
+            && into.body["seat"]["comped"] == true
+            && before.body["org"]["id"] == theirs.body["org"]["id"]
+            && before.body["offered"].as_array().into_iter().flatten().any(|o| o["id"] == offer.as_str())
+            && yes.status == 200
+            && yes.body["seat"]["org"]["id"] == org.as_str()
+            && yes.body["seat"]["comped"] == true
+            && yes.body["invoiced"] == true,
+        json!([theirs.body, into.body, before.body, yes.body]),
+    );
+
+    // ---- its seats changed, then the mark cleared: its seats stay. Each
+    // change is kept by its id, one that changed nothing too, so a late
+    // retry of one answers the org as it is and undoes nothing after it
+    let raise = fresh();
+    let raised = mark(json!({ "id": raise, "invoiced": true }))?;
+    let uncapped = add(&email("inv-g"))?;
+    let cleared = mark(json!({ "id": fresh(), "invoiced": false }))?;
+    let twice = mark(json!({ "id": fresh(), "invoiced": false }))?;
+    let late = mark(json!({ "id": raise, "invoiced": true }))?;
+    let kept = api.signed(&admin, "GET", "/api/org", None)?;
+    let seats = kept.body["members"].as_array().map_or(0, |m| m.iter().filter(|m| m["seat"].is_string()).count());
+    let refused = add(&email("inv-h"))?;
+    let content = api.signed(&operator, "GET", &format!("/api/admin/orgs/{org}/content"), None)?;
+    let clears = content.body["log"].as_array().into_iter().flatten().filter(|e| e["action"] == "invoiced-cleared").count();
+    s.ok(
+        "its seats uncapped, its admin offers past two; cleared (and again, each kept by its id), its seats stay, held and offered, a late retry of the uncapping restores nothing, and its admin offers no more (400 org_not_paying)",
+        raised.status == 200
+            && raised.body["invoiced"].is_object()
+            && raised.body["invoiced"]["seats"].is_null()
+            && uncapped.status == 200
+            && cleared.status == 200
+            && cleared.body["invoiced"].is_null()
+            && twice.status == 200
+            && late.status == 200
+            && late.body["invoiced"].is_null()
+            && clears == 2
+            && seats == 3
+            && refused.status == 400
+            && refused.body["reason"] == "org_not_paying",
+        json!({ "raised": raised.body, "uncapped": uncapped.body, "cleared": cleared.body, "late": late.body, "kept": kept.body, "refused": refused.body, "clears": clears }),
+    );
+    let theirs_still = api.signed(&moved, "GET", "/api/seat", None)?;
+    s.ok("a seat held when it was cleared is a comp still, good", theirs_still.body["seat"]["good"] == true && theirs_still.body["seat"]["comped"] == true && theirs_still.body["invoiced"] == false, &theirs_still);
+
+    // ---- invalid
+    let stranger = api.person()?;
+    let refused = [
+        ("a person who is no operator marks it (403)", api.signed(&stranger, "PUT", &format!("/api/admin/orgs/{org}/invoiced"), Some(&json!({ "id": fresh(), "invoiced": true })))?, 403),
+        ("an org that is none (404)", api.signed(&operator, "PUT", "/api/admin/orgs/org-0000000000000000/invoiced", Some(&json!({ "id": fresh(), "invoiced": true })))?, 404),
+        ("no prepaid seats (400)", mark(json!({ "id": fresh(), "invoiced": true, "seats": 0 }))?, 400),
+        ("more prepaid seats than an org holds (400)", mark(json!({ "id": fresh(), "invoiced": true, "seats": fragment_core::org::SEATS_PER_ORG_MAX + 1 }))?, 400),
+        ("seats named with a clear (400)", mark(json!({ "id": fresh(), "invoiced": false, "seats": 2 }))?, 400),
+        ("a field it does not take (400)", mark(json!({ "id": fresh(), "invoiced": true, "until": 1 }))?, 400),
+        ("an id that is none (400)", mark(json!({ "id": "", "invoiced": true }))?, 400),
+    ];
+    for (what, r, status) in refused {
+        s.ok(&format!("refused, the mark: {what}"), r.status == status, &r);
+    }
     Ok(())
 }

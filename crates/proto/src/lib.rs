@@ -835,10 +835,13 @@ pub enum Reason {
     /// A trial is for a seat of one: while the org's subscription is a
     /// trial, it takes no further paid seat (offered, given or accepted).
     TrialSeatOfOne,
+    /// The org pays by invoice, and its prepaid seats are all held or
+    /// offered: an operator raises them.
+    PrepaidSeatsTaken,
 }
 
 impl Reason {
-    pub const ALL: [Reason; 28] = [
+    pub const ALL: [Reason; 29] = [
         Reason::TrialUnknown,
         Reason::TrialEnded,
         Reason::TrialUsed,
@@ -867,6 +870,7 @@ impl Reason {
         Reason::PrivateWhileReaching,
         Reason::UnshareFirst,
         Reason::TrialSeatOfOne,
+        Reason::PrepaidSeatsTaken,
     ];
 
     /// Its name on the wire.
@@ -900,6 +904,7 @@ impl Reason {
             Reason::PrivateWhileReaching => "private_while_reaching",
             Reason::UnshareFirst => "unshare_first",
             Reason::TrialSeatOfOne => "trial_seat_of_one",
+            Reason::PrepaidSeatsTaken => "prepaid_seats_taken",
         }
     }
 
@@ -3325,6 +3330,7 @@ mod tests {
             (PrivateWhileReaching, "private_while_reaching"),
             (UnshareFirst, "unshare_first"),
             (TrialSeatOfOne, "trial_seat_of_one"),
+            (PrepaidSeatsTaken, "prepaid_seats_taken"),
         ];
         assert_eq!(all.len(), Reason::ALL.len(), "every reason is named here");
         for (reason, wire) in all {

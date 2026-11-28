@@ -232,8 +232,13 @@ impl RegistryCell {
     }
 
     /// Who pays for `org`: the buyer whose Checkout made the subscription
-    /// it has now, if one did (`None`: never paid, or comped only).
+    /// it has now, if one did (`None`: never paid, comped only, or paid by
+    /// invoice: no card pays for it, so its old buyer opens nothing of its
+    /// billing, nor takes a payer's place in it).
     pub(super) fn payer_of(&self, org: &str) -> CellResult<Option<String>> {
+        if self.invoiced(org)?.is_some() {
+            return Ok(None);
+        }
         #[derive(Deserialize)]
         struct Row {
             person: String,
@@ -309,7 +314,8 @@ impl RegistryCell {
             Some(m) if m.comped != 0 => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
             Some(m) => {
                 let o = self.stored_org(&m.org)?;
-                let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref());
+                // an org paid by invoice pays for its seats: no card starts paying for it
+                let paying = good(self.billing_row(&o.id)?.and_then(|r| r.status).as_deref()) || self.invoiced(&o.id)?.is_some();
                 match (paying, m.admins(None)) {
                     (true, _) if m.seat.is_some() => return Err(conflict("you hold a seat already").because(Reason::HoldsSeat)),
                     (true, true) => return Err(conflict(format!("{} pays for its seats already: add yours on its page", o.name)).because(Reason::OrgPays)),
@@ -389,6 +395,12 @@ impl RegistryCell {
     pub(super) fn apply_subscription_copy(&self, org: &str, s: &SubscriptionCopy, at: Option<i64>) -> CellResult<bool> {
         let Some(row) = self.billing_row(org)? else { return Ok(false) };
         let status = Status::parse(&s.status).ok_or_else(|| CellError::invalid(format!("a subscription's status is Stripe's, not {:?}", s.status)))?;
+        // an org paid by invoice takes no card's subscription, not even one
+        // a Checkout opened before its mark made: that Checkout is a stray,
+        // canceled at once (`apply_checkout`); its own, ended, is still kept
+        if row.subscription.as_deref() != Some(s.id.as_str()) && self.invoiced(org)?.is_some() {
+            return Ok(false);
+        }
         match row.subscription.as_deref() {
             // an org with none takes only one that pays: a late event of one
             // canceled and forgotten (its payer went) never comes back
@@ -479,7 +491,12 @@ impl RegistryCell {
 
     fn apply_subscription(&self, b: ApplySubscription) -> CellResult<Applied> {
         let orphan = org::valid_org_id(&b.org) && self.org_row(&b.org)?.is_none();
-        Ok(Applied { applied: self.apply_subscription_copy(&b.org, &b.subscription, b.at)?, orphan })
+        let applied = self.apply_subscription_copy(&b.org, &b.subscription, b.at)?;
+        // a card's an org paid by invoice refused (a Checkout opened before
+        // its mark) is an orphan's too: its Checkout is found and applied, a
+        // stray, so it is canceled though its completion never comes
+        let refused = !applied && !orphan && self.billing_row(&b.org)?.is_some_and(|r| r.subscription.as_deref() != Some(b.subscription.id.as_str())) && self.invoiced(&b.org)?.is_some();
+        Ok(Applied { applied, orphan: orphan || refused })
     }
 
     /// The seat a completed Checkout bought its buyer, once by its session:
@@ -537,9 +554,14 @@ impl RegistryCell {
                     return Err(CellError::host(format!("a new org {} refused its first subscription {}", b.org, b.subscription.id)));
                 }
             }
-            // their org buying again: its admin still, and nothing else pays
+            // their org buying again: its admin still, and nothing else pays,
+            // by card or by invoice (an org marked since its Checkout opened,
+            // its subscription's event come first, takes it no more: a stray)
             Some(_) => {
                 let Some(m) = mine.filter(|m| m.admins(Some(&b.org))) else { return Ok(false) };
+                if self.invoiced(&b.org)?.is_some() {
+                    return Ok(false);
+                }
                 self.apply_subscription_copy(&b.org, &b.subscription, None)?;
                 if self.billing_row(&b.org)?.and_then(|r| r.subscription).as_deref() != Some(b.subscription.id.as_str()) {
                     return Ok(false);

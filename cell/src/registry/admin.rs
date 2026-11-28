@@ -222,9 +222,11 @@ impl RegistryCell {
             vec![b.after.unwrap_or_default().into(), SqlStorageValue::Integer(ADMIN_PAGE.into())],
         )?;
         let next = (rows.len() == ADMIN_PAGE as usize).then(|| rows.last().map(|r| r.id.clone())).flatten();
-        let orgs = rows
-            .into_iter()
-            .map(|r| AdminOrg {
+        let mut orgs = Vec::with_capacity(rows.len());
+        // bounded: a page of ADMIN_PAGE orgs, a mark's one read each
+        for r in rows {
+            let invoiced = self.invoiced(&r.id)?;
+            orgs.push(AdminOrg {
                 id: r.id,
                 name: r.name,
                 created_at: r.created_at,
@@ -237,8 +239,9 @@ impl RegistryCell {
                 paid_seats: r.paid_seats,
                 comped_seats: r.comped_seats,
                 pending: r.pending,
-            })
-            .collect();
+                invoiced,
+            });
+        }
         Ok(AdminOrgs { orgs, next })
     }
 

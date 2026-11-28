@@ -2719,7 +2719,8 @@
           "last_paid_seat",
           "private_while_reaching",
           "unshare_first",
-          "trial_seat_of_one"
+          "trial_seat_of_one",
+          "prepaid_seats_taken"
         ],
         "type": "string",
         "x-fragment-direction": "out",
