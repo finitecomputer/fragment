@@ -4,8 +4,10 @@
 import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
-  tell({ text }, call) {
-    call.publish("chat", { text }, "message");
+  // its words, or the body it's given as they are (one its agent's
+  // bridge drops, say)
+  tell({ text, body }, call) {
+    call.publish("chat", body ?? { text }, "message");
     return { ok: true };
   }
 

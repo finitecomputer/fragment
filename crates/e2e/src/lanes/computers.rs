@@ -96,6 +96,8 @@ const ASKER_CHECKS: &[&str] = &[
     "fail closed, never lost: while the agent's fragment refuses the chat's word, their ask is not handed to the agent (the chat's events say so); once it takes it, it is answered, as theirs",
     "app code's words, said in an app's chat for whoever called it, are an ask no one proves: the agent's call for its owner on them is refused outside that app, and lends no one its owner's reach",
     "on them it acts in that app alone, as itself; and its owner's next ask is its owner's again, narrowing nothing",
+    "words its bridge drops (an attachment with nothing to read it by) hold the agent no longer than an unclaimed ask may: its owner's ask elsewhere is refused while it holds, and is its owner's once that time passed, and not before",
+    "an ask claimed after that time opens again at its claim: their call goes as them, never wider",
 ];
 
 /// Ben, a person in its owner's chat, asks the agent there for things
@@ -509,6 +511,38 @@ fn asker_checks(s: &mut Suite, api: &Api, w: &Swapping, chat: &str, wake: Durati
         whose(&inside) == json!({ "principal": w.identity, "role": "editor" }) && whose(&owners) == json!({ "principal": owner_id, "role": "editor" }),
         json!({ "in the app": inside, "its owner's next": owners }),
     );
+
+    // an ask its agent hasn't claimed lets go (FIN-825), shortened here
+    let unclaimed = |on: &str, ms: Option<u64>| api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": on, "op": "unclaimed", "ms": ms })));
+    let holds = |place: &str| {
+        let r = api.unsigned("POST", "/api/test/fragment", Some(&json!({ "fragment": w.agent, "op": "turns" })));
+        r.ok().is_some_and(|r| r.body["places"].as_array().is_some_and(|p| p.iter().any(|x| x == place)))
+    };
+    const UNCLAIMED: Duration = Duration::from_secs(45);
+    let r = unclaimed(&says, Some(UNCLAIMED.as_millis() as u64))?;
+    anyhow::ensure!(r.status == 200, "the app's unclaimed limit: {r}");
+    let r = api.op(&ben, &says, "tell", "code-dropped", json!({ "body": { "attachments": [{ "sha256": "x" }] } }))?;
+    anyhow::ensure!(r.status == 200, "Ben has the app say what its bridge drops: {r}");
+    let said_at = std::time::Instant::now();
+    let held = s.eventually(wake, || holds(&says));
+    let during = asked_by(s, w.owner, "owner-during-dropped", &for_owner(&private, "owner-during-dropped"))?;
+    let let_go = s.eventually(UNCLAIMED + Duration::from_secs(30), || !holds(&says));
+    let took = said_at.elapsed();
+    let after = asked_by(s, w.owner, "owner-after-dropped", &for_owner(&private, "owner-after-dropped"))?;
+    s.ok(
+        ASKER_CHECKS[20],
+        held && during.starts_with("fetched 403") && let_go && took + Duration::from_secs(2) >= UNCLAIMED && whose(&after) == json!({ "principal": owner_id, "role": "editor" }),
+        json!({ "held": held, "during": during, "let go": let_go, "after s": took.as_secs(), "after": after }),
+    );
+    // its claim after the limit (here a moment) opens it again
+    let r = unclaimed(chat, Some(1))?;
+    anyhow::ensure!(r.status == 200, "the chat's unclaimed limit: {r}");
+    let late = asked_by_ben(s, 16, &op("whoami", "who-late-claim"))?;
+    s.ok(ASKER_CHECKS[21], whose(&late) == json!({ "principal": ben_id, "role": "viewer" }), json!({ "said": late }));
+    for on in [chat, says.as_str()] {
+        let r = unclaimed(on, None)?;
+        anyhow::ensure!(r.status == 200, "{on}'s unclaimed limit as it is: {r}");
+    }
     let r = api.signed(w.owner, "DELETE", &format!("/api/f/{chat}/members/{ben_id}"), None)?;
     anyhow::ensure!(r.status == 200, "Ben out of the chat: {r}");
     Ok(turns.get())

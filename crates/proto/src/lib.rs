@@ -144,6 +144,11 @@ pub mod limits {
     /// (the agent never ended it there): its mandate's day and as long
     /// again, then it is forgotten.
     pub const TURN_HELD_MS: i64 = 2 * MANDATE_LIFE_MS;
+    /// How long an ask holds its agent before the agent claims it (Paul,
+    /// 2026-11-27: ten minutes, FIN-825): past it the ask lets go, whatever
+    /// its bridge did with the words, and the agent's claim of it, later,
+    /// opens it again.
+    pub const ASK_UNCLAIMED_MS: i64 = 10 * 60 * 1000;
     /// How long a turn holds from its ask, at the least, however soon its
     /// agent says it ended (cell `opened.rs`): an agent that ends someone
     /// else's turn early is held to it that long. None for now; its length

@@ -226,6 +226,15 @@ impl FragmentCell {
         )
     }
 
+    /// The places of the turns it holds now (`turn_rows`), each once: what
+    /// the `turns` test lever reads (ops.rs `test_fragment`).
+    pub(crate) fn turn_places_held(&self) -> CellResult<Vec<String>> {
+        let mut places: Vec<String> = self.turn_rows(js::now_ms())?.into_iter().map(|r| r.place).collect();
+        places.sort_unstable();
+        places.dedup();
+        Ok(places)
+    }
+
     /// The turns a place holds open for this agent (`TurnsIn`): the one
     /// word on them, its place's own (FIN-720), replacing what it said
     /// before; an older version than the one held changes nothing. Its

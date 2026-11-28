@@ -675,6 +675,20 @@ impl FragmentCell {
                 }
                 json!({ "ok": true })
             }
+            Some("unclaimed") => match body["ms"].as_i64() {
+                // how long an ask here holds its agent unclaimed (asks.rs
+                // `ask_unclaimed_ms`); no number, `ASK_UNCLAIMED_MS`
+                Some(ms) if ms > 0 => {
+                    self.set_meta(MetaKey::TestUnclaimedMs, &ms.to_string())?;
+                    json!({ "unclaimedMs": ms })
+                }
+                _ => {
+                    self.del_meta(MetaKey::TestUnclaimedMs)?;
+                    json!({ "unclaimedMs": fragment_proto::limits::ASK_UNCLAIMED_MS })
+                }
+            },
+            // the places whose turns this agent fragment holds now (runs_on.rs `turn_rows`)
+            Some("turns") => json!({ "places": self.turn_places_held()? }),
             Some("hold-woke") => {
                 // while on, a wake with something due waits before it reads
                 // the ledger (jobs.rs `held_woke`), at most 20 s

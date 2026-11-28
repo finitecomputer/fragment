@@ -488,6 +488,9 @@ pub(crate) enum MetaKey {
     /// word on its turns (runs_on.rs `turns_in`), as one that does not
     /// answer (`refuse-turns`).
     TestRefuseTurns,
+    /// Test fleets: a shorter time an ask holds its agent unclaimed here
+    /// (asks.rs `ask_unclaimed_ms`, the `unclaimed` lever).
+    TestUnclaimedMs,
     /// The computer this agent fragment runs on (runs_on.rs).
     Computer,
     /// The agent identity its own key holds, once it ran on a computer.
@@ -630,6 +633,7 @@ impl MetaKey {
             MetaKey::TestHoldLive => "test_hold_live",
             MetaKey::TestLiveHeld => "test_live_held",
             MetaKey::TestRefuseTurns => "test_refuse_turns",
+            MetaKey::TestUnclaimedMs => "test_unclaimed_ms",
             MetaKey::Computer => "computer",
             MetaKey::AgentIdentity => "agent_identity",
             MetaKey::Grants => "grants",
