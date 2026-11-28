@@ -5623,25 +5623,6 @@ async fn egress_api(mut req: Request, env: &Env, ctx: &Context, computer: &str, 
             let disk = json!({ "mountMs": number("diskMountMs"), "misses": number("diskMisses"), "refetches": number("diskRefetches") });
             return json_response(&ask(env, computer, "computer/guest", &json!({ "simplex": simplex, "disk": disk, "epoch": epoch })).await?);
         }
-        // its bridge tells an agent's fragment which turns it runs, and whose
-        // ask each is (`computer/turns`, FIN-720), as one bridge life: `PUT`
-        // one open, `DELETE` one ended, `DELETE` with none to take them (a
-        // bridge's start: every other life's forgotten)
-        // As the agent (its header): a platform from before sends it on to
-        // its API, which has no such route (404), so a bridge tells it
-        // nothing.
-        "/api/computer/turns" => {
-            let agent = req.headers().get(AGENT_HEADER)?.filter(|a| fragment_proto::valid_fragment_name(a)).ok_or_else(|| CellError::invalid("name the agent this acts as (x-fragment-agent)"))?;
-            let v: Value = serde_json::from_slice(&crate::read_body(&mut req, 4_096).await?).map_err(|e| CellError::invalid(format!("body: {e}")))?;
-            let op = match (req.method(), v["turn"].is_string()) {
-                (Method::Put, true) => "open",
-                (Method::Delete, true) => "close",
-                (Method::Delete, false) => "take",
-                _ => return Err(CellError::invalid("PUT a turn open, DELETE one ended, or DELETE with none to take its agent's turns")),
-            };
-            let asked = json!({ "computer": computer, "op": op, "life": v["life"], "generation": v["generation"], "turn": v["turn"], "place": v["place"], "asker": v["asker"], "mandate": v["mandate"] });
-            return json_response(&crate::fragment::ask(env, &agent, "computer/turns", &asked).await?);
-        }
         // a link's ticket redeemed with its door's public key, at the agent
         // fragment it names, for this computer alone (fragment_core::door)
         "/api/computer/door" if req.method() == Method::Post => {

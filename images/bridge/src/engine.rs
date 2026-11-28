@@ -412,16 +412,15 @@ pub struct Turn {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_code: bool,
     /// The proof of whose ask it is, as its cause's record carried it
-    /// (`Record::mandate`), told to its agent's fragment as its claim is
-    /// answered (`Told`). A state from before holds none.
+    /// (`Record::mandate`). A state from before holds none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mandate: Option<String>,
     /// Started by another agent of this computer's words in its chat (a
-    /// hand-off): no ask of that agent's own, but the ask of the turn they
-    /// were said in, carried on as that turn was told it ("" no one's, as
-    /// when that turn is not known). A state from before holds none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub handed_ask: Option<String>,
+    /// hand-off): its start names the ask they carried on, as the mandate
+    /// its place gave beside them says (`carried`). A state from before
+    /// holds none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handed: bool,
     pub text: String,
     pub attachments: Vec<AttachmentRef>,
     /// Where its attachments' blobs are, when not its chat's: an answer's
@@ -524,11 +523,10 @@ enum Ask<'a> {
 
 impl Turn {
     /// A hand-off's: whose ask its words were on, as its start names it
-    /// (`records::carrying`): the asker the mandate its place gave says, else
-    /// the one this computer saw it said in; none for any other turn.
+    /// (`records::carrying`): the asker the mandate its place gave says
+    /// (the place's word alone); none for any other turn.
     fn carried(&self) -> Option<&str> {
-        let ask = self.handed_ask.as_deref()?;
-        Some(self.mandate.as_deref().and_then(records::mandate_asker).unwrap_or(ask))
+        self.handed.then(|| self.mandate.as_deref().and_then(records::mandate_asker)).flatten()
     }
 
     /// This life's claim was answered, and the runtime has it.
@@ -617,22 +615,6 @@ pub enum Input {
     ComputerAnswer { agent: String, turn: String, prompt: String, option: String, words: String, reply: u64 },
 }
 
-/// A turn as its agent's fragment is told it runs (docs/api.md, "Who
-/// asked: mandates"): where, whose ask (its owner's for its own words, a
-/// routine, or another agent of this computer's answer; `None` for app
-/// code's words, no one's), and its proof. The agent's calls for its owner
-/// then carry whose ask they are.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Told {
-    pub place: String,
-    pub asker: Option<String>,
-    pub mandate: Option<String>,
-    /// Someone else's ask heard with no proof (a record heard live: the
-    /// platform gives a mandate only beside a record read over its API):
-    /// its record, which the driver reads once for it before telling.
-    pub unproven: Option<Cause>,
-}
-
 /// What the engine asks the driver to do, in order.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
@@ -641,9 +623,8 @@ pub enum Effect {
     Post { agent: String, fragment: String, channel: &'static str, id: String, body: Value, files: Vec<LocalFile> },
     /// A turn's claim: its `turn.start` on `work` as this life, posted in
     /// its fragment's order unless the computer is held, and answered back
-    /// as `Input::Claimed`; told, before that answer, to its agent's
-    /// fragment (`told`). The runtime hears of the turn only after.
-    Claim { agent: String, fragment: String, turn: String, id: String, body: Value, told: Told },
+    /// as `Input::Claimed`. The runtime hears of the turn only after.
+    Claim { agent: String, fragment: String, turn: String, id: String, body: Value },
     /// A live card answer's closure on `work`, posted in its fragment's
     /// order and answered back as `Input::Fenced`: the runtime has the
     /// answer only once the journal holds it, so a life rolled back to
@@ -831,9 +812,6 @@ struct EndedTurn {
     fragment: String,
     hop: u32,
     at: u64,
-    /// Whose ask it was, as it was told (`Told::asker`): a hand-off read
-    /// after it is let go carries it on.
-    asked: Option<String>,
 }
 
 pub fn cursor_key(agent: &str, fragment: &str, channel: &str) -> String {
@@ -1595,11 +1573,9 @@ impl Engine {
             Some(Return { agent: asking.fragment.clone(), chat: chat.clone(), name, by: agent.identity.clone(), said: String::new(), files: 0, narrated: String::new() })
         });
         self.state.admitted += 1;
-        // another agent of this computer's words in a chat: the ask of the
-        // turn they were said in, carried on (FIN-720), never its owner's
-        // by being theirs
-        let handed_ask = (ask == Ask::Message && cause.channel == records::CHAT && self.agents.iter().any(|a| a.identity == asker))
-            .then(|| self.ask_said_in(asker, fragment, m.turn.as_deref()).unwrap_or_default());
+        // another agent of this computer's words in a chat: a hand-off,
+        // whose start names the ask they carried on (`Turn::carried`)
+        let handed = ask == Ask::Message && cause.channel == records::CHAT && self.agents.iter().any(|a| a.identity == asker);
         let turn = Turn {
             id: id.clone(),
             agent: agent.fragment.clone(),
@@ -1609,7 +1585,7 @@ impl Engine {
             asker_name,
             by_code: ask == Ask::Code,
             mandate,
-            handed_ask,
+            handed,
             text: records::cut_bytes(&m.text, limits::MESSAGE_TEXT_MAX_BYTES),
             attachments: m.attachments.clone(),
             attachments_in: m.attachments_in.clone(),
@@ -1873,7 +1849,7 @@ impl Engine {
             asker_name: CONTINUE_ASKER.into(),
             by_code: cut.by_code,
             mandate: cut.mandate,
-            handed_ask: cut.handed_ask,
+            handed: cut.handed,
             text: CONTINUE_TEXT.into(),
             attachments: Vec::new(),
             attachments_in: None,
@@ -1940,51 +1916,9 @@ impl Engine {
         let t = &self.state.turns[&id];
         let body = records::carrying(records::turn_start(&id, &t.asker, t.by_code, &identity, &t.cause, &self.life), t.carried());
         let fragment = t.fragment.clone();
-        let told = self.told_as(t);
         self.claiming.insert(id.clone());
         crate::ev!("turn.claiming", { "turn": id, "agent": agent, "fragment": fragment });
-        self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body, told });
-    }
-
-    /// Whose ask the turn `named` was, that agent `poster` (an identity of
-    /// this computer's) said words in, in `fragment`: its own turn there,
-    /// running, or ended a moment ago (its replies read after it is let
-    /// go, as `hop_of` reads its hop); none such, no one's.
-    fn ask_said_in(&self, poster: &str, fragment: &str, named: Option<&str>) -> Option<String> {
-        let (named, poster) = (named?, self.agents.iter().find(|a| a.identity == poster)?);
-        let its_own_here = |agent: &str, place: &str| agent == poster.fragment && place == fragment;
-        if let Some(t) = self.state.turns.get(named).filter(|t| its_own_here(&t.agent, &t.fragment)) {
-            return self.told_as(t).asker;
-        }
-        let fresh = |e: &&EndedTurn| self.now.saturating_sub(e.at) <= limits::ENDED_HOPS_MS;
-        self.ended.iter().rev().filter(fresh).find(|e| e.id == named && its_own_here(&e.agent, &e.fragment)).and_then(|e| e.asked.clone())
-    }
-
-    /// How a turn is told to its agent's fragment (`Told`): its owner's ask
-    /// for what is theirs or one entity's with them (their words, a routine,
-    /// another agent of this computer's answer: they are all its owner's
-    /// agents); a hand-off as the ask it carries on; no one's for app
-    /// code's words; anyone else's as them, with the proof its cause carried.
-    fn told_as(&self, t: &Turn) -> Told {
-        // a hand-off is the ask it carries on: proven by the mandate its
-        // place gave this agent beside the words (its owner's own ask,
-        // carried on between its agents: FIN-615 PR 16a; its agent's
-        // fragment checks it, and it names whose ask it is), read once for
-        // it when heard live with none; else held unproven
-        if let Some(asker) = &t.handed_ask {
-            let unproven = t.mandate.is_none().then(|| t.cause.clone());
-            return Told { place: t.fragment.clone(), asker: (!asker.is_empty()).then(|| asker.clone()), mandate: t.mandate.clone(), unproven };
-        }
-        let owner = self.agent(&t.agent).map(|a| a.owner.clone()).unwrap_or_default();
-        let ours = t.asker == owner || self.agents.iter().any(|a| a.identity == t.asker);
-        let asker = match (t.by_code, ours) {
-            (true, _) => None,
-            (false, true) => Some(owner),
-            (false, false) => Some(t.asker.clone()),
-        };
-        let mandate = t.mandate.clone().filter(|_| !t.by_code);
-        let unproven = (!t.by_code && !ours && mandate.is_none()).then(|| t.cause.clone());
-        Told { place: t.fragment.clone(), asker, mandate, unproven }
+        self.out.push(Effect::Claim { agent: agent.to_string(), fragment, turn: id.clone(), id: records::work_id(&id, "start"), body });
     }
 
     /// Whether a turn of the agent's that a restart cut in the chat is not
@@ -2854,7 +2788,6 @@ impl Engine {
             open.held = false;
         }
         self.seal(id, false);
-        let asked = self.state.turns.get(id).and_then(|t| self.told_as(t).asker);
         let t = self.state.turns.get_mut(id).expect("ending a held turn");
         assert!(t.active(), "a turn's run ends once: {id} is {:?}", t.phase);
         // a live answer still held goes with it: the runtime never had it
@@ -2867,7 +2800,7 @@ impl Engine {
         let (agent, fragment, hop) = (t.agent.clone(), t.fragment.clone(), t.hop);
         self.dirty = true;
         // its replies may be read after it is let go: one hop past it
-        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now, asked });
+        self.ended.push_back(EndedTurn { id: id.to_string(), agent: agent.clone(), fragment: fragment.clone(), hop, at: self.now });
         while self.ended.len() > limits::ENDED_HOPS_MAX {
             self.ended.pop_front();
         }
