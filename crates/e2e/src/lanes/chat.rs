@@ -450,10 +450,11 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
     let offered = chrome.until(&shell, &format!("!!{item}"), wait);
     let says = chrome.eval(&shell, &format!("{item}?.textContent.trim() ?? null"))?;
     shell_shots(chrome, &shell, shots, "mic-off-item", (1280, 860))?;
-    // the shots' widths close a menu: open again
-    chrome.eval(&shell, &format!("({item} || {more}?.click(), true)"))?;
-    chrome.until(&shell, &format!("!!{item}"), wait);
-    chrome.eval(&shell, &format!("({item}?.click(), true)"))?;
+    // its item pressed in the same turn its menu is (re)opened: the shell
+    // closes a menu on resize or blur, and the shots' viewport change
+    // delivers its resize late, so a press in a later turn could find the
+    // menu gone and do nothing (#1580's CI, twice)
+    let pressed = chrome.eval(&shell, &format!("(() => {{ let i = {item}; if (!i || i.closest('[inert]')) {{ {more}?.click(); i = {item}; }} i?.click(); return !!i; }})()"))? == json!(true);
     let neither = s.eventually(wait, || lent(chat) == Some(false) && lent(&other) == Some(false));
     let unlent = chrome.until(&shell, &format!("document.querySelector({frame_of})?.allow === 'clipboard-write'"), wait);
     let ready_again = unlent && s.eventually(wait, || chrome.eval_in_frame(&shell, chat, ready).ok() == Some(Value::Bool(true)));
@@ -463,8 +464,8 @@ fn mic_in_frame(s: &mut Suite, api: &Api, chrome: &mut Browser, owner: &Keys, ch
     let shut = chrome.until(&shell, &format!("!{dialog}.open"), wait);
     s.ok(
         "the chat's ⋯ in the sidebar offers Turn off microphone (all chats) while lent, which takes the one yes back from both and makes the frame again, naming none; its next press asks again",
-        offered && says.as_str().is_some_and(|t| t.ends_with("Turn off microphone (all chats)")) && neither && unlent && ready_again && asks_again && shut,
-        json!({ "offered": offered, "says": says, "neither": neither, "unlent": unlent, "asks again": asks_again }),
+        offered && pressed && says.as_str().is_some_and(|t| t.ends_with("Turn off microphone (all chats)")) && neither && unlent && ready_again && asks_again && shut,
+        json!({ "offered": offered, "pressed": pressed, "says": says, "neither": neither, "unlent": unlent, "asks again": asks_again }),
     );
     chrome.close(shell)?;
     Ok(())
