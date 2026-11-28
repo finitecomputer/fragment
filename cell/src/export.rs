@@ -1280,6 +1280,9 @@ impl PrincipalCell {
                     archived: false,
                     dock: true,
                     pinned: false,
+                    microphone: false,
+                    chat_release: false,
+                    only_you: false,
                     owned: false,
                     listed: vec![],
                 })

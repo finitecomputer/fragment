@@ -89,7 +89,7 @@ struct Sign {
 /// before this release (named by its bridge's life) is read too, so a turn
 /// running across the deploy stays held, until its bridge ends it or a new
 /// bridge life takes over (`turns`): no new one is taken.
-const PLACE_OPENED: &str = "";
+pub(crate) const PLACE_OPENED: &str = "";
 
 /// An open turn as its row holds it (`turns`, Fragment step 15).
 #[derive(Deserialize)]
@@ -231,8 +231,7 @@ impl FragmentCell {
     /// before; an older version than the one held changes nothing. Its
     /// rows and every other place's past `TURNS_HELD_MAX`, it holds as one
     /// ask no one proves: the agent acts as itself there alone
-    /// (`Proof::Itself`), narrower than any, never refused. A place says
-    /// so itself with an empty asker (someone its door heard: asks.rs).
+    /// (`Proof::Itself`), narrower than any, never refused.
     pub(crate) fn turns_in(&self, t: TurnsIn) -> CellResult<()> {
         if self.meta(MetaKey::AgentIdentity)?.as_deref() != Some(t.agent.as_str()) {
             return Err(CellError::new(ErrorCode::NotFound, "no such agent here: this fragment was made again since"));
@@ -240,9 +239,7 @@ impl FragmentCell {
         if self.cfg.test_hooks && self.meta(MetaKey::TestRefuseTurns)?.is_some() {
             return Err(CellError::new(ErrorCode::HostFailed, "refused by a test hook (`refuse-turns`)"));
         }
-        // an asker is an identity, or no one (an ask no one proves, with no mandate)
-        let asker_ok = |p: &PlaceTurn| npub::is_identity(&p.asker) || (p.asker.is_empty() && p.mandate.is_none());
-        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && asker_ok(p) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
+        let well_formed = |p: &PlaceTurn| fragment_proto::valid_op_id(&p.turn) && npub::is_identity(&p.asker) && p.mandate.as_ref().is_none_or(|m| m.len() <= limits::MANDATE_MAX_BYTES);
         if !valid_fragment_name(&t.place) || t.version <= 0 || !t.turns.iter().all(well_formed) {
             return Err(CellError::invalid("a place's turns are its name, their version, and each its id, asker and mandate"));
         }
@@ -371,8 +368,12 @@ impl FragmentCell {
             Proof::Asker { at, .. } => at,
         };
         let agent = self.must(MetaKey::AgentIdentity)?;
+        let asker = turns.iter().map(|t| t.asker).find(|a| npub::display(a) != owner).expect("someone else's ask is open").to_string();
+        // the request each place's turn is: its newest mandate's record there,
+        // to which what its owner allowed once is lent
+        let request = |place: &str| turns.iter().filter_map(|t| t.mandate).filter(|m| m.place == place).filter_map(|m| mandate::record_of(m.text)).max_by_key(|r| r.1).map(|(c, s)| (c.to_string(), s));
         // bounded: the places of its open turns, at most `TURNS_HELD_MAX`
-        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string() })).collect();
+        let calls: Vec<(&str, LendOf)> = at.iter().map(|(name, place)| (*name, LendOf { agent: agent.clone(), place: place.to_string(), asker: asker.clone(), request: request(place) })).collect();
         let asked = calls.iter().map(|(name, call)| crate::fragment::call(&self.env, name, call));
         let lent = futures_util::future::join_all(asked).await.into_iter().fold(Lend::OWNER, |lent, here| {
             let here = here.unwrap_or(Lend::NONE);
@@ -537,7 +538,7 @@ impl FragmentCell {
         }
     }
 
-    fn created(&self) -> CellResult<()> {
+    pub(crate) fn created(&self) -> CellResult<()> {
         self.must(MetaKey::CreatedAt).map(drop).map_err(|_| CellError::new(ErrorCode::NotFound, "no such fragment"))
     }
 
@@ -584,7 +585,7 @@ impl FragmentCell {
         self.created()?;
         // its sharing read once: its reach, its link, and past its owner
         let sharing = self.sharing_counts()?;
-        let shared = self.alone()?.is_some() && crate::alone::past_owner(&sharing);
+        let shared = self.alone()?.is_some() && !sharing.only_you();
         Ok(Reach { kind: self.kind()?, reach: sharing.reach, beyond: sharing.beyond(), shared })
     }
 

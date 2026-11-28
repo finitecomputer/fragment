@@ -453,6 +453,25 @@ outlives its turn").
 read whole: nothing ran). A card answered late also names the answer's
 seq on `chat` (`answerSeq`); one answered live names none.
 
+**`ask`** and **`ask.closed`**: the platform's own card (docs/api.md, "One
+ask"), its record (`author` `platform`, never an agent's), shown on its
+own, never in a turn:
+
+```json
+{ "kind": "ask", "turn": "…", "agent": "npub1…", "asker": "npub1…", "asks": "npub1…",
+  "what": "accounts", "fragment"?: "<name>", "title"?: "…", "micros"?: 5000000,
+  "options": ["once", "always", "no"], "expiresAt": 1791000000000 }
+{ "kind": "ask.closed", "ask": <its seq>, "turn": "…", "agent": "npub1…", "option": "once", "by": "npub1…" }
+```
+
+`what` is `spend` or `accounts` (options `once`, `always`, `no`; a card
+in another chat than its lend's, `"elsewhere": true`, `once` and `no`), or
+`delete` or `cap` (`yes`, `no`; `micros` null: the default), of
+`fragment`, which only a confirm names: a lend's place is kept in the
+card's private row, never shown to the chat it is asked in. Only `asks` answers, with `{kind: "ask_answer", option,
+answers: {channel: "work", seq}}`; a `yes` is posted once the shell has
+done it (`confirm`). A bridge takes neither kind, nor the answer.
+
 **`turn.asked`**, part `q<part>`:
 
 ```json
@@ -624,7 +643,8 @@ nothing to tell says nothing").
 
 **The agent's hello.** Once the shell has made an agent and added it to
 its chat, it posts a routine for that chat as the agent's owner, with the
-id `hello`, asking the agent to say hello. So the agent speaks first.
+id `hello`, asking the agent to say hello. So the agent speaks first. A
+move's new agent's hello waits for its move's Yes (docs/migrations.md).
 
 **An ask's answer** ("An ask", above):
 

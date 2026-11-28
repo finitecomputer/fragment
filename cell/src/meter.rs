@@ -412,6 +412,8 @@ impl FragmentCell {
     /// default. Its `id` makes the change once; the ledger keeps it under
     /// `cap:<fragment>:<id>`, apart from every other command's.
     pub(crate) async fn put_cap(&self, caller: &Caller, body: PutCap) -> CellResult<Response> {
+        // an agent's, for its owner or its asker, asks them to confirm it
+        self.confirm_first(caller, fragment_core::permit::Danger::Cap, body.micros).await?;
         self.require(caller, false, Role::Owner)?;
         if !fragment_core::price::printable(&body.id, CAP_ID_MAX_BYTES) {
             return Err(CellError::invalid(format!("a cap's id is 1-{CAP_ID_MAX_BYTES} printable ASCII characters, no spaces")));

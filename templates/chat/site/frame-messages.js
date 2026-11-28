@@ -36,7 +36,7 @@ export const MESSAGES = Object.freeze({
     kind: "add-agent",
     from: "a frame of a fragment the person owns → the shell",
     fields: "{identity, nonce}",
-    says: "Asks to add one of their agents: the shell asks the person in its own dialog (\"Add Fred to …?\", Add armed after 800 ms) and only on Add makes the agent an editor of the frame's fragment. Nothing is remembered.",
+    says: "Asks to add one of their agents: the shell asks the person in its one ask dialog (\"Add Fred to …?\", Add armed after 800 ms) and only on Add makes the agent an editor of the frame's fragment. Nothing is remembered.",
   },
   agentAdded: {
     kind: "agent-added",
@@ -92,6 +92,30 @@ export const MESSAGES = Object.freeze({
     from: "a chat → the shell, and the shell's answer back",
     fields: "asked: {nonce, on, key?}; answered: {nonce, state: on | off | denied | unsupported | failed, subscription?, endpoint?, error?}",
     says: "Turns its alerts on or off (on: the release's chat alone), and the shell's answer to it or to `alerts?`.",
+  },
+  micAsk: {
+    kind: "microphone?",
+    from: "a frame of a fragment on the person's list → the shell",
+    fields: "{nonce}",
+    says: "Asks to use the person's microphone: the shell asks them once per app in its one ask dialog (\"Let Recipes use your microphone?\", \"an app shared with you\" when not theirs; one yes for every release chat), one ask open at a time across every frame, and none from a frame told Not now until the shell loads it again (a release chat's, its mic pressed again, asks again); Allow is kept on their row and the frame is made again, lent it. Answered `microphone`.",
+  },
+  micAnswer: {
+    kind: "microphone",
+    from: "the shell → that frame",
+    fields: "{nonce, ok, error?, reload?}",
+    says: "`microphone?`'s answer: ok when lent (at once if lent already); `reload` when its frame is being made again, lent it (made before the yes); `error` \"declined\" (Not now, or this frame told it before and not loaded again since), \"not answered\", \"busy\" (another ask is open), or the API's refusal.",
+  },
+  confirm: {
+    kind: "confirm",
+    from: "the release's chat → the shell",
+    fields: "{nonce, what: delete | cap, name, micros?}",
+    says: "A platform card's Delete… or Set cap…: the shell asks the person in its one ask dialog (\"Delete Recipes?\", armed after 800 ms) and on its button deletes the fragment `name`, or sets its cap to `micros` (null: the default), as them. Nothing is remembered.",
+  },
+  confirmed: {
+    kind: "confirmed",
+    from: "the shell → that chat",
+    fields: "{nonce, ok, error?}",
+    says: "`confirm`'s answer: `error` is \"declined\", \"not answered\" (90 s), \"busy\", or the API's refusal.",
   },
   // ---- any frame and the shell ----
   open: {

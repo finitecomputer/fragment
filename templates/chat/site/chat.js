@@ -15,7 +15,10 @@
 //   - `work`: an agent's progress, which only the chat's agents post
 //     (`"from": "agent"`): `turn.start`, `turn.call` (a tool call asked
 //     for, before it runs), `turn.step` (one ended), `turn.prompt`,
-//     `turn.prompt.closed`, `turn.end`.
+//     `turn.prompt.closed`, `turn.end`; and the platform's own cards
+//     (`ask`, `ask.closed`: docs/api.md, "One ask"), shown on their own,
+//     answered `{kind: "ask_answer", option, answers}`; a Delete… or Set
+//     cap… is the shell's to ask and do (`{fragment: KIND.confirm}`).
 //
 // The page follows both (`subscribe`, from near their ends), and the chat's
 // drafts: a turn's draft shows after the turn's last record, and the reply
@@ -417,7 +420,9 @@ export function mount(root) {
     turns: new Map(), // `turnKey(agent, turn)` -> its records (`turnOf`)
     drafts: new Map(), // `turnKey(poster, turn)` -> { principal, turn, text, at }: a reply as it streams
     answers: new Map(), // `cardKey` (or a bare prompt id) -> Map(poster -> option): each poster's first prompt_response on `chat`
-    answering: new Map(), // `cardKey` -> the option this page posted, until its card closes
+    answering: new Map(), // `cardKey` (a platform card's `ask:<seq>`) -> the option this page posted, until its card closes
+    asks: new Map(), // a platform card's seq on `work` -> what it asks (`onAsk`)
+    askClosed: new Map(), // a platform card's seq -> how it closed: { option, by, at }
     typed: new Map(), // `cardKey` -> what is typed in its card's field (an option answered in words)
     handed: new Map(), // `cardKey` -> what came of an answer this page handed its agent's computer, in words
     toComputer: new Map(), // a nonce -> the `cardKey` whose answer it handed the shell, until the shell says
@@ -1048,6 +1053,25 @@ export function mount(root) {
     schedule();
   }
 
+  // A card the platform asked on (`ask`), and how it closed (`ask.closed`).
+  const ASK_WHAT = ["spend", "accounts", "delete", "cap"];
+  function onAsk(record, b) {
+    if (b.kind === "ask") {
+      // a confirm names the fragment it is about; a lend's card names none
+      const named = b.fragment;
+      const about = typeof named === "string" ? named : null;
+      if (typeof b.asks !== "string" || typeof b.agent !== "string" || !ASK_WHAT.includes(b.what) || (about === null && (b.what === "delete" || b.what === "cap"))) return;
+      const options = Array.isArray(b.options) ? b.options.filter((o) => typeof o === "string") : [];
+      state.asks.set(record.seq, { seq: record.seq, at: record.at, n: record.seq, agent: b.agent, asker: typeof b.asker === "string" ? b.asker : null, asks: b.asks, what: b.what, fragment: about, title: typeof b.title === "string" ? b.title : null, micros: Number.isSafeInteger(b.micros) ? b.micros : null, elsewhere: b.elsewhere === true, options, expiresAt: b.expiresAt });
+      expiryTimer();
+    } else if (Number.isInteger(b.ask) && typeof b.option === "string") {
+      state.askClosed.set(b.ask, { option: b.option, by: typeof b.by === "string" ? b.by : null, at: record.at });
+      state.answering.delete(`ask:${b.ask}`);
+      tellBusy();
+    }
+    schedule();
+  }
+
   function onWork(record) {
     if (workSeen.has(record.seq)) return;
     workSeen.add(record.seq);
@@ -1057,6 +1081,9 @@ export function mount(root) {
     // a helpers set moves nothing in the chat: its bar alone (it names no
     // `turn`, so pages from before it pass it over)
     if (b?.kind === "turn.helpers") return onHelpers(record, b);
+    // the platform's own card: its record alone, never an agent's, so no
+    // agent makes one or closes one
+    if (record.author === "platform" && (b?.kind === "ask" || b?.kind === "ask.closed")) return onAsk(record, b);
     if (b === null || typeof b !== "object" || typeof b.turn !== "string") return;
     // a kind this page does not know moves nothing: no turn, no place, no question
     if (!TURN_KINDS.has(b.kind)) return;
@@ -1159,7 +1186,9 @@ export function mount(root) {
   let expiryAt = 0;
   let expiryHandle = 0;
   function expiryTimer() {
-    const next = Math.min(...[...state.turns.values()].flatMap((t) => [...t.prompts.values()].filter((p) => !t.closed.has(p.prompt) && Number.isFinite(p.expiresAt) && p.expiresAt > Date.now()).map((p) => p.expiresAt)));
+    const cards = [...state.turns.values()].flatMap((t) => [...t.prompts.values()].filter((p) => !t.closed.has(p.prompt)));
+    const asks = [...state.asks.values()].filter((a) => !state.askClosed.has(a.seq));
+    const next = Math.min(...[...cards, ...asks].filter((p) => Number.isFinite(p.expiresAt) && p.expiresAt > Date.now()).map((p) => p.expiresAt));
     if (!Number.isFinite(next) || next === expiryAt) return;
     clearTimeout(expiryHandle);
     expiryAt = next;
@@ -1250,6 +1279,7 @@ export function mount(root) {
       // (a live call's card says it works)
       if (running(t) && !state.drafts.has(t.key) && !waiting(t) && !(open.get(t.key) && !waitsOnWords(t))) items.push({ at: t.lastAt, n: t.lastN + 0.5, type: waitsOnWords(t) ? "asked" : "working", t });
     }
+    for (const a of state.asks.values()) if (a.at >= lo && a.at <= hi) items.push({ at: a.at, n: a.n, type: "ask", a });
     if (state.pending) items.push({ at: state.pending.at, n: state.pending.n + 0.5, type: "working", t: null });
     for (const m of state.sending.values()) items.push({ at: m.at, n: m.n, type: "message", m });
     for (const m of state.failed.values()) items.push({ at: m.at, n: m.n, type: "message", m });
@@ -1314,6 +1344,8 @@ export function mount(root) {
         return saidNode(it.t, it.s, it.text);
       case "prompt":
         return promptNode(it.t, it.p);
+      case "ask":
+        return askNode(it.a);
       case "end":
         return endNode(it.t);
       case "notice":
@@ -2059,6 +2091,115 @@ export function mount(root) {
       }),
     ];
   }
+  // The platform's card (docs/api.md, "One ask"): what the agent asks of
+  // whom, worded for whoever reads it, and its buttons, which only whom it
+  // asks may press. A lend's are answered here; a Delete… or Set cap… asks
+  // the shell, which asks its person in its own dialog and does it as them
+  // (`confirm`), and the card is answered once it is done. Once closed,
+  // what came of it.
+  const ASK_LABELS = {
+    lend: { once: "Allow once", always: "Always here", no: "No" },
+    delete: { yes: "Delete…", no: "No" },
+    cap: { yes: "Set cap…", no: "No" },
+  };
+  const ASK_SAID = {
+    once: "Allowed once",
+    always: "Always allowed here",
+    no: { lend: "Not allowed", delete: "Not deleted", cap: "Cap not set" },
+    yes: { delete: "Deleted", cap: "Cap set" },
+  };
+  const dollars = (micros) => (micros === null ? "the default" : `$${(micros / 1e6).toFixed(micros % 1e6 ? 2 : 0)}`);
+  function askText(a) {
+    const me = state.me?.principal;
+    const agent = who(a.agent).name;
+    const of = a.asks === me ? "your" : `${who(a.asks).name}'s`;
+    const asker = a.asker === me ? "you" : a.asker ? who(a.asker).name : "";
+    const forWhom = a.asker && a.asker !== a.asks ? ` for ${asker}` : "";
+    const what = a.title || a.fragment;
+    // a lend kept in another chat, which is no "here" (never named: its title is its own people's)
+    const where = a.elsewhere ? " in another chat" : "";
+    if (a.what === "accounts") return `${agent} wants to use ${of} accounts${forWhom}${where}.`;
+    if (a.what === "spend") return `${agent} wants to spend ${of} credit${forWhom}${where}.`;
+    if (a.what === "delete") return `${agent} wants to delete ${what}${forWhom}.`;
+    return `${agent} wants to set ${what}'s cap to ${dollars(a.micros)}${forWhom}.`;
+  }
+  function askNode(a) {
+    const key = `ask:${a.seq}`;
+    const closed = state.askClosed.get(a.seq) ?? null;
+    const sent = state.answering.get(key) ?? null;
+    const gone = !closed && expired(a);
+    const theirs = !!state.me && a.asks === state.me.principal && !closed && !gone;
+    const confirm = a.what === "delete" || a.what === "cap";
+    const labels = confirm ? ASK_LABELS[a.what] : ASK_LABELS.lend;
+    const by = closed?.by ? who(closed.by).name : "";
+    const text = askText(a);
+    const sig = JSON.stringify([closed?.option, by, sent, gone, theirs, text, who(a.agent).name, who(a.asks).name]);
+    return [
+      key,
+      cached(key, sig, () => {
+        const card = el("div", `prompt${closed || gone ? " closed" : ""}`);
+        card.dataset.ask = String(a.seq);
+        const head = el("div", "prompt-head");
+        head.replaceChildren(icon("shield"));
+        head.append(closed || gone ? `${who(a.agent).name} asked` : `${who(a.agent).name} asks`);
+        card.append(head, el("div", "prompt-text", text));
+        if (closed) {
+          const said = typeof ASK_SAID[closed.option] === "object" ? ASK_SAID[closed.option][confirm ? a.what : "lend"] : ASK_SAID[closed.option] ?? closed.option;
+          card.append(outcome(closed.option === "no" ? "stopped" : "answered", closed.option === "no" ? "stopped" : "check", `${said}${by ? ` · ${by}` : ""}`));
+        } else if (gone) card.append(outcome("expired", "clock", "Expired: no answer in time"));
+        else {
+          const options = el("div", "options");
+          for (const o of a.options) {
+            if (!labels[o]) continue;
+            const style = o === "once" ? "primary" : o === "yes" ? (a.what === "delete" ? "danger" : "primary") : "";
+            const b = el("button", style, labels[o]);
+            b.type = "button";
+            b.dataset.option = o;
+            // a confirm is the shell's to ask and do: only framed by it
+            b.disabled = !theirs || sent !== null || (confirm && o === "yes" && !framed);
+            if (sent === o) b.classList.add("chosen");
+            b.onclick = () => (confirm && o === "yes" ? confirmAsk(a) : answerAsk(a, o));
+            options.append(b);
+          }
+          card.append(options);
+          const note = !theirs ? `Only ${who(a.asks).name} can answer this.` : sent !== null ? "Sent…" : confirm && !framed ? "Open this chat in Finite to answer it." : "";
+          if (note) card.append(el("div", "prompt-note", note));
+        }
+        return card;
+      }),
+    ];
+  }
+  // An answer to the platform's card: one record, its id the card's, so a
+  // second tap is the same; never words, so it starts no turn.
+  async function answerAsk(a, option) {
+    const key = `ask:${a.seq}`;
+    state.answering.set(key, option);
+    schedule();
+    answersOnTheirWay++;
+    tellBusy();
+    try {
+      await fragment.post("chat", { kind: "ask_answer", option, answers: { channel: "work", seq: a.seq } }, { id: `aa:${a.seq}` });
+    } catch (err) {
+      // 409: answered first elsewhere; the card says so once closed
+      if (err.status !== 409) {
+        state.answering.delete(key);
+        problem(`Your answer was not sent: ${err.message}`);
+      }
+      schedule();
+    } finally {
+      answersOnTheirWay--;
+      tellBusy();
+    }
+  }
+  // A Delete… or Set cap…: the shell asks its person and does it; then the card is answered.
+  const CONFIRM_ASK_MS = 120_000;
+  async function confirmAsk(a) {
+    if (!framed || !state.me) return;
+    const done = await askShell({ fragment: KIND.confirm, what: a.what, name: a.fragment, micros: a.micros }, CONFIRM_ASK_MS);
+    if (done?.ok === true) return answerAsk(a, "yes");
+    if (done && !["declined", "not answered"].includes(done.error)) problem(`It wasn't done: ${done.error ?? "the page around this chat did not answer"}`);
+  }
+
   // An option answered in words (a clarify's "Other"): a field on the card,
   // its label the hint; what is typed outlives the card's redraws.
   function wordsField(t, prompt, o, disabled) {
@@ -2793,7 +2934,7 @@ export function mount(root) {
       recording = null;
       renderRecording();
       if (ended) return;
-      return err?.name === "NotAllowedError" ? showMicCard("denied") : problem(`Could not record: ${err?.message ?? err}`);
+      return err?.name === "NotAllowedError" ? showMicCard() : problem(`Could not record: ${err?.message ?? err}`);
     }
     // pressed again while the browser asked: nothing was recorded to send
     if (memo.stopped) {
@@ -2849,26 +2990,20 @@ export function mount(root) {
     renderAttachments();
     send(input.value);
   }
-  // Before the browser's own prompt, a card says what the microphone is
-  // for, and asks only on Continue; one the browser refused says where it
-  // is allowed again (the page can do nothing more: Okay closes it). A
-  // browser that cannot say (Firefox) or asks every visit (Safari) shows
-  // the first card once: this browser remembers it was read.
-  const MIC_PRIMED = "fragment-chat:mic-primed";
-  const MIC_CARD = {
-    ask: ["Send voice memos to your agent", "Allow the microphone on the next step.", "Continue"],
-    denied: ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"],
-  };
-  const primed = () => {
-    try { return localStorage.getItem(MIC_PRIMED) === "1"; } catch { return false; }
-  };
+  // The microphone is the shell's to lend (FIN-615 PR 11): framed by it, a
+  // voice memo asks it first, from its press (`microphone?`). The shell asks
+  // its person once, for every chat, and makes this frame again, lent it (a
+  // frame made after their yes is lent from the first); then comes the
+  // browser's own prompt. One the browser refused says where it is allowed
+  // again (the page can do nothing more: Okay closes it).
+  const MIC_ASK_MS = 120_000;
+  const MIC_DENIED = ["Your browser needs microphone permissions", "Turn on the microphone in your browser's settings.", "Okay"];
   async function micPermission() {
     try { return (await navigator.permissions.query({ name: "microphone" })).state; } catch { return null; }
   }
-  function showMicCard(kind) {
-    const [title, text, go] = MIC_CARD[kind];
+  function showMicCard() {
+    const [title, text, go] = MIC_DENIED;
     const card = $("mic-card");
-    card.dataset.kind = kind;
     $("mic-card-title").textContent = title;
     $("mic-card-text").textContent = text;
     $("mic-card-go").textContent = go;
@@ -2881,20 +3016,21 @@ export function mount(root) {
     hideMicCard();
     input.focus();
   };
-  $("mic-card-go").onclick = () => {
-    if ($("mic-card").dataset.kind === "denied") return $("mic-card-close").onclick();
-    try { localStorage.setItem(MIC_PRIMED, "1"); } catch {}
-    hideMicCard();
-    startMemo();
-  };
+  $("mic-card-go").onclick = () => $("mic-card-close").onclick();
   $("record").onclick = async () => {
     if (recording) return stopMemo(false);
     if (!canAttach() || !recordable()) return;
+    if (framed && state.me) {
+      // asked in this click's own turn: the shell reads the click
+      const lent = await askShell({ fragment: KIND.micAsk }, MIC_ASK_MS);
+      // not lent (Not now, or no shell), or this frame is being made again, lent it
+      if (ended || lent?.ok !== true || lent.reload === true) return;
+    }
     const mic = await micPermission();
     // its access ended while the browser was asked
     if (ended) return;
-    if (mic === "granted" || (mic !== "denied" && primed())) return startMemo();
-    showMicCard(mic === "denied" ? "denied" : "ask");
+    if (mic === "denied") return showMicCard();
+    startMemo();
   };
   $("discard").onclick = () => {
     stopMemo(true);
@@ -3051,7 +3187,8 @@ export function mount(root) {
       } else setup = null;
       schedule();
       if (picking) updateMentions();
-    } else if (d?.fragment === KIND.alerts && typeof d.nonce === "string" && event.origin === state.me?.platform) {
+    } else if ([KIND.alerts, KIND.confirmed, KIND.micAnswer].includes(d?.fragment) && event.origin === state.me?.platform) {
+      if (typeof d.nonce !== "string") return;
       const waiting = askingShell.get(d.nonce);
       if (!waiting) return;
       askingShell.delete(d.nonce);

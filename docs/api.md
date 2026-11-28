@@ -216,9 +216,7 @@ on unproven, as itself, in the place it was asked alone (SHIP IT,
 **A place opens its agents' turns** (FIN-720; cell/src/asks.rs). Whose
 ask an agent's turn is is the word of the chat it was asked in, from its
 own records, never its computer's. Words on `chat` that start a turn,
-someone's (`mandate::asked_of`; someone a door heard in a room is an
-ask no one proves, its asker empty, so the agent acts as itself in that
-chat alone: `Proof::Itself`), to an agent member as its bridge hears
+someone's (`mandate::asked_of`), to an agent member as its bridge hears
 them (`mandate::heard_by`: whom `to` names, else whom a person
 @-mentions, any mention being every agent, else the chat's lead), open
 that agent's ask as they first reach it: sent on its socket that
@@ -235,7 +233,13 @@ older version changing nothing. Someone else's ask reaches its agent
 only once its fragment holds it: its sockets hold what they are sent
 meanwhile, and its page reads and its claim answer 502; one not told is
 told again from the alarm. Its owner's own asks narrow nothing (decision
-64) and wait for nothing. A hand-off (one of its owner's agents' words,
+64) and wait for nothing. Words its bridge runs that no one's word
+proves (app code's, a door's that relays no one, the platform's own)
+open an ask in the chat's own name, which nothing proves, waited for as
+someone else's: the agent acts as itself, in that chat alone. Words are
+what its bridge answers (a `text`, or attachments): an anonymous
+visitor's, which it never runs, and an object that says nothing, open
+nothing. A hand-off (one of its owner's agents' words,
 said on their owner's own proven ask: "An ask carried on", above) opens
 that ask carried on, by the same words and day; on anyone else's ask, and
 another owner's agent's words, the posting agent's own, unproven, lending
@@ -289,8 +293,9 @@ else. One never set is `Lend::DEFAULT`: spend on, accounts off.
 acting `for` its owner, and not held below them, on a fragment its owner
 owns, an agent manages members, invites, visibility and rotation as its
 owner would (never granting `owner`, never touching the owner). Any other
-agent's sharing request is 403, saying why. Deleting a fragment, setting
-its cap and sharing a connector (An agent's doors) are 403 to every agent.
+agent's sharing request is 403, saying why. Deleting a fragment and
+setting its cap ask its owner to confirm it (One ask); sharing a connector
+(An agent's doors) is 403 to every agent.
 What an agent shares names it (`addedBy`,
 `createdBy`), and each event (`member.set`, `member.removed`,
 `invite.created`, `invite.revoked`, `visibility`, `tokens.rotated`) carries
@@ -791,6 +796,21 @@ it. Narrowing is never refused, and one shared before the rule keeps what
 it had (debt ledger, "Agent fragments shared before FIN-544"). Its sheet
 offers no invite, and no switch but one to close a link from before.
 
+**One reason the link stays shut** (FIN-615 PR 18). Both rules above
+come to one answer, the fragment's own (`link_shut` in cell/src/reach.rs):
+`alone` for an agent's own, else `reach`, else none. Its visibility
+refuses `link` and `public` with it, its status says it (`linkShut`), and
+the sheet shows it, never deciding for itself.
+
+**"Only you" or "Shared"** (FIN-615 PR 18). Each fragment says which,
+derived as it is read and never kept. It's "Only you" when its owner's
+list row says `onlyYou` (`Sharing::only_you`: members only, with no one
+else in it or invited). Any other of theirs is "Shared", and so is
+anyone else's. The shell reads it from the list alone, so the word
+changes when the list does. It shows the word on the Apps page's row,
+then what shares it, and in each open window's header, with a globe
+while its link or public opens it.
+
 On a chat one of the owner's agents is in, `fragment members add` says
 "People here can ask your agent for things. It does them as that person,
 and anyone here can see what it finds." (`fragment_core::permit::
@@ -880,6 +900,7 @@ inbox's, which takes its token. `{name}` is a fragment's name in full.
 | `PUT /api/fragments/{name}/archived` | any signer with a role on it | `SetArchived` → `Archived` (docs/wire): their own view, in their list's row only. It goes when they leave, or the fragment is made again. No role, none, or a bare label 404; a bad body 400. Not for `for` |
 | `PUT /api/fragments/{name}/dock` | the same | `SetDock` → `Docked`: whether their dock shows it, as archiving is (every fragment is on it until taken off); their list's sockets are told. Not for `for` |
 | `PUT /api/fragments/{name}/pinned` | the same | `SetPinned` → `Pinned`: whether they pinned it, as archiving is (nothing is pinned until pinned); their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
+| `PUT /api/fragments/{name}/microphone` | the same | `SetMicrophone` → `Microphone`: their yes to its page using their microphone (none until they say yes), which the shell asks behind a press in its page (One ask) and lends its frames by (`ListedFragment.microphone`); on a chat of the release's chat template, their one yes for every such chat. Their list's sockets are told. It goes when they leave, or the fragment is made again. Not for `for` |
 | `PUT /api/fragments/{name}/seen` | the same | no body → `Seen` (`unread: 0`): they have seen its messages up to the newest their search holds; it never goes back. Any body 400. Not for `for` |
 | `GET /api/search?q=` | any signer | → `SearchAnswer` (docs/wire, `search.find`; Search). `q` once, at most `SEARCH_QUERY_MAX_BYTES` and `SEARCH_QUERY_WORDS_MAX` words (400). Not for `for` |
 | `POST /api/search` | any signer, `for` too | `Across {q, in, limit?, mode?, fields?, after?, before?}` → `FoundAcross {results, fragments, semantic}`: one question asked of several fragments' indexes (Search across fragments) |
@@ -1008,6 +1029,66 @@ A question is answered only by whom it asks (FIN-615,
 
 A reader still attributes an answer by its `principal`, as any record: a
 record stored before this rule promises nothing.
+
+### One ask
+
+Where a call needs someone's yes, the platform asks them on one card, in
+the chat it was asked in (FIN-615, `fragment_core::permit::Ask`), and the
+call is 403, saying whom it asked by what they are to the agent, never
+their email: "Asked your owner, on a card in the chat. Ask again once they
+answer." Two calls ask:
+
+- **A dangerous action** (`DELETE /api/f/{name}`, `PUT …/cap`) an agent
+  asks for someone, unheld, asks the fragment's owner to confirm it: the
+  asker, when they own it, else the agent's own owner, when the asker is
+  in it too; anyone else's is its owner's alone (`decide`'s rule 8). It is
+  asked every time and never remembered. Its Confirm is the owner's own
+  request, made by the shell in person after its own dialog ("Delete
+  Recipes?"); the agent never holds the right. With no turn of the
+  asker's open (its terminal, a schedule) it is 403 "This needs … to
+  confirm it in a chat".
+- **Someone else's ask that needs what its place doesn't lend** (the swap's
+  credit or accounts: Who asked, mandates) asks the agent's owner: **Allow
+  once** lends it to the asker's first words there after the answer (each
+  of that request's calls) and no other, bound to that record as it is
+  posted, so a record retention drops passes it on to none, **Always here** turns it on in
+  that place's lend, and **No** writes nothing. An answer's write is made
+  once: the same answer again (a retry) writes nothing more.
+
+The card goes to the chat the asker's newest turn runs in (a lend's: one
+of theirs that lends it not; a confirm's, only while their turns are open
+in that one chat, since it names what it is about, else 409); where whom it asks is not in that chat, to
+their own newest chat with the agent, so it never lands where its
+answerer can't see it; a lend's card there says it is about another chat
+(never naming it) and offers no Always here (400), which is answered where
+it is kept. One for the same agent, asker, ask and thing is
+open at a time (a second ask is the same card), at most
+`limits::ASKS_OPEN_MAX` in a chat (429 past it), each answerable for
+`limits::ASK_LIFE_MS`. Its records are the platform's own on `work`
+(docs/chat-records.md, `ask`). Its answer is a post `{kind: "ask_answer",
+option, answers: {channel: "work", seq}}` alone (400 otherwise:
+`permit::ask_answer`), from whom it asks (Questions and answers), once (409
+once answered or run out). Never words or a message: an answer starts no
+turn, and the asker asks again (the debt ledger, "A card's answer resumes
+nothing").
+
+The microphone is asked in the same dialog, the shell's own: a page
+framed by the shell asks it (`microphone?`, templates/chat/site/
+frame-messages.js), and the shell asks its person once
+per fragment ("Let Recipes use your microphone?", saying "an app shared
+with you" when it is not theirs; "Use your microphone in chats?" for the
+release's chat, one yes for every such chat). **Allow** keeps the yes on
+their row (`PUT /api/fragments/{name}/microphone`) and makes the frame
+again, naming the fragment's origin in its policy; **Not now** keeps
+nothing. A frame names no microphone until then, and a visitor's (no row)
+never does. The fragment's ⋯ takes it back: its open pages, in every tab
+(every chat's, for a chat's), are made again without it (the list's
+change). The consent is the dialog's own Allow, which arms after a moment
+and no page can press; against spam, one ask is open at a time across
+every frame ("busy"), and a frame told Not now asks nothing more until the
+shell loads it again (its Reload, or opened again). A release chat's page
+is the platform's and asks only from its own mic button, so its mic
+pressed again asks again.
 
 ### Listed records
 

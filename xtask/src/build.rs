@@ -26,10 +26,12 @@ pub const CELL_WASM_MAX_BYTES: u64 = 7_500_000;
 /// crate's other build (cell/src/lib.rs, "Two Workers, one crate"), which
 /// holds only what the admin's routes reach of it: 0.70 MB with its first
 /// route, most of it what every caller carries (the deployment's settings,
-/// NIP-98, serde), and 1.09 MB with all of the admin's (2026-11-20). Far
+/// NIP-98, serde), and 1.09 MB with all of the admin's (2026-11-20), 1.2 MB
+/// by 2026-11-27. Generous since then (Paul, 2026-11-27: one Worker for
+/// operators, not one per fragment, so it isn't squeezed), yet still far
 /// under the cell's: a route that reaches an object's own code, not only
 /// its calls, carries that object into the admin, which this refuses.
-pub const ADMIN_WASM_MAX_BYTES: u64 = 1_200_000;
+pub const ADMIN_WASM_MAX_BYTES: u64 = 2_000_000;
 
 /// The admin Worker's build, in the cell's `build/` (so a build's lock,
 /// mark and the e2e's staged copy hold both: devstack's built.rs), beside

@@ -225,7 +225,10 @@ impl FragmentCell {
     /// sent to every member's list (at most `MEMBERS_MAX`) and its owner's,
     /// as an agent's joining or leaving is.
     pub(crate) fn face_is(&self, kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> CellResult<()> {
-        let face = face(kind, title, role, picture);
+        // a chat of the release's chat template (its page the platform's
+        // code), whose microphone one yes of its person's lends (principal.rs)
+        let chat_release = self.meta(MetaKey::Blessed)?.is_some_and(|b| b.starts_with("chat@"));
+        let face = face(kind, title, role, picture, chat_release);
         if self.meta(MetaKey::Face)?.as_deref() == Some(face.as_str()) {
             return Ok(());
         }
@@ -671,13 +674,14 @@ impl FragmentCell {
     }
 
     /// `LendOf`: what `agent`'s owner lends it here, for its own fragment
-    /// at each use on someone else's ask: nothing where `place` is not this
-    /// life's own key, or the agent is no member.
+    /// at each use on someone else's ask, with what they allowed that
+    /// request once (owner_ask.rs `lent_once`): nothing where `place` is not
+    /// this life's own key, or the agent is no member.
     pub(crate) fn lend_here(&self, asked: &crate::fragment::calls::LendOf) -> CellResult<Lend> {
         if self.meta(MetaKey::Npub)?.as_deref() != Some(asked.place.as_str()) || self.member_role(&asked.agent)?.is_none() {
             return Ok(Lend::NONE);
         }
-        self.lend_of(&asked.agent)
+        self.lent_once(asked, self.lend_of(&asked.agent)?)
     }
 
     /// `PUT /api/f/<name>/members/<agent>/lend` (the lend card): what of
@@ -1346,11 +1350,10 @@ impl FragmentCell {
 
     pub(crate) async fn set_visibility(&self, caller: &Caller, body: SetVisibility) -> CellResult<Response> {
         let actor = self.require_owner(caller)?;
-        // members only narrows it; its link or public, not with reach
-        // (reach.rs) nor on an agent's own (alone.rs)
+        // members only narrows it; its link or public, only while they may
+        // open it (reach.rs `link_shut`)
         if body.visibility != Visibility::Members {
-            self.share_while_alone()?;
-            self.share_while_private()?;
+            self.link_refused()?;
         }
         let before = self.visibility()?;
         self.set_meta(MetaKey::Visibility, body.visibility.as_str())?;
@@ -1543,7 +1546,7 @@ fn secret_hosts(given: &[String]) -> CellResult<Vec<String>> {
 /// picture's address when it has one, and an agent's role. Its kind is a
 /// manifest's, which names only kinds this release knows: the fallback a
 /// newer platform's kind reads as is never stored as one.
-pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>) -> String {
+pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, picture: Option<&str>, chat_release: bool) -> String {
     assert_ne!(kind, FragmentKind::Other, "a face's kind is its manifest's, one this release knows");
     // a title of nothing but spaces is none: every reader then falls back alike
     let mut face = json!({ "kind": kind, "title": fragment_core::face::title(title) });
@@ -1553,6 +1556,9 @@ pub(crate) fn face(kind: FragmentKind, title: Option<&str>, role: Option<&str>, 
     }
     if let Some(p) = picture {
         face["picture"] = json!(p);
+    }
+    if chat_release && kind == FragmentKind::Chat {
+        face["chatRelease"] = json!(true);
     }
     face.to_string()
 }
