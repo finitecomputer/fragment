@@ -245,15 +245,13 @@ pub struct AgentMode {
 /// The header that names the agent a request acts as.
 pub const AGENT_HEADER: &str = "x-fragment-agent";
 
-/// Whether the platform honors `for` on `method path`: a fragment's routes
-/// (`/api/f/…`, and its own at `/f/…`), the fragment list, the invites
-/// waiting (`/api/invites…`, an agent's for its owner), and a search
-/// across fragments (`POST /api/search`; never the launcher's `GET`); it
-/// refuses it on every other route (cell/src/lib.rs `signer`).
+/// Whether an agent names its owner in `for` on `method path`: where the
+/// platform honors it (`fragment_core::mandate::honors_for`, the egress's
+/// one list), and a fragment's own routes at `/f/…` (its live socket),
+/// which its egress takes as it came. It says what the call is for; the
+/// egress says whose it may be (cell/src/runs_on.rs `asked`).
 pub fn honors_for(method: &str, path: &str) -> bool {
-    let p = path.split('?').next().unwrap_or(path);
-    let stage_copy = method == "POST" && p.starts_with("/api/migrations/stages/") && p.ends_with("/copy");
-    p.starts_with("/api/f/") || p.starts_with("/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search") || stage_copy
+    fragment_core::mandate::honors_for(method, path) || path.starts_with("/f/")
 }
 
 impl From<Identity> for Signer {

@@ -758,17 +758,15 @@ unfinished design, not debt.
   ended. **Delete when:** Paul sets the hold (one constant), or the
   turn's end is its runtime's word rather than its computer's.
 
-## A computer's turns route is answered and ignored
+## An old bridge's turns route answers 404
 
-- **Shortcut:** `/api/computer/turns` and the bridge's `driver::Turns`
-  that calls it stay while computers run images whose bridge tells its
-  turns: what it opens is not taken, and its end of a turn it told
-  before place-opened turns still ends that turn, so a turn running
-  across that deploy stays held (cell/src/runs_on.rs `turns`).
-- **Risk:** a computer can end early only the turns it told before that
-  release, as it could then; a call a turn, and code nothing else reads.
-  **Delete when:** every computer runs an image whose bridge no longer
-  calls it (FIN-615 PR 8, with bare `for=`).
+- **Shortcut:** the egress answers `/api/computer/turns` 404 (cell/src/computer.rs
+  `egress_api`), so a bridge from before FIN-615 PR 8, which tells its turns
+  there, takes it as nothing to tell (its `unknown_ok`). Sent on through
+  `asked`, someone else's ask could refuse it (403), which that bridge
+  takes as its claim unanswered, and its turn would never run.
+- **Risk:** none but one arm of code that nothing new calls.
+- **Delete when:** every computer runs an image from FIN-615 PR 8 on.
 
 ## A card's answer resumes nothing
 

@@ -1617,7 +1617,7 @@ fn a_question_is_answered_by_the_next_message() {
 
 /// Goal (FIN-720): what the platform wrote for someone (a schedule's fire,
 /// under the chat's key, for its maker) is their ask: its turn names them,
-/// is told as theirs with the proof it came with, and their next message
+/// and their next message
 /// answers its question in words. Invalid: the chat key's own words answer
 /// nothing. Replay: the fire again claims nothing more.
 #[test]
@@ -1631,7 +1631,6 @@ fn a_schedules_fire_is_its_makers_ask() {
     let s = answered(&mut e, s, T0);
     let turn = started(&s).expect("started").turn;
     assert_eq!(e.state().turns[&turn].asker, "npub1skyler", "the maker's ask");
-    assert_eq!(told(&s), vec![Asked { place: chat.into(), asker: Some("npub1skyler".into()), mandate: Some("fm1.skyler".into()), unproven: None }], "told as theirs, with its proof");
     ev(&mut e, Event::Reply { turn: turn.clone(), part: 1, text: "Which bed?".into() }, T0 + 1);
     ev(&mut e, Event::Asked { turn: turn.clone() }, T0 + 2);
     let key = said(&mut e, &a, &v, 2, "npub1talkkey", json!({ "text": "the north one" }), T0 + 3);
@@ -5236,134 +5235,39 @@ fn a_child_holds_even_when_its_parent_waits_on_a_person() {
     assert_eq!(keepalive(&ev(&mut e, Event::Working(false), T0)), Some(false));
 }
 
-// ---- whose ask a turn is (FIN-720) ----
 
-/// The engine's `Told` (this file's is the model world's).
-type Asked = super::Told;
-
-/// What each claim tells the agent's fragment of its turn (`Told`), in the
-/// claim's order.
-fn told(s: &Step) -> Vec<Asked> {
-    s.effects.iter().filter_map(|x| match x { Effect::Claim { told, .. } => Some(told.clone()), _ => None }).collect()
-}
-
-/// Goal (FIN-720): a turn is told to its agent's fragment as whose ask it
-/// is, with the proof its record carried, before it is run: someone
-/// else's as them, with their mandate; its owner's as theirs; app code's
-/// as no one's, and with no proof even if one came. Invalid: a record of
-/// someone else's with no mandate is told as theirs, unproven (the
-/// fragment holds that turn to less, never to more). Replay: the same
-/// record again claims nothing more.
+/// Goal (FIN-615, PR 16a): a hand-off's start names whose ask its words
+/// carried on, as the mandate the place gave beside them says (the place's
+/// word alone: `Turn::carried`), so a page says "Rowan for Skyler (via
+/// Juniper)". Invalid: a hand-off with no mandate names none; a person's
+/// own words are no hand-off, and name none whatever mandate they carry.
 #[test]
-fn a_turn_is_told_as_whose_ask_it_is() {
-    let a = agent("juniper");
-    let v = view(&[&a]);
-    let mut e = commanded(std::slice::from_ref(&a), LIFE);
-    let chat = "talk--k3x9".to_string();
-    let record = |seq: u64, principal: &str, mandate: Option<&str>| Record { mandate: mandate.map(str::to_string), ..rec(seq, principal, json!({ "text": "hi" })) };
-    let mut step = |r: Record, now: u64| {
-        let s = e.step(Input::Record { agent: a.fragment.clone(), fragment: chat.clone(), record: r, view: Some(v.clone()), since: 0 }, now);
-        let s = answered(&mut e, s, now);
-        // end it, so the next is claimed
-        if let Some(t) = started(&s) {
-            let ended = e.step(heard(Event::End { turn: t.turn.clone(), outcome: Outcome::Idle }), now);
-            answered(&mut e, ended, now);
-        }
-        told(&s)
-    };
-    let theirs = step(record(1, "npub1skyler", Some("fm1.theirs")), T0 + 1);
-    assert_eq!(theirs, vec![Asked { place: chat.clone(), asker: Some("npub1skyler".into()), mandate: Some("fm1.theirs".into()), unproven: None }], "someone else's, as them, with their proof");
-    let bare = step(record(2, "npub1skyler", None), T0 + 2);
-    let cause = records::Cause { fragment: chat.clone(), channel: "chat".into(), seq: 2 };
-    assert_eq!(bare, vec![Asked { place: chat.clone(), asker: Some("npub1skyler".into()), mandate: None, unproven: Some(cause) }], "theirs, its proof to be read");
-    let owner = step(record(3, "npub1paul", Some("fm1.owner")), T0 + 3);
-    assert_eq!(owner, vec![Asked { place: chat.clone(), asker: Some("npub1paul".into()), mandate: Some("fm1.owner".into()), unproven: None }], "its owner's own");
-    let owners = step(record(4, "npub1paul", None), T0 + 4);
-    assert!(owners.iter().all(|t| t.unproven.is_none()), "its owner's own needs no proof read: `for` is theirs: {owners:?}");
-    let code = step(Record { author: Some(records::CODE.into()), ..record(5, "npub1skyler", Some("fm1.code")) }, T0 + 5);
-    assert!(code.iter().all(|t| t.asker.is_none() && t.mandate.is_none() && t.unproven.is_none()), "app code's is no one's, with no proof: {code:?}");
-    let again = step(record(1, "npub1skyler", Some("fm1.theirs")), T0 + 6);
-    assert!(again.is_empty(), "a record heard again claims nothing more: {again:?}");
-}
-
-/// Goal (FIN-720): a hand-off carries on the ask it came from. Another
-/// agent of this computer's words are no ask of their own (being its
-/// owner's agent's words): Rowan's turn, from Juniper's reply in a turn
-/// Skyler asked, is told as Skyler's, unproven (Skyler's mandate names
-/// Juniper); from a turn Paul asked, as Paul's, even read after that turn
-/// was let go; from words no known turn was said in, or naming a turn that
-/// is not Juniper's own in that chat (running elsewhere, or another
-/// agent's), as no one's. Its owner's own words to Rowan are still Paul's.
-#[test]
-fn a_hand_off_carries_on_the_ask_it_came_from() {
+fn a_hand_offs_start_names_the_ask_its_place_carried() {
     let (j, r) = (agent("juniper"), agent("rowan"));
     let v = view(&[&j, &r]);
     let mut e = engine(&[j.clone(), r.clone()]);
     let talk = "talk--k3x9";
-    let handed = |e: &mut Engine, seq: u64, by: &str, text: &str, turn: &str| -> Vec<Asked> {
-        let rec = rec_at(seq, seq as i64 * 10, by, json!({ "text": text, "to": ["npub1rowan"], "turn": turn, "hop": 1 }));
-        let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: rec, view: Some(v.clone()), since: 0 }, T0 + seq);
-        let said = told(&answered(e, s, T0 + seq));
-        // over, so the next one Rowan is handed starts
-        let rt = records::turn_id(&r.fragment, talk, records::CHAT, seq);
-        if e.state().turns.get(&rt).is_some_and(Turn::active) {
-            let ended = e.step(heard(Event::End { turn: rt, outcome: Outcome::Idle }), T0 + seq);
-            answered(e, ended, T0 + seq);
+    let skyler = "npub1skyler".to_string();
+    let carried = format!("fm1.{skyler}.npub1rowan.npub1talk.chat.1.9.ab");
+    let start = |e: &mut Engine, rec: Record, now: u64| -> Option<Value> {
+        let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: rec, view: Some(v.clone()), since: 0 }, now);
+        let s = answered(e, s, now);
+        let claim = s.effects.iter().find_map(|x| match x { Effect::Claim { turn, body, .. } => Some((turn.clone(), body.clone())), _ => None });
+        let (rt, body) = (claim.as_ref().map(|c| c.0.clone()), claim.map(|c| c.1));
+        if let Some(rt) = rt.filter(|t| e.state().turns.get(t).is_some_and(Turn::active)) {
+            let ended = e.step(heard(Event::End { turn: rt, outcome: Outcome::Idle }), now);
+            answered(e, ended, now);
         }
-        said
+        body
     };
-    let skylers = Record { mandate: Some("fm1.skyler".into()), ..rec_at(1, 10, "npub1skyler", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
-    let jt = to_all(&mut e, &[&j], &v, talk, skylers, T0)[0].0.turn.clone();
-    let on = handed(&mut e, 2, "npub1juniper", "rowan, over to you", &jt);
-    let cause = records::Cause { fragment: talk.into(), channel: records::CHAT.into(), seq: 2 };
-    assert_eq!(on, vec![Asked { place: talk.into(), asker: Some("npub1skyler".into()), mandate: None, unproven: Some(cause) }], "Skyler's ask, carried on: heard live with no proof, its record read once for one");
-    let ended = e.step(heard(Event::End { turn: jt.clone(), outcome: Outcome::Idle }), T0 + 2);
-    answered(&mut e, ended, T0 + 2);
-    let pauls = rec_at(3, 30, "npub1paul", json!({ "text": "ask rowan too", "to": ["npub1juniper"] }));
-    let pt = to_all(&mut e, &[&j], &v, talk, pauls, T0 + 3)[0].0.turn.clone();
-    let on = handed(&mut e, 4, "npub1juniper", "rowan, and this", &pt);
-    assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on");
-    // Paul's turn over and let go before Rowan reads Juniper's words in it
-    // (its end posted first): carried on still
-    let ended = e.step(heard(Event::End { turn: pt.clone(), outcome: Outcome::Idle }), T0 + 4);
-    answered(&mut e, ended, T0 + 4);
-    assert!(!e.state().turns.contains_key(&pt), "Paul's turn let go");
-    let on = handed(&mut e, 6, "npub1juniper", "rowan, after", &pt);
-    assert_eq!(on.iter().map(|t| t.asker.clone()).collect::<Vec<_>>(), vec![Some("npub1paul".into())], "Paul's ask, carried on after its turn was let go");
-    let on = handed(&mut e, 7, "npub1juniper", "rowan, from nowhere", "no-such-turn");
-    assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "no known turn: no one's");
-    // invalid: a turn running now that is not Juniper's own in this chat
-    // (Juniper's in another chat, Rowan's) carries on no one's ask
-    let elsewhere = "elsewhere--k3x9";
-    let ask = |seq: u64, to: &str| Record { mandate: Some("fm1.skyler".into()), ..rec_at(seq, seq as i64 * 10, "npub1skyler", json!({ "text": "and here", "to": [to] })) };
-    let theirs_elsewhere = to_all(&mut e, &[&j], &v, elsewhere, ask(8, "npub1juniper"), T0 + 8)[0].0.turn.clone();
-    let rowans = to_all(&mut e, &[&r], &v, elsewhere, ask(9, "npub1rowan"), T0 + 9)[0].0.turn.clone();
-    for (seq, named, said) in [(10, &theirs_elsewhere, "Juniper's turn in another chat"), (11, &rowans, "another agent's turn")] {
-        assert!(e.state().turns.get(named.as_str()).is_some_and(Turn::active), "{said}: running");
-        let on = handed(&mut e, seq, "npub1juniper", "rowan, as if", named);
-        assert_eq!(on.iter().map(|t| (t.asker.clone(), t.mandate.clone())).collect::<Vec<_>>(), vec![(None, None)], "{said}: no one's");
+    let handed = Record { mandate: Some(carried.clone()), ..rec_at(1, 10, "npub1juniper", json!({ "text": "rowan, over to you", "to": ["npub1rowan"], "hop": 1 })) };
+    let on = start(&mut e, handed, T0 + 1).expect("a hand-off starts");
+    assert_eq!(on["carried"], json!(skyler), "the ask its place carried: {on}");
+    let bare = rec_at(2, 20, "npub1juniper", json!({ "text": "rowan, and this", "to": ["npub1rowan"], "hop": 1 }));
+    let on = start(&mut e, bare, T0 + 2).expect("a hand-off starts");
+    assert!(on.get("carried").is_none(), "no mandate beside it, none named: {on}");
+    let own = Record { mandate: Some(carried), ..rec_at(3, 30, &skyler, json!({ "text": "rowan, please", "to": ["npub1rowan"] })) };
+    if let Some(on) = start(&mut e, own, T0 + 3) {
+        assert!(on.get("carried").is_none(), "a person's own words are no hand-off: {on}");
     }
-}
-
-/// Goal (FIN-615, PR 16a): a hand-off whose record carries its place's
-/// mandate for the agent asked (its owner's own ask, carried on between its
-/// agents) is told with that proof, read no more, and its start names whose
-/// ask it carries on, as the mandate says, beside the agent that said it:
-/// "Rowan is working for Paul (via Juniper)". One heard live with none is
-/// read once for one (`a_hand_off_carries_on_the_ask_it_came_from`).
-#[test]
-fn a_hand_off_its_place_carried_is_told_with_that_proof() {
-    let (j, r) = (agent("juniper"), agent("rowan"));
-    let v = view(&[&j, &r]);
-    let mut e = engine(&[j.clone(), r.clone()]);
-    let talk = "talk--k3x9";
-    let paul = Record { mandate: Some("fm1.npub1paul.npub1juniper.npub1room.chat.1.99.mark".into()), ..rec_at(1, 10, "npub1paul", json!({ "text": "ask rowan", "to": ["npub1juniper"] })) };
-    let _ = to_all(&mut e, &[&j], &v, talk, paul, T0);
-    let carried = "fm1.npub1paul.npub1rowan.npub1room.chat.1.99.mark".to_string();
-    let words = Record { mandate: Some(carried.clone()), ..rec_at(2, 20, "npub1juniper", json!({ "text": "rowan, over to you", "to": ["npub1rowan"], "hop": 1 })) };
-    let s = e.step(Input::Record { agent: r.fragment.clone(), fragment: talk.into(), record: words, view: Some(v.clone()), since: 0 }, T0 + 2);
-    let start = s.effects.iter().find_map(|x| match x { Effect::Claim { body, .. } => Some(body.clone()), _ => None }).expect("Rowan's turn claimed");
-    assert_eq!((start["asker"].clone(), start["carried"].clone()), (json!("npub1juniper"), json!("npub1paul")), "its start names whose ask it carries on, as its mandate says: {start}");
-    let on = told(&answered(&mut e, s, T0 + 2));
-    assert!(on.len() == 1 && on[0].mandate.as_deref() == Some(carried.as_str()) && on[0].unproven.is_none(), "told with its place's proof, read no more: {on:?}");
 }

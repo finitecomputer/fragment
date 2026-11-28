@@ -7,7 +7,6 @@
 
 mod support;
 
-use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -84,8 +83,6 @@ fn replies(w: &World, chat: &str) -> Vec<Value> {
 #[tokio::test]
 async fn a_reply() {
     let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    // its computer's start, which each word on its turns names
-    fake.with(|w| w.computer["generation"] = json!(7));
     let chat = fake.chat("talk", &["juniper"]);
     let dir = support::dir("a-reply");
     let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
@@ -105,351 +102,6 @@ async fn a_reply() {
         assert_eq!(w.bodies(&chat, "work", "turn.end")[0]["outcome"], "idle");
     });
     fake.until(WAIT, "the keepalive held, then let go", |w| w.keepalive_log.first() == Some(&true) && w.keepalive_open == 0).await;
-    // its agent's fragment was told the turn ran, whose ask it was, and that
-    // it ended, each as this one bridge life of its computer's start: its
-    // first word takes the agent's turns (FIN-720)
-    fake.until(WAIT, "the turn told ended", |w| w.turns.len() == 3).await;
-    fake.with(|w| {
-        let lives: BTreeSet<&str> = w.turns.iter().filter_map(|(_, _, v)| v["life"].as_str()).collect();
-        assert!(lives.len() == 1 && lives.iter().all(|l| fragment_bridge::records::valid_life(l)), "one life told them all: {lives:?}");
-        let told: Vec<(&str, &str, Value)> = w.turns.iter().map(|(a, m, v)| (a.as_str(), m.as_str(), without_life(v))).collect();
-        assert_eq!(
-            told,
-            vec![
-                ("juniper--k3x9", "DELETE", json!({ "generation": 7, "turn": null })),
-                ("juniper--k3x9", "PUT", json!({ "generation": 7, "turn": turn, "place": chat, "asker": "npub1paul", "mandate": null })),
-                ("juniper--k3x9", "DELETE", json!({ "generation": 7, "turn": turn })),
-            ]
-        );
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): someone else's ask heard live carries no proof (the
-/// platform gives a mandate only beside a record read over its API), so
-/// its turn's record is read once for it, and its agent's fragment is told
-/// the turn as theirs with that proof; its owner's own needs none.
-#[tokio::test]
-async fn someone_elses_ask_is_told_with_its_proof() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    fake.with(|w| w.mandates = true);
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("proof-read");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    let said = fake.say(&chat, &person("skyler"), json!({ "text": "hello juniper" }));
-    let turn = turn_of("juniper", &chat, seq(&said));
-    fake.until(WAIT, "skyler's turn told", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == turn)).await;
-    fake.with(|w| {
-        let opened = w.turns.iter().find(|(_, m, v)| m == "PUT" && v["turn"] == turn).map(|(_, _, v)| without_life(v)).unwrap_or_default();
-        assert_eq!(opened, json!({ "generation": 0, "turn": turn, "place": chat, "asker": "npub1skyler", "mandate": format!("fm1.npub1skyler.{}", seq(&said)) }));
-    });
-    let mine = fake.say(&chat, &person("paul"), json!({ "text": "and mine" }));
-    let mine = turn_of("juniper", &chat, seq(&mine));
-    fake.until(WAIT, "paul's turn told", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == mine)).await;
-    fake.with(|w| {
-        let opened = w.turns.iter().find(|(_, m, v)| m == "PUT" && v["turn"] == mine).map(|(_, _, v)| v.clone()).unwrap_or_default();
-        assert_eq!(opened["mandate"], Value::Null, "its owner's: `for` is theirs, no proof read");
-    });
-    bridge.stop().await;
-}
-
-/// A turns call's body, without the bridge life it names.
-fn without_life(v: &Value) -> Value {
-    let mut v = v.clone();
-    if let Some(o) = v.as_object_mut() {
-        o.remove("life");
-    }
-    v
-}
-
-/// The agent's other turns its fragment held open as `turn`'s runtime first
-/// spoke (its first draft or reply).
-fn ran_beside(w: &World, turn: &str) -> Option<Vec<String>> {
-    w.ran_beside.iter().find(|(t, _)| t == turn).map(|(_, b)| b.clone())
-}
-
-/// Goal (FIN-720): no turn reaches its runtime while one its agent ended
-/// may still be held open, whose mandate would sign the new turn's calls.
-/// Skyler's turn ends and its close is slow to land; Paul's turn, asked
-/// right after, runs only once Skyler's is closed.
-#[tokio::test]
-async fn an_ended_turn_is_closed_before_the_next_runs() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-closed-first");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.turn_close_delay_ms = 600);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
-    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
-    let pauls = turn_of("juniper", &chat, seq(&next));
-    fake.until(WAIT, "paul's turn ran", |w| ran_beside(w, &pauls).is_some()).await;
-    fake.with(|w| assert_eq!(ran_beside(w, &pauls), Some(vec![]), "skyler's turn was closed first: {:?}", w.turns));
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a close the platform refused is told again, at a step
-/// after and before the agent's next turn runs: Skyler's close fails, and
-/// so do its next tries, and Paul's turn runs only once it lands.
-#[tokio::test]
-async fn a_refused_close_is_told_again_before_the_next_turn_runs() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-close-retried");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.fail_turn_closes = 3);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
-    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
-    let pauls = turn_of("juniper", &chat, seq(&next));
-    fake.until(WAIT * 4, "paul's turn answered", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == pauls)).await;
-    fake.with(|w| {
-        let refused = w.turns.iter().filter(|(_, m, _)| m == "REFUSED").count();
-        assert_eq!(refused, 3, "its closes refused: {:?}", w.turns);
-        assert_eq!(ran_beside(w, &pauls), Some(vec![]), "paul's turn ran only once skyler's closed: {:?}", w.turns);
-        assert!(!w.turns_open.contains_key(&skylers), "and it is closed: {:?}", w.turns_open);
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): while an ended turn's close is refused past its tries,
-/// the agent's next turn does not run: it ends, saying why (ask again), so
-/// no call of Paul's is signed with Skyler's mandate.
-#[tokio::test]
-async fn a_turn_does_not_run_while_an_ended_one_is_held() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-held-fails-closed");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.fail_turn_closes = 1_000);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
-    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
-    let pauls = turn_of("juniper", &chat, seq(&next));
-    fake.until(WAIT * 4, "paul's turn ended unrun", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == pauls)).await;
-    fake.with(|w| {
-        let end = w.bodies(&chat, "work", "turn.end").into_iter().find(|b| b["turn"] == pauls).unwrap_or_default();
-        assert_eq!(end["outcome"], "error", "{end}");
-        assert!(end["error"].as_str().is_some_and(|e| e.contains("Ask me again")), "saying why: {end}");
-        // its only words are the bridge's, saying why: its runtime never had it
-        let said: Vec<String> = replies(w, &chat).iter().filter(|r| r["turn"] == pauls).filter_map(|r| r["text"].as_str().map(str::to_string)).collect();
-        assert!(said.iter().all(|t| !t.starts_with("echo:")), "it never ran: {said:?}");
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a refused close is told again at a later step (a tick's
-/// too), no new turn needed: while any other turn of the agent's runs, an
-/// ended one held open would sign its calls.
-#[tokio::test]
-async fn a_refused_close_is_told_again_at_a_later_step() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-close-ticked");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.fail_turn_closes = 1);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn ended", |w| w.bodies(&chat, "work", "turn.end").iter().any(|b| b["turn"] == skylers)).await;
-    fake.until(WAIT * 2, "its close told again, and taken", |w| w.turns.iter().any(|(_, m, _)| m == "REFUSED") && !w.turns_open.contains_key(&skylers)).await;
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): an open whose answer was lost is still told ended:
-/// Skyler's turn told open, the platform's answer lost (as a refusal), and
-/// the turn stopped before it runs; it is told ended, so Paul's turn runs
-/// with no turn of Skyler's held beside it.
-#[tokio::test]
-async fn an_open_whose_answer_was_lost_is_still_told_ended() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-open-lost");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.lose_turn_opens = 1);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn held open, its answer lost", |w| w.turns_open.contains_key(&skylers)).await;
-    fake.say(&chat, &person("skyler"), json!({ "kind": "stop", "turn": skylers }));
-    fake.until(WAIT * 2, "skyler's turn told ended", |w| !w.turns_open.contains_key(&skylers)).await;
-    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
-    let pauls = turn_of("juniper", &chat, seq(&next));
-    fake.until(WAIT * 2, "paul's turn ran", |w| ran_beside(w, &pauls).is_some()).await;
-    fake.with(|w| assert_eq!(ran_beside(w, &pauls), Some(vec![]), "no turn of skyler's beside paul's: {:?}", w.turns));
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a turn's close is sent only once its open's answer is
-/// back, so it never lands before the open it ends: Skyler's turn is
-/// stopped while its open is still on its way, and is closed after it,
-/// held open nowhere.
-#[tokio::test]
-async fn a_turn_stopped_while_told_open_is_closed_after_its_open() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("turn-stopped-opening");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.turn_open_delay_ms = 800);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's turn claimed", |w| w.bodies(&chat, "work", "turn.start").iter().any(|b| b["turn"] == skylers)).await;
-    fake.say(&chat, &person("skyler"), json!({ "kind": "stop", "turn": skylers }));
-    fake.until(WAIT, "its open taken", |w| w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == skylers)).await;
-    fake.until(WAIT * 2, "then its close", |w| !w.turns_open.contains_key(&skylers) && w.turns.iter().any(|(_, m, v)| m == "DELETE" && v["turn"] == skylers)).await;
-    fake.with(|w| {
-        let order: Vec<&str> = w.turns.iter().filter(|(_, _, v)| v["turn"] == skylers).map(|(_, m, _)| m.as_str()).collect();
-        assert_eq!(order.first(), Some(&"PUT"), "the open landed first: {order:?}");
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a new bridge life takes its agent's turns: one the last
-/// life left open (a crash) is forgotten at this life's first word, even
-/// when the start's own word was refused (which life speaks is the cell's:
-/// `mandate::heard`).
-#[tokio::test]
-async fn a_new_life_takes_its_agents_turns() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    let old = "0".repeat(32);
-    fake.with(|w| {
-        w.turns_open.insert("stale0000000000000000000".into(), ("juniper--k3x9".into(), old.clone()));
-        w.turn_lives.insert("juniper--k3x9".into(), vec![(old.clone(), 0)]);
-        w.fail_turn_closes = 1;
-    });
-    let dir = support::dir("life-takes-turns");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    let said = fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
-    let pauls = turn_of("juniper", &chat, seq(&said));
-    fake.until(WAIT * 2, "paul's turn ran", |w| ran_beside(w, &pauls).is_some()).await;
-    fake.with(|w| {
-        assert_eq!(w.turns.first().map(|(_, m, _)| m.as_str()), Some("REFUSED"), "the start's word refused: {:?}", w.turns);
-        assert_eq!(ran_beside(w, &pauls), Some(vec![]), "the last life's turn forgotten at this life's first word: {:?}", w.turns);
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a turn stopped while its claim is in flight is never
-/// told open: its proof would sign its agent's other calls as Skyler's.
-/// It is held from its claim, and told open only while still held. Paul's
-/// next message in the chat is claimed in the same lane after it, so once
-/// his turn has run, Skyler's would have been told.
-#[tokio::test]
-async fn a_turn_stopped_while_claimed_is_never_told_open() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.add_member(&chat, &person("skyler"), "editor");
-    let dir = support::dir("stopped-while-claimed");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.with(|w| w.work_post_delay_ms = 2_000);
-    let first = fake.say(&chat, &person("skyler"), json!({ "text": "first" }));
-    let skylers = turn_of("juniper", &chat, seq(&first));
-    fake.until(WAIT, "skyler's claim on its way", |w| w.calls.iter().any(|c| c.starts_with("POST") && c.ends_with("/channels/work"))).await;
-    fake.say(&chat, &person("skyler"), json!({ "kind": "stop", "turn": skylers }));
-    let next = fake.say(&chat, &person("paul"), json!({ "text": "next" }));
-    let pauls = turn_of("juniper", &chat, seq(&next));
-    fake.until(WAIT * 3, "paul's turn ran, claimed after skyler's", |w| ran_beside(w, &pauls).is_some()).await;
-    fake.with(|w| {
-        assert!(!w.turns.iter().any(|(_, m, v)| m == "PUT" && v["turn"] == skylers.as_str()), "skyler's stopped turn never told open: {:?}", w.turns);
-        assert_eq!(ran_beside(w, &pauls), Some(vec![]));
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a turn let go while it is made ready never reaches its
-/// runtime: its proof is its own. Juniper's turn is told open, then, while
-/// its file downloads, Juniper leaves the chat: the turn is let go and told
-/// ended, and its download over, it is not run (its `fetch` never made),
-/// though no ended turn is held. Before, it ran as no one's ask. Juniper's
-/// next turn, in another chat, comes after it in its runtime's lane: once
-/// that one is answered, the let-go one would have run.
-#[tokio::test]
-async fn a_turn_let_go_while_made_ready_never_runs() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    let other = fake.chat("other", &["juniper"]);
-    let bytes = bytes::Bytes::from_static(b"hello file");
-    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
-    fake.with(|w| {
-        w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone()));
-        w.blob_get_delay_ms = 3_000;
-    });
-    let dir = support::dir("let-go-made-ready");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 3).await;
-    let text = format!("fetch {}/ran-after-let-go with x in x-test", fake.url());
-    let said = fake.say(&chat, &person("paul"), json!({ "text": text, "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "text/plain", "name": "a.txt" }] }));
-    let turn = turn_of("juniper", &chat, seq(&said));
-    fake.until(WAIT, "its turn told open, its file downloading", |w| w.turns_open.contains_key(&turn) && w.calls.iter().any(|c| c.contains("/blobs/"))).await;
-    fake.with(|w| w.fragments.get_mut(&chat).unwrap().members.retain(|m| m.principal != "npub1juniper"));
-    fake.drop_sockets();
-    fake.until(WAIT, "the turn let go and told ended", |w| !w.turns_open.contains_key(&turn) && w.turns.iter().any(|(_, m, v)| m == "DELETE" && v["turn"] == turn.as_str())).await;
-    fake.say(&other, &person("paul"), json!({ "text": "hi" }));
-    fake.until(WAIT * 2, "its next turn answered, behind the let-go one", |w| replies(w, &other).len() == 1).await;
-    fake.with(|w| assert!(!w.calls.iter().any(|c| c.contains("/ran-after-let-go")), "never run: {:?}", w.calls));
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): a retired bridge life runs no turn. A life of a newer
-/// start holds the agent's turns, so this one's word is refused (409), each
-/// naming its start: its own start's take, and its turn's open, the turn
-/// asked again and never run. Before, a retired word was answered as heard,
-/// and the turn ran with no proof held for it.
-#[tokio::test]
-async fn a_retired_life_runs_no_turn() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    let chat = fake.chat("talk", &["juniper"]);
-    fake.with(|w| {
-        w.turn_lives.insert("juniper--k3x9".into(), vec![("f".repeat(32), 5)]);
-        w.computer["generation"] = json!(4);
-    });
-    let dir = support::dir("life-retired");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    let said = fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
-    let pauls = turn_of("juniper", &chat, seq(&said));
-    let refused = |w: &World| w.turns.iter().filter(|(_, m, v)| m == "RETIRED" && v["turn"] == pauls.as_str()).count();
-    fake.until(WAIT * 3, "its open refused, and asked again", |w| refused(w) >= 2).await;
-    fake.with(|w| {
-        assert!(w.turns.iter().any(|(_, m, v)| m == "RETIRED" && v["turn"].is_null() && v["generation"] == 4), "its start's take refused, naming its start: {:?}", w.turns);
-        assert_eq!(ran_beside(w, &pauls), None, "never ran: {:?}", w.turns);
-        assert!(replies(w, &chat).is_empty());
-    });
-    bridge.stop().await;
-}
-
-/// Goal (FIN-720): on a platform from before the turns route (404), a
-/// turn is told nothing and runs as ever: a new image never stalls on an
-/// older cell.
-#[tokio::test]
-async fn a_platform_from_before_is_told_no_turns() {
-    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
-    fake.with(|w| w.no_turns = true);
-    let chat = fake.chat("talk", &["juniper"]);
-    let dir = support::dir("no-turns");
-    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
-    following(&fake, 2).await;
-    fake.say(&chat, &person("paul"), json!({ "text": "hi" }));
-    fake.until(WAIT, "a reply", |w| !replies(w, &chat).is_empty() && !w.bodies(&chat, "work", "turn.end").is_empty()).await;
-    fake.with(|w| assert!(w.turns.is_empty(), "told nothing: {:?}", w.turns));
     bridge.stop().await;
 }
 
@@ -3274,4 +2926,40 @@ async fn a_late_card_with_unavailable_history_runs_nothing() {
         });
         bridge.stop().await;
     }
+}
+
+/// Goal (FIN-720): a turn let go while it is made ready never reaches its
+/// runtime. Juniper claims Paul's turn, then, while its file downloads,
+/// Juniper leaves the chat: its engine lets the turn go (its place closed
+/// its ask, so its calls would be held to nothing), and its download over,
+/// it is not run (its `fetch` never made). Juniper's next turn, in another
+/// chat, comes after it in its runtime's lane: once that one is answered,
+/// the let-go one would have run.
+#[tokio::test]
+async fn a_turn_let_go_while_made_ready_never_runs() {
+    let fake = Fake::start("127.0.0.1:0", &["juniper"]).await;
+    let chat = fake.chat("talk", &["juniper"]);
+    let other = fake.chat("other", &["juniper"]);
+    let bytes = bytes::Bytes::from_static(b"hello file");
+    let sha = records::hex(&<sha2::Sha256 as sha2::Digest>::digest(&bytes));
+    fake.with(|w| {
+        w.fragments.get_mut(&chat).unwrap().blobs.insert(sha.clone(), ("text/plain".into(), bytes.clone()));
+        w.blob_get_delay_ms = 5_000;
+    });
+    let dir = support::dir("let-go-made-ready");
+    let bridge = support::start(support::config(&fake.url(), &dir, support::settings()), support::script());
+    following(&fake, 3).await;
+    let text = format!("fetch {}/ran-after-let-go with x in x-test", fake.url());
+    let said = fake.say(&chat, &person("paul"), json!({ "text": text, "attachments": [{ "sha256": sha, "size": bytes.len(), "type": "text/plain", "name": "a.txt" }] }));
+    let turn = turn_of("juniper", &chat, seq(&said));
+    fake.until(WAIT, "its turn claimed, its file downloading", |w| w.bodies(&chat, "work", "turn.start").iter().any(|b| b["turn"] == turn.as_str()) && w.calls.iter().any(|c| c.contains("/blobs/"))).await;
+    let before = fake.with(|w| w.calls.len());
+    fake.with(|w| w.fragments.get_mut(&chat).unwrap().members.retain(|m| m.principal != "npub1juniper"));
+    fake.drop_sockets();
+    // its bridge reads the chat again, and finds itself gone from it
+    fake.until(WAIT, "the chat read again", |w| w.calls[before..].iter().any(|c| c.contains(&format!("/api/f/{chat}/")) && !c.contains("/blobs/"))).await;
+    fake.say(&other, &person("paul"), json!({ "text": "hi" }));
+    fake.until(WAIT * 2, "its next turn answered, behind the let-go one", |w| replies(w, &other).len() == 1).await;
+    fake.with(|w| assert!(!w.calls.iter().any(|c| c.contains("/ran-after-let-go")), "never run: {:?}", w.calls));
+    bridge.stop().await;
 }

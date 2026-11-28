@@ -45,16 +45,6 @@ pub enum ApiError {
     TooLarge,
 }
 
-/// A call a platform from before has no route for (404) did nothing, and
-/// owes nothing: the turns it is told, which it does not take.
-fn unknown_ok(answered: Result<Value, ApiError>) -> Result<(), ApiError> {
-    match answered {
-        Ok(_) => Ok(()),
-        Err(e) if e.status() == Some(404) => Ok(()),
-        Err(e) => Err(e),
-    }
-}
-
 impl ApiError {
     /// The agent is not (or no longer) in that fragment, or it is gone.
     pub fn gone(&self) -> bool {
@@ -662,27 +652,6 @@ impl Api {
         let why: String = why.chars().take(500).collect();
         let v: Value = self.json(Method::POST, "/unusable", None, Some(json!({ "why": why, "blank": blank, "unmountable": unmountable }))).await?;
         Ok(v["taken"] == true)
-    }
-
-    /// `PUT /api/computer/turns {life, generation, turn, place, asker?, mandate?}`, as the
-    /// agent (docs/computers.md, "The fragment API"): a turn its agent's
-    /// fragment is told it runs, so the agent's calls for its owner carry
-    /// whose ask they are. A platform from before has no such route (404:
-    /// as the agent, it goes on to the platform's API, which has none), and
-    /// is told nothing.
-    pub async fn turn_open(&self, agent: &str, (life, start): (&str, u64), turn: &str, told: &crate::engine::Told) -> Result<(), ApiError> {
-        let body = json!({ "life": life, "generation": start, "turn": turn, "place": told.place, "asker": told.asker, "mandate": told.mandate });
-        unknown_ok(self.json::<Value>(Method::PUT, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
-    }
-
-    /// `DELETE /api/computer/turns {life, generation, turn?}`, as the
-    /// agent: a turn ended, or, with none named, its agent's turns taken by
-    /// this life (a bridge's start: every other life's forgotten). Each call
-    /// names the bridge life it is and its computer's start; one from a life
-    /// since retired is refused (409), and changes nothing.
-    pub async fn turn_close(&self, agent: &str, (life, start): (&str, u64), turn: Option<&str>) -> Result<(), ApiError> {
-        let body = json!({ "life": life, "generation": start, "turn": turn });
-        unknown_ok(self.json::<Value>(Method::DELETE, "/api/computer/turns", Some(name(agent)?), Some(body)).await)
     }
 
     /// `POST /api/computer/door {agent, door, nonce, key}`: a link's ticket

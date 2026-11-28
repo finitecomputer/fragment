@@ -245,25 +245,29 @@ that ask carried on, by the same words and day; on anyone else's ask, and
 another owner's agent's words, the posting agent's own, unproven, lending
 nothing (Ben's ask would otherwise reach what another of its agents' cap,
 grants and lend reach). An agent removed has its asks there closed.
-A computer's own word on its turns (`/api/computer/turns`) opens nothing;
-a turn it told before the release that brought this one still holds, until
-its bridge ends it or a new bridge life starts.
+A computer tells nothing of its turns: no route takes its word on them.
 
-**Every call that is not its presence is held** to those turns. The
-egress signs the agent's presence in its chats as it came
-(`mandate::presence`, one list: its own fragment; `__live`, `__people`;
-its fragment list; a fragment's status, members, channels and
-subscriptions, read; a channel's pages, newest and posts, drafts,
-blobs), never `for` anyone. A wake subscription never reaches it: the
-egress asks the fragment for it itself. Any other call, `for` its
-owner or as itself, carries the proof its open turns hold
-(`mandate::proof`): none open, or only its owner's, as it came (`for`
-its owner with their newest mandate in its place); one other person's,
-each proven, their newest mandate in place of `for` (refused, 400, where
-`for` is not honored); more than one other person's, or one unproven,
-the agent as itself in those turns' places alone, and 403 anywhere else.
-The invites waiting on its owner's email take `for` and no mandate:
-there its owner's own ask keeps `for`, and anyone else's is 403. A
+**Every call that is not its presence is held** to those turns, and its
+computer says only what a call is for: `for=<its owner>`, their work, or
+none, its own (anyone else in `for` is 403). The egress signs the agent's
+presence in its chats as it came, as itself (`mandate::presence`, one
+list: its own fragment; `__live`, `__people`; its fragment list; a
+fragment's status, members, channels and subscriptions, read; a channel's
+pages and newest; posts and drafts on `chat` and `work`, where it speaks;
+blobs), unless its computer names its owner there: then it is their work.
+A wake subscription never reaches it: the egress asks the fragment for it
+itself. Its open turns then say whose any other call may be
+(`mandate::signs`, the one rule, over `mandate::proof`). One other
+person's, each proven: their newest mandate in place of `for`, whatever
+its computer said (refused, 400, where `for` is not honored). More than
+one other person's, or one unproven: the agent as itself in those turns'
+places alone, and 403 anywhere else. None open, or only its owner's: its
+owner's work goes `for` its owner (by their newest mandate while their
+turn is open, so what it says there carries their ask on), and so does a
+call to a route that takes whom it acts for (`mandate::honors_for`),
+named or not; anything else as itself. The invites waiting on its
+owner's email take `for` and no mandate: there it goes `for` its owner
+while no one else's turn is open, and on anyone else's is 403. A
 fragment's site (`/f/…`) takes neither `for` nor a mandate (one is 400
 there): on someone else's ask the agent reaches one only in their turns'
 places, as itself, and 403 anywhere else. Since

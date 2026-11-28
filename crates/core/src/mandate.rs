@@ -359,11 +359,17 @@ pub fn starts_turn(body: &str) -> bool {
 
 /// Whether an agent's call is its presence in its chats, which stays its
 /// own and carries no one's mandate: its live socket, and a fragment's
-/// channels (their list, records, posts, drafts, newest), blobs, roster
+/// channels (their list, records, newest; posts and drafts on `chat` and
+/// `work`, where it speaks: an app's own channel is work), blobs, roster
 /// (`members`, `__people`), status and subscriptions; its own fragment
 /// list; and anything on its own fragment (`own`, its name), its own
 /// state. Every other call is work, held to whose ask is open (FIN-720):
 /// this one list decides, and a route not on it is work.
+/// The channels an agent speaks on as itself in a chat: its words, and its
+/// turns' records. A post anywhere else (an app's own channel) is work,
+/// for whoever asked.
+const SPOKEN: [&str; 2] = ["chat", "work"];
+
 pub fn presence(method: &str, path: &str, own: &str) -> bool {
     let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
     let reads = matches!(method, "GET" | "HEAD");
@@ -373,9 +379,9 @@ pub fn presence(method: &str, path: &str, own: &str) -> bool {
         ["f", _, "__people"] => reads,
         ["api", "fragments"] => reads,
         ["api", "f", _, "status" | "members" | "channels" | "subscriptions"] => reads,
-        ["api", "f", _, "channels", _] => reads || method == "POST",
+        ["api", "f", _, "channels", c] => reads || (method == "POST" && SPOKEN.contains(c)),
         ["api", "f", _, "channels", _, "newest"] => reads,
-        ["api", "f", _, "channels", _, "draft"] => method == "PUT",
+        ["api", "f", _, "channels", c, "draft"] => method == "PUT" && SPOKEN.contains(c),
         ["api", "f", _, "blobs", ..] => reads || method == "PUT",
         _ => false,
     }
@@ -435,6 +441,97 @@ pub fn proof<'a>(owner: &str, turns: &[Turn<'a>]) -> Proof<'a> {
             places.dedup();
             Proof::Itself(places)
         }
+    }
+}
+
+/// Whether a route takes whom an agent acts for (`for`, or a mandate in its
+/// place): a fragment's API, the fragment list, the invites waiting on an
+/// owner's email, a search across fragments, a move's copy. The router
+/// refuses either anywhere else (lib.rs `FOR_HONORED`). The one list: the
+/// CLI names its owner by it (cli/src/api.rs `honors_for`).
+pub fn honors_for(method: &str, path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    let stage_copy = method == "POST" && p.starts_with("/api/migrations/stages/") && p.ends_with("/copy");
+    p.starts_with("/api/f/") || p == "/api/fragments" || p == "/api/invites" || p.starts_with("/api/invites/") || (method == "POST" && p == "/api/search") || stage_copy
+}
+
+/// One of an agent's calls, as its egress reads it (`signs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Call<'a> {
+    /// Its computer says it is its owner's work (`for=<its owner>`): what
+    /// the call is for, never whose it may be.
+    pub for_owner: bool,
+    /// Its presence in its chats (`presence`): its own, unless its
+    /// computer says it is its owner's.
+    pub presence: bool,
+    /// The fragment it goes to, by name, when it goes to one.
+    pub fragment: Option<&'a str>,
+    /// It goes to that fragment's site (`/f/<name>/…`), which takes no
+    /// one's word but its signer's.
+    pub site: bool,
+    /// Its route takes whom it acts for (`honors_for`).
+    pub honors_for: bool,
+    /// The platform's invites, waiting on its owner's email.
+    pub invites: bool,
+    /// Its route is what only its owner does by it: sharing
+    /// (`permit::reserved`: members, invites, visibility, a link's
+    /// rotation, an address) or answering the invites waiting on their
+    /// email. Its owner's work only as its computer says so, never
+    /// unnamed (decision 64 lends their role at most an editor's).
+    pub reserved: bool,
+}
+
+/// How an agent's egress signs a call (FIN-615): its computer says what a
+/// call is for (`Call::for_owner`), and the turns its places opened say
+/// what it may be (`proof`). Whom an app is told asked is the asker of the
+/// narrowest open turn, and with none its owner (decision 64: the agent
+/// and its owner are one entity); the agent is credited beside them always.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Signs<'a> {
+    /// As the agent itself: its presence, a site, or a route that takes no
+    /// one's word.
+    Itself,
+    /// For its owner (`for`): no one else's turn is open, nor its owner's.
+    ForOwner,
+    /// By a mandate: someone else's, theirs the one open turn; or its
+    /// owner's own, while their turn is open, so what it says there carries
+    /// their ask (a hand-off).
+    Mandate(Held<'a>),
+    /// Refused, and why.
+    Refused(&'static str),
+}
+
+/// `signs`'s rule (`Signs`), the one place it is decided.
+pub fn signs<'a>(proof: &Proof<'a>, call: Call<'_>) -> Signs<'a> {
+    let in_places = |places: &[&str]| call.fragment.is_some_and(|f| places.contains(&f));
+    if call.presence && !call.for_owner {
+        return Signs::Itself;
+    }
+    if call.site {
+        return match proof {
+            Proof::Bare | Proof::Owner(_) => Signs::Itself,
+            Proof::Asker { at, .. } if in_places(&at.iter().map(|(p, _)| *p).collect::<Vec<_>>()) => Signs::Itself,
+            Proof::Itself(places) if in_places(places) => Signs::Itself,
+            Proof::Asker { .. } | Proof::Itself(_) => Signs::Refused("on someone else's ask, an agent reaches a fragment's site only in the chats they asked it in: call its API (/api/f/…) to act as them"),
+        };
+    }
+    if call.invites && call.for_owner {
+        return match proof {
+            Proof::Bare | Proof::Owner(_) => Signs::ForOwner,
+            Proof::Asker { .. } | Proof::Itself(_) => Signs::Refused("an agent answers its owner's invites for its owner alone, never on someone else's ask"),
+        };
+    }
+    // its owner's work: its computer says so, or its route takes whom it
+    // acts for (decision 64: as itself on its owner's own fragments, it has
+    // their role, at most an editor's), but for what only its owner does
+    let owners = call.for_owner || (call.honors_for && !call.reserved);
+    match proof {
+        Proof::Bare if owners => Signs::ForOwner,
+        Proof::Owner(held) if owners => Signs::Mandate(*held),
+        Proof::Bare | Proof::Owner(_) => Signs::Itself,
+        Proof::Asker { held, .. } => Signs::Mandate(*held),
+        Proof::Itself(places) if in_places(places) => Signs::Itself,
+        Proof::Itself(_) => Signs::Refused("more than one other person has asked this agent, or one without proof: it acts only in their chats, as itself, until those turns end"),
     }
 }
 
@@ -515,6 +612,79 @@ mod tests {
         assert_eq!(kept("fm1.not.a.mandate"), None);
     }
 
+    /// Goal (FIN-615 PR 8): its computer says what a call is for (its
+    /// owner's work, `for=<its owner>`, or its own), and the turns its
+    /// places opened say whose it may be: the narrowest open turn's asker;
+    /// with none, its owner; on its owner's own turn, their mandate, so a
+    /// hand-off carries their ask. A route that takes whom it acts for is
+    /// its owner's work unasked (decision 64). The obvious cases, as the
+    /// egress signs each.
+    #[test]
+    fn what_a_call_is_for_is_its_computers_word_and_whose_its_turns() {
+        let (ana, ben) = (crate::npub::display(&"a".repeat(64)), crate::npub::display(&"b".repeat(64)));
+        let bens = Held { text: "fm1.ben", until: 9, place: "npub1chat" };
+        let anas = Held { text: "fm1.ana", until: 9, place: "npub1dm" };
+        fn in_chat<'a>(asker: &'a str, mandate: Option<Held<'a>>, place: &'a str) -> Turn<'a> {
+            Turn { place, asker, mandate }
+        }
+        // the turns borrow their askers' names for the test's whole life
+        let (ana_s, ben_s): (&'static str, &'static str) = (String::leak(ana.clone()), String::leak(ben.clone()));
+        let none: Vec<Turn> = vec![];
+        let anas_turn = vec![in_chat(ana_s, Some(anas), "dm--k3x9")];
+        let bens_turn = vec![in_chat(ana_s, Some(anas), "dm--k3x9"), in_chat(ben_s, Some(bens), "talk--k3x9")];
+        let two = vec![in_chat(ben_s, Some(bens), "talk--k3x9"), in_chat("npub1carol", None, "talk--k3x9")];
+        let owner = ana.clone();
+        let proof = |turns: &[Turn<'static>]| super::proof(&owner, turns);
+        // Calories' "log my food", its computer naming its owner or not: the app is told whom it is for
+        let app = Call { for_owner: false, presence: false, fragment: Some("calories--k3x9"), site: false, honors_for: true, invites: false, reserved: false };
+        for app in [app, Call { for_owner: true, ..app }] {
+            assert_eq!(signs(&proof(&none), app), Signs::ForOwner, "no turn open (a routine, the skill sync, a delegate): for its owner");
+            assert_eq!(signs(&proof(&anas_turn), app), Signs::Mandate(anas), "on its owner's own ask: by their mandate");
+            assert_eq!(signs(&proof(&bens_turn), app), Signs::Mandate(bens), "on Ben's ask, beside its owner's: as Ben, whatever its computer said");
+            assert!(matches!(signs(&proof(&two), app), Signs::Refused(_)), "two others' asks, or one unproven: outside their chats refused");
+            assert_eq!(signs(&proof(&two), Call { fragment: Some("talk--k3x9"), ..app }), Signs::Itself, "in their chat, as itself");
+        }
+        // presence it says is its own stays its own, whoever asked
+        let post = Call { presence: true, fragment: Some("talk--k3x9"), ..app };
+        for turns in [&none, &anas_turn, &bens_turn, &two] {
+            assert_eq!(signs(&proof(turns), post), Signs::Itself, "its own words in its chat are the agent's own");
+        }
+        // presence it says is its owner's (its owner's list, a status with
+        // their share link, a hand-off's question): theirs while no one
+        // else's turn is open, and held to that turn while one is
+        let theirs = Call { for_owner: true, ..post };
+        assert_eq!(signs(&proof(&none), theirs), Signs::ForOwner);
+        assert_eq!(signs(&proof(&anas_turn), theirs), Signs::Mandate(anas), "a hand-off on its owner's own ask carries it");
+        assert_eq!(signs(&proof(&bens_turn), theirs), Signs::Mandate(bens), "never its owner's on Ben's ask");
+        // a route that takes no one's word goes as itself, but for someone else's ask
+        let notices = Call { for_owner: false, presence: false, fragment: None, site: false, honors_for: false, invites: false, reserved: false };
+        assert_eq!(signs(&proof(&none), notices), Signs::Itself);
+        assert_eq!(signs(&proof(&bens_turn), notices), Signs::Mandate(bens), "Ben's mandate, which that route refuses (400): fail closed");
+        // a site takes its signer's word alone, whatever its computer said
+        let site = Call { site: true, honors_for: false, ..app };
+        for site in [site, Call { for_owner: true, ..site }] {
+            assert_eq!(signs(&proof(&none), site), Signs::Itself);
+            assert!(matches!(signs(&proof(&bens_turn), site), Signs::Refused(_)), "on Ben's ask, a site outside his chats");
+            assert_eq!(signs(&proof(&bens_turn), Call { fragment: Some("talk--k3x9"), ..site }), Signs::Itself, "his chat's own site, as itself");
+        }
+        // what only its owner does (sharing their app, answering their
+        // invites): theirs only as its computer says so, never unnamed
+        let shares = Call { reserved: true, ..app };
+        assert_eq!(signs(&proof(&none), shares), Signs::Itself, "unnamed, as itself: its own membership never shares");
+        assert_eq!(signs(&proof(&none), Call { for_owner: true, ..shares }), Signs::ForOwner, "named, for its owner, as they share by it");
+        assert_eq!(signs(&proof(&bens_turn), Call { for_owner: true, ..shares }), Signs::Mandate(bens), "never its owner's on Ben's ask");
+        // its owner's invites, whose route takes `for` and no mandate
+        let invites = Call { for_owner: true, presence: false, fragment: None, site: false, honors_for: true, invites: true, reserved: true };
+        assert_eq!(signs(&proof(&none), invites), Signs::ForOwner);
+        assert_eq!(signs(&proof(&anas_turn), invites), Signs::ForOwner);
+        assert!(matches!(signs(&proof(&bens_turn), invites), Signs::Refused(_)), "never on someone else's ask");
+        assert_eq!(signs(&proof(&none), Call { for_owner: false, ..invites }), Signs::Itself, "unnamed, its own");
+        // the routes that take whom it acts for
+        for (method, path, takes) in [("GET", "/api/f/x/ops", true), ("POST", "/api/fragments", true), ("GET", "/api/invites", true), ("POST", "/api/search", true), ("GET", "/api/search", false), ("POST", "/api/migrations/stages/s1/copy", true), ("GET", "/api/notices", false), ("GET", "/f/x/page", false), ("POST", "/api/models/v1/chat/completions", false)] {
+            assert_eq!(honors_for(method, path), takes, "{method} {path}");
+        }
+    }
+
     /// Goal (FIN-720): one list says what of an agent's calls is its
     /// presence in its chats, its own; everything else is work, held to
     /// whose ask is open, a route not on the list among it.
@@ -548,6 +718,8 @@ mod tests {
             ("POST", "/api/search"),
             ("PUT", "/api/f/talk--k3x9/members/npub1x"),
             ("DELETE", "/api/f/talk--k3x9/channels/chat"),
+            ("POST", "/api/f/board--k3x9/channels/said"),
+            ("PUT", "/api/f/board--k3x9/channels/said/draft"),
             ("PUT", "/api/f/talk--k3x9/secrets/KEY"),
             ("GET", "/api/f/talk--k3x9/a-route-made-later"),
             ("GET", "/api/identities/me"),
