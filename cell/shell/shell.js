@@ -695,7 +695,8 @@ function relend(only = null) {
   for (const frame of document.querySelectorAll("iframe[data-lends]")) {
     const name = frame.dataset.fragment;
     const now = allowOf(name);
-    if (frame.allow === now || (only ? name !== only : !frame.allow.includes("microphone"))) continue;
+    // lent nothing now: by its whole policy, never a word in it (its origin may say "microphone")
+    if (frame.allow === now || (only ? name !== only : frame.allow === allowOf(name, false))) continue;
     go(frame, frame.dataset.src);
   }
 }

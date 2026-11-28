@@ -306,7 +306,7 @@ fn app_microphone(s: &mut Suite, api: &Api, (owner, owner_session): (&fragment_n
     let allow = allow_of(&mut chrome, &shell, "#frames", &app)?;
     s.ok(
         "an app at a chat's address (`/?chat=`), framed in the middle column, is lent no microphone either",
-        framed && allow.as_str().is_some_and(|a| !a.contains("microphone")),
+        framed && allow == json!(format!("clipboard-write {}", api.site_origin(&app))),
         json!({ "framed": framed, "allow": allow }),
     );
     chrome.close(shell)?;
