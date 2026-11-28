@@ -1,0 +1,14 @@
+{
+  "operations": {
+    "tell": {
+      "kind": "mutation",
+      "role": "viewer",
+      "input": { "type": "object", "required": ["text"], "additionalProperties": false, "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 1000 } } }
+    },
+    "whoami": { "kind": "query", "role": "viewer" }
+  },
+  "channels": {
+    "chat": { "read": "viewer", "post": "viewer" },
+    "work": { "read": "viewer", "post": "viewer", "from": "agent" }
+  }
+}

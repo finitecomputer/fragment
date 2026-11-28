@@ -1080,11 +1080,55 @@ fn move_page_ui(s: &mut Suite, api: &Api, b: &mut crate::browser::Browser, mover
         json!(picked),
     );
 
-    // Upgrade
+    // the routines on the person's one agent's `tasks` (its hello is one),
+    // and the names of their agents and chats
+    let mine = || -> Result<(Vec<Value>, Vec<String>, Vec<String>)> {
+        let list = super::shell::shell(api, session, "GET", "/api/fragments", None, &[])?;
+        let named = |kind: &str| -> Vec<String> { list.body["fragments"].as_array().into_iter().flatten().filter(|f| f["kind"] == kind).filter_map(|f| f["name"].as_str().map(str::to_string)).collect() };
+        let (agents, chats) = (named("agent"), named("chat"));
+        let routines = match agents.as_slice() {
+            [agent] => {
+                let read = super::shell::shell(api, session, "GET", &format!("/api/f/{agent}/channels/tasks"), None, &[])?;
+                let records = read.body["records"].as_array().filter(|_| read.status == 200).with_context(|| format!("its tasks: {read}"))?;
+                records.iter().filter(|r| r["body"]["kind"] == "routine").cloned().collect()
+            }
+            _ => vec![],
+        };
+        Ok((routines, agents, chats))
+    };
+    let under_way = |r: &Value| r["body"]["text"].as_str().is_some_and(|t| t.contains("your upgrade is under way"));
+
+    // Upgrade, its Yes never landing (the page's own call for it refused,
+    // so the server never hears it; FIN-817): its new agent is made, in its
+    // chat, and nothing tells its person their upgrade is under way
+    b.eval(&page, "(() => { let n = 1; const f = window.fetch; window.fetch = (u, o) => (String(u).endsWith('/yes') && n-- > 0 ? Promise.reject(new TypeError('Failed to fetch')) : f(u, o)); return true; })()")?;
     b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
     let making = b.until(&page, &format!("/^Preparing Juniper's upgrade/.test({said})"), agent_wait);
     let _ = b.screenshot(&page, &shots.join("move-making-1280-light.png"));
+    let refused = b.until(&page, &format!("!!document.querySelector('#move-page .form-error') && !document.querySelector('#move-page button.primary').disabled && {row}?.dataset.state === 'open'"), agent_wait);
+    let (routines, agents, chats) = mine()?;
+    s.ok(
+        "Upgrade whose Yes never lands: its new agent is made, in its one chat, the page says so, to try again; the move still open, and its chat says nothing of an upgrade under way (no hello)",
+        refused && agents.len() == 1 && chats.len() == 1 && routines.is_empty(),
+        json!({ "agents": agents, "chats": chats, "routines": routines, "error": b.eval(&page, "document.querySelector('#move-page .form-error')?.textContent")? }),
+    );
+
+    // Upgrade again: the same agent, its Yes, then its hello (asked after
+    // the Yes, never waited for by the page: it may land after the row says
+    // asked)
+    b.eval(&page, "(document.querySelector('#move-page button.primary').click(), true)")?;
     let asked = b.until(&page, &format!("{row}?.dataset.state === 'asked'"), agent_wait);
+    let (mut routines, mut again) = (vec![], vec![]);
+    s.eventually(wait, || {
+        let Ok((r, a, _)) = mine() else { return false };
+        (routines, again) = (r, a);
+        !routines.is_empty()
+    });
+    s.ok(
+        "Upgrade again goes on with that agent, never a second: its Yes lands, and only then its hello, the move's, said once",
+        asked && again == agents && routines.len() == 1 && routines.iter().all(under_way),
+        json!({ "agents": again, "routines": routines }),
+    );
     let moves = api.signed(&s.operator, "GET", "/api/admin/migrations", None)?;
     let m = moves.body["moves"].as_array().and_then(|ms| ms.iter().find(|m| m["old"] == old)).cloned().unwrap_or_default();
     let ledger = super::shell::shell(api, session, "GET", "/api/ledger", None, &[])?;
