@@ -23,6 +23,10 @@
 //! - **An end** (in the append's step): its `turn.end` closes that turn's
 //!   ask and every one it never claimed, each held until its ask's hold
 //!   passed (`limits::TURN_HOLD_MS`); a turn it claims later opens again.
+//! - **Unclaimed** (FIN-825): an ask its agent hasn't claimed within
+//!   `limits::ASK_UNCLAIMED_MS` of its hand-off lets go (its `until`, set
+//!   as it opens), whatever its bridge did with the words; its claim,
+//!   later, opens it again.
 //! - **Told**: each change is a new version of the agent's asks here, and
 //!   its agent fragment is told all of them that are open, one turn an
 //!   asker, each with the place's mandate for it (`calls::TurnsIn`), which
@@ -218,8 +222,16 @@ impl FragmentCell {
         let Some(turn) = body["turn"].as_str().filter(|t| body["kind"] == "turn.end" && valid_op_id(t)) else { return Ok(()) };
         let now = js::now_ms();
         let closed = self.rows(
-            "UPDATE asks SET until = MAX(?, at + ?) WHERE agent = ? AND until IS NULL AND (turn IS NULL OR turn = ?) RETURNING seq",
-            vec![SqlStorageValue::Integer(now), SqlStorageValue::Integer(limits::TURN_HOLD_MS), r.principal.as_str().into(), turn.into()],
+            "UPDATE asks SET until = MIN(COALESCE(until, MAX(?, at + ?)), MAX(?, at + ?)) WHERE agent = ? AND (until IS NULL OR (turn IS NULL AND until > ?)) AND (turn IS NULL OR turn = ?) RETURNING seq",
+            vec![
+                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(limits::TURN_HOLD_MS),
+                SqlStorageValue::Integer(now),
+                SqlStorageValue::Integer(limits::TURN_HOLD_MS),
+                r.principal.as_str().into(),
+                SqlStorageValue::Integer(now),
+                turn.into(),
+            ],
         )?;
         if !closed.is_empty() {
             self.asks_changed(&r.principal, false)?;
@@ -282,18 +294,27 @@ impl FragmentCell {
         }
         // whom its `to` named is read from the record: one trimmed since
         // lets no one else's go (it is not known whom it named)
+        let now = js::now_ms();
         let open: Vec<Let> = if said_kept {
             self.typed(
-                "SELECT agent FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND until IS NULL",
-                vec![CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into()],
+                "SELECT agent FROM asks WHERE channel = ? AND seq = ? AND agent != ? AND turn IS NULL AND (until IS NULL OR until > ?)",
+                vec![CHAT.into(), SqlStorageValue::Integer(seq), agent.as_str().into(), SqlStorageValue::Integer(now)],
             )?
         } else {
             vec![]
         };
         for other in open.into_iter().filter(|o| !named.contains(&o.agent)) {
             self.exec(
-                "UPDATE asks SET until = MAX(?, at + ?) WHERE channel = ? AND seq = ? AND agent = ?",
-                vec![SqlStorageValue::Integer(js::now_ms()), SqlStorageValue::Integer(limits::TURN_HOLD_MS), CHAT.into(), SqlStorageValue::Integer(seq), other.agent.as_str().into()],
+                "UPDATE asks SET until = MIN(COALESCE(until, MAX(?, at + ?)), MAX(?, at + ?)) WHERE channel = ? AND seq = ? AND agent = ?",
+                vec![
+                    SqlStorageValue::Integer(now),
+                    SqlStorageValue::Integer(limits::TURN_HOLD_MS),
+                    SqlStorageValue::Integer(now),
+                    SqlStorageValue::Integer(limits::TURN_HOLD_MS),
+                    CHAT.into(),
+                    SqlStorageValue::Integer(seq),
+                    other.agent.as_str().into(),
+                ],
             )?;
             self.asks_changed(&other.agent, false)?;
         }
@@ -335,10 +356,16 @@ impl FragmentCell {
     }
 
     /// `agent`'s ask of record `seq` of `chat`, opened (`claimed`: by that
-    /// turn), as `ask_of` says whose it is.
+    /// turn), as `ask_of` says whose it is. One not claimed yet holds until
+    /// `limits::ASK_UNCLAIMED_MS` from now (FIN-825: whatever its bridge
+    /// did with the words), and its claim, later, opens it again.
     fn open_ask(&self, agent: &str, seq: i64, ask: &Ask, claimed: Option<&str>) -> CellResult<()> {
+        let until = match claimed {
+            Some(_) => SqlStorageValue::Null,
+            None => SqlStorageValue::Integer(js::now_ms() + self.ask_unclaimed_ms()?),
+        };
         self.exec(
-            "INSERT INTO asks (agent, channel, seq, asker, proven, at, turn, carried) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            "INSERT INTO asks (agent, channel, seq, asker, proven, at, turn, carried, until) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
             vec![
                 agent.into(),
                 CHAT.into(),
@@ -348,8 +375,18 @@ impl FragmentCell {
                 SqlStorageValue::Integer(ask.at),
                 claimed.map_or(SqlStorageValue::Null, Into::into),
                 ask.carried.as_deref().map_or(SqlStorageValue::Null, Into::into),
+                until,
             ],
         )
+    }
+
+    /// How long an ask its agent hasn't claimed holds it: on test fleets,
+    /// what the `unclaimed` lever set (ops.rs `test_fragment`).
+    fn ask_unclaimed_ms(&self) -> CellResult<i64> {
+        if !self.cfg.test_hooks {
+            return Ok(limits::ASK_UNCLAIMED_MS);
+        }
+        Ok(self.meta(MetaKey::TestUnclaimedMs)?.and_then(|v| v.parse().ok()).unwrap_or(limits::ASK_UNCLAIMED_MS))
     }
 
     /// The agent members, in the order they joined (the first is the
@@ -425,7 +462,8 @@ impl FragmentCell {
     /// An agent left: its asks here close now, told as any change is.
     pub(crate) fn asks_let_go(&self, agent: &str) -> CellResult<()> {
         let agent = npub::display(agent);
-        let closed = self.rows("UPDATE asks SET until = ? WHERE agent = ? AND until IS NULL RETURNING seq", vec![SqlStorageValue::Integer(js::now_ms()), agent.as_str().into()])?;
+        let now = js::now_ms();
+        let closed = self.rows("UPDATE asks SET until = ? WHERE agent = ? AND (until IS NULL OR until > ?) RETURNING seq", vec![SqlStorageValue::Integer(now), agent.as_str().into(), SqlStorageValue::Integer(now)])?;
         if !closed.is_empty() {
             self.asks_changed(&agent, false)?;
         }
@@ -443,8 +481,11 @@ impl FragmentCell {
         match told {
             Ok(version) => {
                 let _ = self.exec("UPDATE asks_told SET told = MAX(told, ?), attempts = 0 WHERE agent = ?", vec![SqlStorageValue::Integer(version), agent.as_str().into()]);
+                // an ended turn's ask is kept `ENDED_KEPT_MS`; one never
+                // claimed, though it let go, until `TURN_HELD_MS`, so its
+                // claim, however late, opens it again with its words trimmed
                 let _ = self.exec(
-                    "DELETE FROM asks WHERE agent = ? AND ((until IS NOT NULL AND at < ?) OR at < ?)",
+                    "DELETE FROM asks WHERE agent = ? AND ((turn IS NOT NULL AND until IS NOT NULL AND at < ?) OR at < ?)",
                     vec![agent.as_str().into(), SqlStorageValue::Integer(js::now_ms() - ENDED_KEPT_MS), SqlStorageValue::Integer(js::now_ms() - limits::TURN_HELD_MS)],
                 );
             }

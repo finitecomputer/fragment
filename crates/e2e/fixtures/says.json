@@ -3,7 +3,7 @@
     "tell": {
       "kind": "mutation",
       "role": "viewer",
-      "input": { "type": "object", "required": ["text"], "additionalProperties": false, "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 1000 } } }
+      "input": { "type": "object", "additionalProperties": false, "properties": { "text": { "type": "string", "minLength": 1, "maxLength": 1000 }, "body": { "type": "object" } } }
     },
     "whoami": { "kind": "query", "role": "viewer" }
   },

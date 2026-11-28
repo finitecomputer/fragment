@@ -226,7 +226,9 @@ read back hands nothing. Its claim of a record there (its `turn.start`
 on `work`) opens that record's ask again, and the other agents' asks of
 it they never claimed close; its `turn.end` closes that
 turn's ask and each it never claimed, each held at least
-`TURN_HOLD_MS` from its words. Each change is a new version, and the
+`TURN_HOLD_MS` from its words. One it has not claimed within
+`ASK_UNCLAIMED_MS` of its hand-off (ten minutes) lets go, whatever its
+bridge did with the words, and its claim, later, opens it again. Each change is a new version, and the
 agent's fragment is told all its open asks there (one turn an asker,
 with the place's mandate for it; an agent's own words with none), an
 older version changing nothing. Someone else's ask reaches its agent
